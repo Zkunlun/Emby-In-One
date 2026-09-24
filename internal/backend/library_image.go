@@ -221,7 +221,7 @@ func (a *App) handleShowsEpisodes(w http.ResponseWriter, r *http.Request) {
 	for _, inst := range instances {
 		query := cloneValues(r.URL.Query())
 		query.Set("UserId", inst.Client.clientUserID())
-		if seasonID := query.Get("SeasonId"); seasonID != "" {
+		if seasonID := firstQueryValue(query, "SeasonId", "seasonId", "seasonid"); seasonID != "" {
 			if resolvedSeason := a.IDStore.ResolveVirtualID(seasonID); resolvedSeason != nil {
 				mapped := ""
 				if resolvedSeason.ServerID == inst.ServerID {
@@ -235,6 +235,8 @@ func (a *App) handleShowsEpisodes(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if mapped != "" {
+					query.Del("seasonId")
+					query.Del("seasonid")
 					query.Set("SeasonId", mapped)
 				} else {
 					continue
