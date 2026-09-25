@@ -18,6 +18,8 @@ func withTempApp(t *testing.T, fn func(app *App, handler http.Handler)) {
 
 func withTempAppConfig(t *testing.T, config string, fn func(app *App, handler http.Handler)) {
 	t.Helper()
+	previousIdentity := activeIdentityService()
+	t.Cleanup(func() { setActiveIdentityService(previousIdentity) })
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(config), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -45,6 +47,33 @@ func withTempAppConfig(t *testing.T, config string, fn func(app *App, handler ht
 	t.Cleanup(func() { _ = app.Close() })
 
 	fn(app, app.Handler())
+}
+
+func TestWithTempAppConfigRestoresActiveIdentity(t *testing.T) {
+	original := activeIdentityService()
+	t.Cleanup(func() { setActiveIdentityService(original) })
+
+	for _, tc := range []struct {
+		name     string
+		previous *ClientIdentityService
+	}{
+		{name: "previous nil"},
+		{name: "previous non-nil", previous: &ClientIdentityService{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setActiveIdentityService(tc.previous)
+			t.Run("temporary app", func(t *testing.T) {
+				withTempApp(t, func(app *App, _ http.Handler) {
+					if got := activeIdentityService(); got != app.Identity {
+						t.Errorf("active identity inside helper = %p, want app identity %p", got, app.Identity)
+					}
+				})
+			})
+			if got := activeIdentityService(); got != tc.previous {
+				t.Errorf("active identity after helper cleanup = %p, want previous %p", got, tc.previous)
+			}
+		})
+	}
 }
 
 func doJSONRequest(t *testing.T, handler http.Handler, method, target string, body any, token string) *httptest.ResponseRecorder {

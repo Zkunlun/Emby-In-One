@@ -130,24 +130,19 @@ func applyUserIDQuery(values url.Values, userID string) bool {
 	return changed
 }
 
-// stripAPIKeyVariants removes api_key/ApiKey in every spelling, whatever the case
-// and whether it came from params or from the base URL. The upstream token is
-// written by this same snapshot afterwards, so query token and identity can never
-// come from two different authentication states.
-func stripAPIKeyVariants(values url.Values) (bool, string) {
+// stripClientCredentialQueryVariants removes local client credentials from the
+// outbound query, including values supplied by the upstream base URL. Normal API
+// requests authenticate with headers; streams add the upstream api_key afterwards.
+func stripClientCredentialQueryVariants(values url.Values) bool {
 	changed := false
-	token := ""
 	for key := range values {
 		switch strings.ToLower(key) {
-		case "api_key", "apikey":
-			if !changed && len(values[key]) > 0 {
-				token = values[key][0]
-			}
+		case "api_key", "apikey", "x-emby-token":
 			changed = true
 			values.Del(key)
 		}
 	}
-	return changed, token
+	return changed
 }
 
 // urlPathPrefix separates the request path from the upstream base URL's own path
@@ -196,10 +191,10 @@ func prepareOutboundURLWithReport(
 
 	query := final.Query()
 
-	// api_key handling comes first: a local token must never reach the upstream as
-	// an authentication parameter.
+	// Local credential handling comes first: a client token must never reach the
+	// upstream as a query authentication parameter.
 	if policy.stripAPIKey {
-		if changed, _ := stripAPIKeyVariants(query); changed {
+		if stripClientCredentialQueryVariants(query) {
 			result.changed = append(result.changed, carrierQuery)
 		}
 		// Stream requests authenticate through the query string. Everything else

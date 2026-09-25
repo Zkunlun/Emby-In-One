@@ -187,6 +187,70 @@ func TestOutboundIdentityApiKeyHandling(t *testing.T) {
 	}
 }
 
+func TestOutboundIdentityLocalTokenQuerySanitization(t *testing.T) {
+	auth := fixtureAuthSnapshot()
+	reqCtx := fixtureRequestContext(fixtureAliceID)
+	for _, tc := range []struct {
+		name   string
+		stream bool
+	}{
+		{name: "normal API"},
+		{name: "stream", stream: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := "/Users/" + fixtureAliceID + "/Items"
+			policy := testPolicy(path, http.MethodGet, authModeNormal)
+			if tc.stream {
+				path = "/Videos/item-a/stream"
+				policy = testStreamPolicy(path, http.MethodGet, authModeNormal)
+			}
+			rawURL := "http://up.test" + path + "?api_key=" + fixtureAliceToken + "&ApiKey=" + fixtureAliceToken + "&X-Emby-Token=" + fixtureAliceToken + "&X-EMBY-TOKEN=" + fixtureAliceToken + "&Limit=20"
+			params := url.Values{"apikey": {fixtureAliceToken}, "x-emby-token": {fixtureAliceToken}, "SearchTerm": {"movie"}}
+			finalURL, changed, err := prepareURLForTest(t, rawURL, params, reqCtx, auth, policy)
+			if err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			query := mustParseURL(t, finalURL).Query()
+			for key := range query {
+				if strings.EqualFold(key, "X-Emby-Token") || strings.EqualFold(key, "apikey") || (strings.EqualFold(key, "api_key") && key != "api_key") {
+					t.Errorf("local credential variant %q survived", key)
+				}
+			}
+			if strings.Contains(finalURL, fixtureAliceToken) {
+				t.Errorf("local token survived in URL")
+			}
+			if query.Get("Limit") != "20" || query.Get("SearchTerm") != "movie" {
+				t.Errorf("ordinary query values changed: %v", query)
+			}
+			if tc.stream {
+				if got := query["api_key"]; len(got) != 1 || got[0] != fixtureTargetToken {
+					t.Errorf("stream api_key = %v, want one upstream token", got)
+				}
+			} else if strings.Contains(finalURL, fixtureTargetToken) || len(query["api_key"]) != 0 {
+				t.Errorf("normal API URL contains upstream credential")
+			}
+			if !strings.Contains(outboundChangeSummary(changed), carrierQuery) {
+				t.Errorf("query change was not reported: %v", changed)
+			}
+		})
+	}
+	t.Run("token-only deletion reports query change", func(t *testing.T) {
+		path := "/Users/" + fixtureAliceID + "/Items"
+		finalURL, changed, err := prepareURLForTest(t,
+			"http://up.test"+path+"?X-EMBY-TOKEN="+fixtureAliceToken+"&Limit=20",
+			nil, reqCtx, auth, testPolicy(path, http.MethodGet, authModeNormal))
+		if err != nil {
+			t.Fatalf("prepare: %v", err)
+		}
+		if strings.Contains(finalURL, fixtureAliceToken) || mustParseURL(t, finalURL).Query().Get("Limit") != "20" {
+			t.Errorf("token-only query sanitation failed: %s", finalURL)
+		}
+		if !strings.Contains(outboundChangeSummary(changed), carrierQuery) {
+			t.Errorf("token-only query change was not reported: %v", changed)
+		}
+	})
+}
+
 // apiKeyValues returns every api_key value in a prepared URL, whatever its case.
 func apiKeyValues(rawURL string) []string {
 	parsed, err := url.Parse(rawURL)
