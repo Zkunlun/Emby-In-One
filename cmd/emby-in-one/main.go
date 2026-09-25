@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -84,22 +84,21 @@ func runResetPassword(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// ensureServiceStopped refuses to touch the token file while a server instance is running.
-// A live instance holds the tokens in memory and writes the whole file back on its next
-// login or logout, which would restore every token this command just cleared. The probe
-// asks the configured port; anything that answers means the operator should stop the
-// service first.
+// ensureServiceStopped refuses to touch the token file while the configured service port
+// is accepting TCP connections. A live instance holds the tokens in memory and writes the
+// whole file back on its next login or logout, which would restore every token this command
+// just cleared. Treat any successful TCP connection to the configured port as active; this
+// avoids misclassifying HTTP/protocol errors as proof that the service is stopped.
 func ensureServiceStopped(cfg backend.Config, force bool) error {
 	if force {
 		return nil
 	}
 	address := "127.0.0.1:" + strconv.Itoa(cfg.Server.Port)
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get("http://" + address + "/System/Info/Public")
+	conn, err := net.DialTimeout("tcp", address, 2*time.Second)
 	if err != nil {
-		return nil // nothing listening on the configured port
+		return nil // nothing accepting TCP connections on the configured port
 	}
-	_ = resp.Body.Close()
+	_ = conn.Close()
 	return fmt.Errorf("emby-in-one is still running on %s; stop it first (systemctl stop emby-in-one) or pass --force", address)
 }
 

@@ -122,7 +122,6 @@ func TestResetPasswordRefusesWhileServerIsRunning(t *testing.T) {
 			if err != nil {
 				return
 			}
-			_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"))
 			_ = conn.Close()
 		}
 	}()
@@ -132,7 +131,7 @@ func TestResetPasswordRefusesWhileServerIsRunning(t *testing.T) {
 
 	output, err := runCLI(t, dir, "", "--reset-password", "NewPass123")
 	if err == nil {
-		t.Fatalf("reset-password should refuse while the server answers on port %d; output=%s", port, output)
+		t.Fatalf("reset-password should refuse while the configured port is accepting connections on %d; output=%s", port, output)
 	}
 	if !strings.Contains(output, "still running") {
 		t.Fatalf("failure should say the server is still running: %s", output)
