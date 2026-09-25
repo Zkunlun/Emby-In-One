@@ -379,7 +379,7 @@ func TestPlaybackInfoSubtitleDeliveryURLDoesNotCorruptNestedMediaSourceID(t *tes
 						"Codec":          "srt",
 						"IsExternal":     true,
 						"DeliveryMethod": "External",
-						"DeliveryUrl":    "/Videos/" + originalItemID + "/" + originalMSID + "/Subtitles/2/0/Stream.srt?api_key=upstream-token&tag=1",
+						"DeliveryUrl":    "https://cdn.example.test/Videos/" + originalItemID + "/" + originalMSID + "/Subtitles/2/0/Stream.srt?api_key=upstream-token&tag=1",
 					}},
 				}},
 			})
@@ -434,6 +434,9 @@ func TestPlaybackInfoSubtitleDeliveryURLDoesNotCorruptNestedMediaSourceID(t *tes
 		parsed, err := url.Parse(deliveryURL)
 		if err != nil {
 			t.Fatalf("parse delivery url %q: %v", deliveryURL, err)
+		}
+		if parsed.Scheme != "" || parsed.Host != "" {
+			t.Fatalf("subtitle delivery url still points outside EIO: %q", deliveryURL)
 		}
 		wantDeliveryPath := "/Videos/" + virtualItemID + "/" + virtualMSID + "/Subtitles/2/0/Stream.srt"
 		if parsed.Path != wantDeliveryPath {

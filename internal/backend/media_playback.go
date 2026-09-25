@@ -166,6 +166,13 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 									queryValues.Set("api_key", reqCtx.ProxyToken)
 								}
 								parsed.RawQuery = queryValues.Encode()
+								// DeliveryUrl must resolve back through EIO. Some upstreams return an
+								// absolute CDN URL; keeping that authority while replacing its token with
+								// EIO's token makes clients bypass EIO and fail authentication upstream.
+								parsed.Scheme = ""
+								parsed.Host = ""
+								parsed.User = nil
+								parsed.Opaque = ""
 								deliveryURL = parsed.String()
 							}
 							stream["DeliveryUrl"] = deliveryURL
