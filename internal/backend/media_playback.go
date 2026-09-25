@@ -93,6 +93,13 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 				virtualMSID = a.IDStore.GetOrCreateVirtualID(originalMSID, inst.ServerID)
 				mediaSource["Id"] = virtualMSID
 			}
+			// MediaSource.ItemId refers to the item whose PlaybackInfo was requested. Keep it
+			// on the same virtual item identity exposed to the client; leaving the upstream
+			// ItemId here makes clients that construct external-subtitle URLs from this field
+			// address an ID EIO cannot resolve.
+			if itemID, ok := mediaSource["ItemId"].(string); ok && itemID != "" {
+				mediaSource["ItemId"] = r.PathValue("itemId")
+			}
 			if directURL, ok := mediaSource["DirectStreamUrl"].(string); ok && directURL != "" {
 				// Extract container from URL, stripping query string first
 				// Node.js uses regex /\.([a-z0-9]+)(?:\?|$)/i — path.Ext doesn't stop at '?'

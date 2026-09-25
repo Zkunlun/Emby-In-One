@@ -371,6 +371,7 @@ func TestPlaybackInfoSubtitleDeliveryURLDoesNotCorruptNestedMediaSourceID(t *tes
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"MediaSources": []map[string]any{{
 					"Id":       originalMSID,
+					"ItemId":   originalItemID,
 					"Protocol": "Http",
 					"Path":     "/Videos/" + originalItemID + "/" + originalMSID + "/stream.mkv",
 					"MediaStreams": []map[string]any{{
@@ -416,6 +417,9 @@ func TestPlaybackInfoSubtitleDeliveryURLDoesNotCorruptNestedMediaSourceID(t *tes
 		if virtualMSID == "" || virtualMSID == originalMSID {
 			t.Fatalf("expected virtual media source id, got %q", virtualMSID)
 		}
+		if gotItemID, _ := mediaSource["ItemId"].(string); gotItemID != virtualItemID {
+			t.Fatalf("media source ItemId = %q, want request virtual item %q", gotItemID, virtualItemID)
+		}
 
 		if gotPath, _ := mediaSource["Path"].(string); gotPath != "/Videos/"+virtualItemID+"/"+virtualMSID+"/stream.mkv" {
 			t.Fatalf("media source path = %q, want exact virtual path segments", gotPath)
@@ -450,6 +454,17 @@ func TestPlaybackInfoSubtitleDeliveryURLDoesNotCorruptNestedMediaSourceID(t *tes
 		handler.ServeHTTP(rr, subtitleReq)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("subtitle request status = %d, body=%s", rr.Code, rr.Body.String())
+		}
+
+		// Some clients can derive the external-subtitle endpoint from MediaSource.ItemId and
+		// MediaSource.Id when DeliveryUrl is absent. That client-facing construction
+		// must resolve through EIO as well.
+		clientItemID, _ := mediaSource["ItemId"].(string)
+		derivedSubtitleURL := "/Videos/" + clientItemID + "/" + virtualMSID + "/Subtitles/2/0/Stream.srt?api_key=" + token
+		derivedRR := httptest.NewRecorder()
+		handler.ServeHTTP(derivedRR, httptest.NewRequest(http.MethodGet, derivedSubtitleURL, nil))
+		if derivedRR.Code != http.StatusOK {
+			t.Fatalf("ItemId-derived subtitle request status = %d, body=%s", derivedRR.Code, derivedRR.Body.String())
 		}
 		if subtitlePath != "/Videos/"+originalItemID+"/"+originalMSID+"/Subtitles/2/0/Stream.srt" {
 			t.Fatalf("upstream subtitle path = %q", subtitlePath)
