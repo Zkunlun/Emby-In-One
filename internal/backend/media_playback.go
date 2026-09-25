@@ -138,24 +138,19 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 					mediaSource["TranscodingUrl"] = proxyPath + "?" + queryValues.Encode()
 				}
 			}
-			// Rewrite MediaSource.Path for Http protocol and MediaStreams[].DeliveryUrl
+			// Rewrite HTTP paths by exact path segment. MediaSource IDs can contain the
+			// item ID (for example mediasource_15511), so whole-string replacement can
+			// corrupt the MediaSource segment before it is virtualised.
 			if protocol, _ := mediaSource["Protocol"].(string); protocol == "Http" {
 				if msPath, ok := mediaSource["Path"].(string); ok && msPath != "" {
-					msPath = strings.ReplaceAll(msPath, inst.OriginalID, r.PathValue("itemId"))
-					if originalMSID != "" && originalMSID != inst.OriginalID {
-						msPath = strings.ReplaceAll(msPath, originalMSID, virtualMSID)
-					}
-					mediaSource["Path"] = msPath
+					mediaSource["Path"] = rewriteMediaPathIDs(msPath, inst.OriginalID, r.PathValue("itemId"), originalMSID, virtualMSID)
 				}
 			}
 			if rawStreams, ok := mediaSource["MediaStreams"].([]any); ok {
 				for _, rawStream := range rawStreams {
 					if stream, ok := rawStream.(map[string]any); ok {
 						if deliveryURL, ok := stream["DeliveryUrl"].(string); ok && deliveryURL != "" {
-							deliveryURL = strings.ReplaceAll(deliveryURL, inst.OriginalID, r.PathValue("itemId"))
-							if originalMSID != "" && originalMSID != inst.OriginalID {
-								deliveryURL = strings.ReplaceAll(deliveryURL, originalMSID, virtualMSID)
-							}
+							deliveryURL = rewriteMediaPathIDs(deliveryURL, inst.OriginalID, r.PathValue("itemId"), originalMSID, virtualMSID)
 							if parsed, err := url.Parse(deliveryURL); err == nil {
 								queryValues := parsed.Query()
 								queryValues.Del("api_key")
@@ -213,6 +208,35 @@ func deepCloneMap(source map[string]any) map[string]any {
 	var decoded map[string]any
 	_ = json.Unmarshal(encoded, &decoded)
 	return decoded
+}
+
+// rewriteMediaPathIDs virtualises item and media-source IDs only when they are
+// complete URL path segments. This avoids substring collisions such as item
+// "15511" inside media source "mediasource_15511" while preserving query data.
+func rewriteMediaPathIDs(raw, originalItemID, virtualItemID, originalMSID, virtualMSID string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+
+	segments := strings.Split(parsed.Path, "/")
+	changed := false
+	for i, segment := range segments {
+		switch {
+		case originalMSID != "" && virtualMSID != "" && segment == originalMSID:
+			segments[i] = virtualMSID
+			changed = true
+		case originalItemID != "" && virtualItemID != "" && segment == originalItemID:
+			segments[i] = virtualItemID
+			changed = true
+		}
+	}
+	if !changed {
+		return raw
+	}
+	parsed.Path = strings.Join(segments, "/")
+	parsed.RawPath = ""
+	return parsed.String()
 }
 
 // resolveMediaSourceInPath resolves a virtual MediaSourceId embedded as the first path

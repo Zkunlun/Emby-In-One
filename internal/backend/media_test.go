@@ -352,3 +352,110 @@ func TestPlaybackInfoRewritesSubtitleDeliveryURLForASSTracks(t *testing.T) {
 		}
 	})
 }
+
+func TestPlaybackInfoSubtitleDeliveryURLDoesNotCorruptNestedMediaSourceID(t *testing.T) {
+	const (
+		originalItemID = "15511"
+		originalMSID   = "mediasource_15511"
+	)
+
+	var subtitlePath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"AccessToken": "upstream-token",
+				"User":        map[string]any{"Id": "user-a"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items/"+originalItemID+"/PlaybackInfo":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"MediaSources": []map[string]any{{
+					"Id":       originalMSID,
+					"Protocol": "Http",
+					"Path":     "/Videos/" + originalItemID + "/" + originalMSID + "/stream.mkv",
+					"MediaStreams": []map[string]any{{
+						"Type":           "Subtitle",
+						"Codec":          "srt",
+						"IsExternal":     true,
+						"DeliveryMethod": "External",
+						"DeliveryUrl":    "/Videos/" + originalItemID + "/" + originalMSID + "/Subtitles/2/0/Stream.srt?api_key=upstream-token&tag=1",
+					}},
+				}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/Videos/"+originalItemID+"/"+originalMSID+"/Subtitles/2/0/Stream.srt":
+			subtitlePath = r.URL.Path
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("1\n00:00:00,000 --> 00:00:01,000\nsubtitle\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	config := fmt.Sprintf("server:\n  port: 8096\n  name: \"Test Server\"\n  id: \"server-1\"\n\nadmin:\n  username: \"admin\"\n  password: \"secret\"\n\nplayback:\n  mode: \"proxy\"\n\ntimeouts:\n  api: 30000\n  global: 15000\n  login: 10000\n  healthCheck: 10000\n  healthInterval: 60000\n\nproxies: []\nupstream:\n  - name: \"A\"\n    url: %q\n    username: \"u1\"\n    password: \"p1\"\n", upstream.URL)
+
+	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		token := loginToken(t, handler, "secret")
+		virtualItemID := app.IDStore.GetOrCreateVirtualID(originalItemID, app.Upstream.Clients()[0].ID)
+
+		playbackRR := doJSONRequest(t, handler, http.MethodGet, "/Items/"+virtualItemID+"/PlaybackInfo", nil, token)
+		if playbackRR.Code != http.StatusOK {
+			t.Fatalf("playback info status = %d, body=%s", playbackRR.Code, playbackRR.Body.String())
+		}
+
+		var payload map[string]any
+		if err := json.Unmarshal(playbackRR.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("unmarshal playback info: %v", err)
+		}
+		mediaSources, _ := payload["MediaSources"].([]any)
+		if len(mediaSources) != 1 {
+			t.Fatalf("media source count = %d payload=%#v", len(mediaSources), payload)
+		}
+		mediaSource := mediaSources[0].(map[string]any)
+		virtualMSID, _ := mediaSource["Id"].(string)
+		if virtualMSID == "" || virtualMSID == originalMSID {
+			t.Fatalf("expected virtual media source id, got %q", virtualMSID)
+		}
+
+		if gotPath, _ := mediaSource["Path"].(string); gotPath != "/Videos/"+virtualItemID+"/"+virtualMSID+"/stream.mkv" {
+			t.Fatalf("media source path = %q, want exact virtual path segments", gotPath)
+		}
+
+		streams, _ := mediaSource["MediaStreams"].([]any)
+		if len(streams) != 1 {
+			t.Fatalf("subtitle stream count = %d payload=%#v", len(streams), mediaSource)
+		}
+		stream := streams[0].(map[string]any)
+		deliveryURL, _ := stream["DeliveryUrl"].(string)
+		parsed, err := url.Parse(deliveryURL)
+		if err != nil {
+			t.Fatalf("parse delivery url %q: %v", deliveryURL, err)
+		}
+		wantDeliveryPath := "/Videos/" + virtualItemID + "/" + virtualMSID + "/Subtitles/2/0/Stream.srt"
+		if parsed.Path != wantDeliveryPath {
+			t.Fatalf("subtitle delivery path = %q, want %q", parsed.Path, wantDeliveryPath)
+		}
+		if parsed.Query().Get("api_key") != token {
+			t.Fatalf("subtitle delivery api_key = %q, want proxy token", parsed.Query().Get("api_key"))
+		}
+		if parsed.Query().Get("tag") != "1" {
+			t.Fatalf("subtitle delivery tag = %q, want 1", parsed.Query().Get("tag"))
+		}
+		if strings.Contains(deliveryURL, "upstream-token") {
+			t.Fatalf("subtitle delivery url still exposes upstream token: %q", deliveryURL)
+		}
+
+		subtitleReq := httptest.NewRequest(http.MethodGet, deliveryURL, nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, subtitleReq)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("subtitle request status = %d, body=%s", rr.Code, rr.Body.String())
+		}
+		if subtitlePath != "/Videos/"+originalItemID+"/"+originalMSID+"/Subtitles/2/0/Stream.srt" {
+			t.Fatalf("upstream subtitle path = %q", subtitlePath)
+		}
+		if !strings.Contains(rr.Body.String(), "subtitle") {
+			t.Fatalf("subtitle body = %q", rr.Body.String())
+		}
+	})
+}
