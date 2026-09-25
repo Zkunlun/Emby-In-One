@@ -2,7 +2,7 @@
 
 ## V1.4.4
 
-发布日期：2026-09-18（V1.4.4-rc1 预发布；正式版日期待定）
+发布日期：2026-09-26（V1.4.4 正式版）
 
 > V1.4.4 为 V1.4.3 的累积更新，汇总一次全项目审查的修复产出（15 项）与后续跟进项：**上游服务解耦数组下标全面采用持久化唯一 `server_id`**、内容访问控制与 SSRF 加固、普通用户本地观看状态筛选落地、无 `ParentId` 聚合列表的分页缺陷修复、虚拟用户 ID 透传缺陷修复、仓库行尾统一，以及管理面板前端依赖自托管与 CSP 收紧；rc1 预发布期间继续并入：**多推流线路（主线路 + 备用线路）**、**每用户首页库隐藏**，以及安装脚本与 SSH 菜单在非 root 服务下的两处致命问题修复。**管理面板的资源加载方式、安全策略与普通用户的响应身份有变化，升级前请先读「升级须知」。**
 
@@ -15,6 +15,15 @@
 - **四个筛选项对普通用户仍是上游语义**，见「已知限制」。
 - **代理模式 HLS 清单重写行为修复**：此前 Go 版把 HLS 清单里的分片 URL 重写为**上游主机的绝对地址**（携带虚拟 ID 与代理 token，客户端实际无法使用，HLS 转码播放会失败）。现恢复为**代理相对路径**——分片请求回到本代理，与 Node 版 V1.2 的既定行为一致。已配置反向代理 / 公网域名的部署无需任何改动。
 - **推流线路旧配置无需迁移**：旧配置里的单条 `streamingUrl` 键继续有效，保存时自动并入新的有序列表。
+
+### 正式版收尾修复（2026-09-26）
+
+- **剧集列表兼容性**：`/Shows/{seriesId}/Episodes` 同时接受 `SeasonId` / `seasonId` / `seasonid`，并统一转换为上游标准参数，修复部分客户端进入剧集详情后不显示分集的问题。
+- **本地代理 Token 查询参数清理**：所有普通 API 出站请求会大小写不敏感地剥离 `api_key` / `apikey` / `x-emby-token` 等本地凭据，避免 EIO Token 被误送到上游并触发 401/403/502。
+- **已播放 / 未播放状态兼容**：补齐 `/Users/{userId}/PlayedItems/{itemId}` 的 POST / DELETE 以及 `/Delete` 兼容路由，按“上游成功后再写本地 WatchStore”的顺序更新观看状态，修复客户端标记已播放或未播放失败的问题。
+- **外挂字幕 URL 虚拟化修复**：字幕 `DeliveryUrl` 改为按完整 URL path segment 精确替换 item / MediaSource ID，避免嵌套 ID 被字符串全局替换污染；同时将 `MediaSource.ItemId` 统一为 EIO 虚拟 ID。
+- **外挂字幕必须回流 EIO**：当上游返回带 CDN / 上游域名的绝对 `DeliveryUrl` 时，EIO 会移除其 scheme / host / userinfo，只保留已虚拟化的相对路径与 EIO Token，防止严格遵循 `DeliveryUrl` 的客户端绕过 EIO 后鉴权失败。Hills 与 Vivid 已在真实实例完成字幕加载与切换双客户端验收。
+- **管理员密码重置的运行中服务检测加固**：`--reset-password` 不再依赖 `/System/Info/Public` 的 HTTP 响应来判断服务是否仍在运行，而是直接探测配置端口的 TCP 监听状态；只要该端口可建立连接就拒绝重置，避免 HTTP / 协议层错误被误判为“服务已停止”。`--force` 的显式绕过行为保持不变。
 
 ### 安全增强
 
@@ -225,7 +234,7 @@ object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'
 ### 修复：安装脚本与 SSH 菜单在三处场景下的致命问题
 
 - **全新安装失败（`无法创建专用运行用户 eio` 后回滚）**：安装脚本先用 `groupadd` 建了同名组，随后 `useradd` 未带 `-g`，其默认行为是再建一个同名用户组，撞上已存在的组即失败（真实报错 `group eio exists - if you want to add this user to that group, use -g.` 被 `2>/dev/null` 吞掉，只显示笼统的"无法创建"）。现组已存在时显式传 `-g`，组不存在时仍由 `useradd` 自建
-- **无版本参数一键安装卡在旧稳定版的校验环节**：V1.4.4 正式版发布前，不指定版本的安装会经 `releases/latest` 解析到 V1.4.3，而 `.sha256` 校验和产物自 V1.4.4-rc1 起才随 Release 发布——旧版 Release 无校验和可校验。现对 V1.4.3 及以下版本默认跳过完整性校验（输出一条明确警告），保证一键安装可用；V1.4.4-rc1 及以上版本仍强制校验
+- **无版本参数一键安装卡在旧稳定版的校验环节**：V1.4.4-rc1 测试期间，不指定版本的安装会经 `releases/latest` 解析到 V1.4.3，而 `.sha256` 校验和产物自 V1.4.4-rc1 起才随 Release 发布——旧版 Release 无校验和可校验。现对 V1.4.3 及以下版本默认跳过完整性校验（输出一条明确警告）；V1.4.4 及后续版本均走 Release 校验和验证。
 - **SSH 菜单改密码/改账号后服务崩溃循环（`open config/config.yaml: permission denied`）**：菜单以 root 运行，而服务以专用用户 `eio`（binary 部署）或 uid 1000（Docker 部署）运行。选项 8（改密码）经内置 `--reset-password` 重写 `config.yaml` 与 `tokens.json`、选项 9（改账号）经 `awk+mv` 重写 `config.yaml`，root 重写后文件属主变为 root，服务重启即因读权限被拒而崩溃循环。两层修复：
   - **二进制层（治本）**：`WriteFileAtomic` 以 root 运行时在 rename 前把原文件的 uid/gid 转移到临时文件，原子写不再改变属主——覆盖 `--reset-password` 与运行期全部落盘路径
   - **菜单脚本层（兼容已部署的旧版二进制）**：新增 `restore_ownership`，选项 8/9 与在线更新写入后按 systemd unit 的 `User=`（无 systemd 时退回目录属主）还原属主；Docker 模式还原为 `1000:1000`

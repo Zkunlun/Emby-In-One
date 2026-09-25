@@ -2,7 +2,7 @@
 
 > **Version: V1.2.1**
 
-[中文文档](README.md) | [Changelog](Update.md) | [Update Plan](Update%20Plan.md) | [GitHub](https://github.com/ArizeSky/Emby-In-One)
+[中文文档](README.md) | [Changelog](Update.md) | [Update Plan](Update%20Plan.md) | [GitHub](https://github.com/Zkunlun/Emby-In-One)
 
 Multi-server Emby aggregation proxy — merges libraries from multiple upstream Emby servers into a single endpoint accessible by any standard Emby client.
 
@@ -11,7 +11,7 @@ Multi-server Emby aggregation proxy — merges libraries from multiple upstream 
 [Demo Site](https://emby.cothx.eu.cc/)
 Emby server address: https://emby.cothx.eu.cc/
 
-> **Demo credentials are no longer published in this repository.** For security reasons, no plaintext account or password is provided here. To try the demo, contact the maintainer via GitHub [Issues](https://github.com/ArizeSky/Emby-In-One/issues) for a **periodically rotated** temporary account.
+> **Demo credentials are no longer published in this repository.** For security reasons, no plaintext account or password is provided here. To try the demo, contact the maintainer via GitHub [Issues](https://github.com/Zkunlun/Emby-In-One/issues) for a **periodically rotated** temporary account.
 
 ## Preview
 
@@ -66,7 +66,7 @@ Emby server address: https://emby.cothx.eu.cc/
 ### Option 1: One-Line Install Script (Recommended for Linux Servers)
 
 ```bash
-git clone https://github.com/ArizeSky/Emby-In-One.git
+git clone https://github.com/Zkunlun/Emby-In-One.git
 cd Emby-In-One
 bash install.sh
 ```

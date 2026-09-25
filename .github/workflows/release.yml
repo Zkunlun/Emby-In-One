@@ -24,14 +24,14 @@ concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
-# 本工作流只在 GitHub 的 ArizeSky/Emby-In-One 上执行：
+# 本工作流只在 GitHub 的 Zkunlun/Emby-In-One 上执行：
 # 仓库会镜像到 Gitea（MineNine/Emby-In-One），若 Gitea Actions 已启用，
 # 同步过去的 V 开头 tag 也会触发本文件——两个 job 的 if 守卫会让它
 # 在 Gitea 上直接跳过，发布只在 GitHub 进行。
 jobs:
   build:
     name: Build release assets
-    if: github.repository == 'ArizeSky/Emby-In-One'
+    if: github.repository == 'Zkunlun/Emby-In-One'
     runs-on: ubuntu-latest
     # 与 Dockerfile 的 builder 阶段同一基础镜像：发布二进制与 Docker 自建产物
     # 出自同一套 Go / 工具链。SQLite 是 vendored cgo，交叉编译依赖各目标的
@@ -226,7 +226,7 @@ jobs:
 
   publish:
     name: Create GitHub release
-    if: github.repository == 'ArizeSky/Emby-In-One'
+    if: github.repository == 'Zkunlun/Emby-In-One'
     needs: build
     runs-on: ubuntu-latest
     steps:

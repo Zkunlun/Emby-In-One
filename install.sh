@@ -10,7 +10,7 @@ set -o pipefail
 
 PROJECT_DIR="/opt/emby-in-one"
 # 远程安装时使用的 tarball 地址
-REPO_URL="https://github.com/ArizeSky/Emby-In-One/archive/refs/heads/main.tar.gz"
+REPO_URL="https://github.com/Zkunlun/Emby-In-One/archive/refs/heads/main.tar.gz"
 
 # ── 颜色 ──
 RED='\033[0;31m'
@@ -219,7 +219,7 @@ services:
     build:
       context: .
       args:
-        VERSION: v1.4.4-rc1
+        VERSION: v1.4.4
     container_name: emby-in-one
     # 容器以 uid 1000 运行，挂载目录需先 chown 1000:1000（install.sh 已处理）
     user: "1000:1000"

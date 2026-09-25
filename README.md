@@ -1,15 +1,15 @@
 # Emby-In-One
 
-> **Version: V1.4.4-rc1 (Pre-release)**
+> **Version: V1.4.4**
 
-[![License: GPL v3](https://img.shields.io/github/license/ArizeSky/Emby-In-One?color=blue)](LICENSE)
+[![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-20.10+-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![GitHub Release](https://img.shields.io/github/v/release/ArizeSky/Emby-In-One?color=green)](https://github.com/ArizeSky/Emby-In-One/releases)
-[![GitHub Stars](https://img.shields.io/github/stars/ArizeSky/Emby-In-One?style=social)](https://github.com/ArizeSky/Emby-In-One)
+[![GitHub Release](https://img.shields.io/github/v/release/Zkunlun/Emby-In-One?color=green)](https://github.com/Zkunlun/Emby-In-One/releases)
+[![GitHub Stars](https://img.shields.io/github/stars/Zkunlun/Emby-In-One?style=social)](https://github.com/Zkunlun/Emby-In-One)
 
-[更新日志](Update.md) | [English README](README_EN.md) | [安全策略](SECURITY.md) | [更新计划](Update%20Plan.md) | [V1.2.1 旧版文档](README_V1.2.1.md) | [GitHub](https://github.com/ArizeSky/Emby-In-One)
+[更新日志](Update.md) | [English README](README_EN.md) | [安全策略](SECURITY.md) | [更新计划](Update%20Plan.md) | [V1.2.1 旧版文档](README_V1.2.1.md) | [GitHub](https://github.com/Zkunlun/Emby-In-One)
 
 基于Go语言实现的多台 Emby 服务器聚合代理，将多个上游 Emby 服务器的媒体库合并为一个统一入口，支持任何标准 Emby 客户端访问。支持多用户管理、独立观看历史、UA伪装、并发播放数限制和角色权限隔离。
 
@@ -41,7 +41,7 @@
 [演示站点](https://emby.cothx.eu.cc/)
 Emby 连接地址：https://emby.cothx.eu.cc/
 
-> **演示站账号不再随仓库公开。** 出于安全考虑，本仓库不提供明文账号与密码；如需体验，请通过 GitHub [Issues](https://github.com/ArizeSky/Emby-In-One/issues) 联系维护者获取**定期轮换**的临时账号。请勿在公开渠道传播演示站凭据。
+> **演示站账号不再随仓库公开。** 出于安全考虑，本仓库不提供明文账号与密码；如需体验，请通过 GitHub [Issues](https://github.com/Zkunlun/Emby-In-One/issues) 联系维护者获取**定期轮换**的临时账号。请勿在公开渠道传播演示站凭据。
 
 ## 预览
 
@@ -74,21 +74,21 @@ Emby 连接地址：https://emby.cothx.eu.cc/
 
 ## 快速安装
 
-> **旧版 Node.js 部署说明**：如果您希望部署基于 Node.js 的 V1.2.1 稳定版，请前往本仓库的 [Releases 页面](https://github.com/ArizeSky/Emby-In-One/releases) 下载 V1.2.1 的 Source code 源码压缩包，解压后同样运行 `bash install.sh` 即可。 仓库中的 `legacy/` 目录保留了 V1.2.1 的 Node.js 源码，**仅供对照参考**（Go 版的 ID 虚拟化以它为蓝本），它不参与 Go 版的构建、镜像或安装流程，详见 `legacy/README.md`。
+> **旧版 Node.js 部署说明**：如果您希望部署基于 Node.js 的 V1.2.1 稳定版，请前往原项目的 [Releases 页面](https://github.com/ArizeSky/Emby-In-One/releases) 下载 V1.2.1 的 Source code 源码压缩包，解压后同样运行 `bash install.sh` 即可。 仓库中的 `legacy/` 目录保留了 V1.2.1 的 Node.js 源码，**仅供对照参考**（Go 版的 ID 虚拟化以它为蓝本），它不参与 Go 版的构建、镜像或安装流程，详见 `legacy/README.md`。
 
-本项目优先推荐在 Linux 服务器直接使用 Release 二进制部署 V1.4.4-rc1（无需本地编译；预发布测试版，正式版发布前供尝鲜验证）；Docker 方式适合希望自行构建镜像的场景。
+本项目优先推荐在 Linux 服务器直接使用 Release 二进制部署 V1.4.4（无需本地编译）；Docker 方式适合希望自行构建镜像的场景。
 
 ### 方式一：Release 二进制一键安装（首推）
 
 ```bash
-curl -fsSL -o release-install.sh https://raw.githubusercontent.com/ArizeSky/Emby-In-One/main/release-install.sh
+curl -fsSL -o release-install.sh https://raw.githubusercontent.com/Zkunlun/Emby-In-One/main/release-install.sh
 sudo bash release-install.sh
 ```
 
 可选：指定版本安装。
 
 ```bash
-sudo bash release-install.sh V1.4.4-rc1
+sudo bash release-install.sh V1.4.4
 ```
 
 该脚本会自动完成：
@@ -101,7 +101,7 @@ sudo bash release-install.sh V1.4.4-rc1
 ### 方式二：源码仓库一键安装脚本（推荐开发者/希望本地构建镜像）
 
 ```bash
-git clone https://github.com/ArizeSky/Emby-In-One.git
+git clone https://github.com/Zkunlun/Emby-In-One.git
 cd Emby-In-One
 bash install.sh
 ```
@@ -781,32 +781,27 @@ Emby-In-One/
 
 ## 维护与开发工作流
 
-本项目当前处于维护与重构阶段，以修复现有问题、保持 Emby 客户端兼容和提升稳定性为目标，暂不开发新功能。
+本项目当前处于维护与重构阶段，以修复现有问题、保持 Emby 客户端兼容和提升稳定性为目标；新增功能在独立版本中排期，不与修复批次混合。
 
-### 职责分工
+### 工作方式
 
-- 网页端 GPT 负责代码审计、问题分析、方案与任务规划，以及审阅和验收执行结果。
-- Codex 负责检查本地仓库、按任务提示词调查与修改、执行测试，并输出详细执行报告。
-
-### 协作原则
-
-- 网页端 GPT 与 Codex 不共享对话记忆。每次任务提示词应完整说明背景、修改范围、测试要求和验收标准；Codex 按该提示词执行。
-- 已推送到 GitHub 的仓库状态是项目远端基线和已落盘变更的最终事实来源；尚未提交或尚未推送的本地变更，须通过 Codex 提供的 HEAD、Git 状态、diff 和执行报告同步给网页端 GPT。
-- Codex 不得擅自扩大修改范围；与当前任务无关的问题只在报告中记录，不顺手修改。
-- 除非当前任务提示词明确授权，Codex 不得自行 commit、push、merge、rebase、force push、删除分支，或执行其他会改变 Git 历史或远端状态的操作。
+- 维护任务由 ChatGPT 对话统一规划并执行，通过已授权的 WebCodex / WebCodex-VPS MCP 直接检查源码、修改文件、运行测试以及完成实例验证。
+- GitHub 仓库是远端基线与已发布状态的最终事实来源；本地未提交改动必须通过 Git 状态、diff 与测试结果完成审计后再进入发布流程。
+- 与当前任务无关的问题单独记录，不在修复过程中顺手扩大修改范围。
+- `commit`、`push`、合并、打 tag、生产部署等高影响操作必须获得维护者明确授权。
 
 ### 执行与质量要求
 
-网页端 GPT 规划任务 → Codex 调查、修改并测试 → Codex 输出详细报告 → 网页端 GPT 验收并规划下一任务。
+调查与真实复现 → 建立 RED 回归 → 最小修复 → GREEN → race / 全量回归 → diff 审计 → 提交与发布 → 真实客户端或实例验收。
 
-- 修复 Bug 时应增加能防止问题再次出现的回归测试，并完成任务要求的验证。
-- 执行报告应记录调查结论、实际修改、测试命令与结果，以及最终分支、提交和工作区状态。
+- 修复 Bug 时应增加能够防止同类问题再次出现的回归测试，并保留可复核的失败与通过证据。
+- 发布前应完成版本信息、安装脚本、Release workflow、变更日志与仓库地址的一致性检查。
 
 ---
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=ArizeSky/Emby-In-One&type=Date)](https://star-history.com/#ArizeSky/Emby-In-One&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=Zkunlun/Emby-In-One&type=Date)](https://star-history.com/#Zkunlun/Emby-In-One&Date)
 
 ---
 

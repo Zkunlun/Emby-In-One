@@ -2,7 +2,7 @@
 
 > **Version: V1.2.1**
 
-[English](README_EN.md) | [更新日志](Update.md) | [更新计划](Update%20Plan.md) | [GitHub](https://github.com/ArizeSky/Emby-In-One)
+[English](README_EN.md) | [更新日志](Update.md) | [更新计划](Update%20Plan.md) | [GitHub](https://github.com/Zkunlun/Emby-In-One)
 
 多台 Emby 服务器聚合代理，将多个上游 Emby 服务器的媒体库合并为一个统一入口，支持任何标准 Emby 客户端访问。
 
@@ -11,7 +11,7 @@
 [演示站点](https://emby.cothx.eu.cc/)
 Emby连接地址：https://emby.cothx.eu.cc/
 
-> **演示站账号不再随仓库公开。** 出于安全考虑，本仓库不提供明文账号与密码；如需体验，请通过 GitHub [Issues](https://github.com/ArizeSky/Emby-In-One/issues) 联系维护者获取**定期轮换**的临时账号。
+> **演示站账号不再随仓库公开。** 出于安全考虑，本仓库不提供明文账号与密码；如需体验，请通过 GitHub [Issues](https://github.com/Zkunlun/Emby-In-One/issues) 联系维护者获取**定期轮换**的临时账号。
 
 ## 预览
 
@@ -66,7 +66,7 @@ Emby连接地址：https://emby.cothx.eu.cc/
 ### 方式一：一键安装脚本（推荐，Linux 服务器）
 
 ```bash
-git clone https://github.com/ArizeSky/Emby-In-One.git
+git clone https://github.com/Zkunlun/Emby-In-One.git
 cd Emby-In-One
 bash install.sh
 ```

@@ -1,15 +1,15 @@
 # Emby-In-One
 
-> **Version: V1.4.4-rc1 (Pre-release)**
+> **Version: V1.4.4**
 
-[![License: GPL v3](https://img.shields.io/github/license/ArizeSky/Emby-In-One?color=blue)](LICENSE)
+[![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Docker](https://img.shields.io/badge/Docker-20.10+-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![GitHub Release](https://img.shields.io/github/v/release/ArizeSky/Emby-In-One?color=green)](https://github.com/ArizeSky/Emby-In-One/releases)
-[![GitHub Stars](https://img.shields.io/github/stars/ArizeSky/Emby-In-One?style=social)](https://github.com/ArizeSky/Emby-In-One)
+[![GitHub Release](https://img.shields.io/github/v/release/Zkunlun/Emby-In-One?color=green)](https://github.com/Zkunlun/Emby-In-One/releases)
+[![GitHub Stars](https://img.shields.io/github/stars/Zkunlun/Emby-In-One?style=social)](https://github.com/Zkunlun/Emby-In-One)
 
-[Changelog](Update.md) | [中文文档](README.md) | [Security Policy](SECURITY.md) | [Update Plan](Update%20Plan.md) | [V1.2.1 Legacy Docs](README_V1.2.1.md) | [GitHub](https://github.com/ArizeSky/Emby-In-One)
+[Changelog](Update.md) | [中文文档](README.md) | [Security Policy](SECURITY.md) | [Update Plan](Update%20Plan.md) | [V1.2.1 Legacy Docs](README_V1.2.1.md) | [GitHub](https://github.com/Zkunlun/Emby-In-One)
 
 Based on Go language, it implements a multi-server Emby aggregation proxy — merges media libraries from multiple upstream Emby servers into a single unified endpoint accessible by any standard Emby client. Supports multi-user management, independent watch history, UA spoofing, concurrent playback limits, and role-based access control.
 
@@ -40,7 +40,7 @@ Based on Go language, it implements a multi-server Emby aggregation proxy — me
 [Demo Site](https://emby.cothx.eu.cc/)
 Emby Connection Address: https://emby.cothx.eu.cc/
 
-> **Demo credentials are no longer published in this repository.** For security reasons, no plaintext account or password is provided here. To try the demo, contact the maintainer via GitHub [Issues](https://github.com/ArizeSky/Emby-In-One/issues) for a **periodically rotated** temporary account. Please do not redistribute demo credentials in public channels.
+> **Demo credentials are no longer published in this repository.** For security reasons, no plaintext account or password is provided here. To try the demo, contact the maintainer via GitHub [Issues](https://github.com/Zkunlun/Emby-In-One/issues) for a **periodically rotated** temporary account. Please do not redistribute demo credentials in public channels.
 
 ## Preview
 
@@ -73,21 +73,21 @@ Emby Connection Address: https://emby.cothx.eu.cc/
 
 ## Quick Installation
 
-> **Notice for Legacy Node.js Deployment**: If you wish to deploy the V1.2.1 stable Node.js version, please navigate to the [Releases page](https://github.com/ArizeSky/Emby-In-One/releases) of this repository, download the V1.2.1 Source code archive, extract it, and run `bash install.sh`. The `legacy/` directory in this repository keeps the V1.2.1 Node.js source **for reference only** (the Go ID virtualization was written against it); it takes part in no build, image or install of the Go version — see `legacy/README.md`.
+> **Notice for Legacy Node.js Deployment**: If you wish to deploy the V1.2.1 stable Node.js version, please use the original project's [Releases page](https://github.com/ArizeSky/Emby-In-One/releases) to download the V1.2.1 Source code archive, extract it, and run `bash install.sh`. The `legacy/` directory in this repository keeps the V1.2.1 Node.js source **for reference only** (the Go ID virtualization was written against it); it takes part in no build, image or install of the Go version — see `legacy/README.md`.
 
-This project primarily recommends using Release binaries for V1.4.4-rc1 deployment directly on Linux servers (no local Go build required; this is a pre-release for early testing); Docker deployment is suitable for scenarios where you want to build the image yourself.
+This project primarily recommends using Release binaries for V1.4.4 directly on Linux servers (no local Go build required); Docker deployment is suitable for scenarios where you want to build the image yourself.
 
 ### Method 1: Release Binary One-Click Install (Primary Recommendation)
 
 ```bash
-curl -fsSL -o release-install.sh https://raw.githubusercontent.com/ArizeSky/Emby-In-One/main/release-install.sh
+curl -fsSL -o release-install.sh https://raw.githubusercontent.com/Zkunlun/Emby-In-One/main/release-install.sh
 sudo bash release-install.sh
 ```
 
 Optional: install a specific version.
 
 ```bash
-sudo bash release-install.sh V1.4.4-rc1
+sudo bash release-install.sh V1.4.4
 ```
 
 This script will automatically:
@@ -100,7 +100,7 @@ This script will automatically:
 ### Method 2: Source Repo One-Click Install Script (Recommended for developers / local image build)
 
 ```bash
-git clone https://github.com/ArizeSky/Emby-In-One.git
+git clone https://github.com/Zkunlun/Emby-In-One.git
 cd Emby-In-One
 bash install.sh
 ```
@@ -780,7 +780,7 @@ Emby-In-One/
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=ArizeSky/Emby-In-One&type=Date)](https://star-history.com/#ArizeSky/Emby-In-One&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=Zkunlun/Emby-In-One&type=Date)](https://star-history.com/#Zkunlun/Emby-In-One&Date)
 
 ---
 
