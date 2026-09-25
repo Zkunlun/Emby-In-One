@@ -19,6 +19,9 @@ func (a *App) registerSessionAndUserStateRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /Users/{userId}/PlayingItems/{itemId}", a.withContext(a.requireAuth(a.handleUserPlayingItemStart)))
 	mux.HandleFunc("DELETE /Users/{userId}/PlayingItems/{itemId}", a.withContext(a.requireAuth(a.handleUserPlayingItemStop)))
 	mux.HandleFunc("POST /Users/{userId}/Items/{itemId}/UserData", a.withContext(a.requireAuth(a.handleUserItemUserData)))
+	mux.HandleFunc("POST /Users/{userId}/PlayedItems/{itemId}", a.withContext(a.requireAuth(a.handlePlayedItemAdd)))
+	mux.HandleFunc("DELETE /Users/{userId}/PlayedItems/{itemId}", a.withContext(a.requireAuth(a.handlePlayedItemRemove)))
+	mux.HandleFunc("POST /Users/{userId}/PlayedItems/{itemId}/Delete", a.withContext(a.requireAuth(a.handlePlayedItemRemoveCompat)))
 	mux.HandleFunc("POST /Users/{userId}/FavoriteItems/{itemId}", a.withContext(a.requireAuth(a.handleFavoriteItemAdd)))
 	mux.HandleFunc("DELETE /Users/{userId}/FavoriteItems/{itemId}", a.withContext(a.requireAuth(a.handleFavoriteItemRemove)))
 }
@@ -464,6 +467,77 @@ func (a *App) handleUserPlayingItem(w http.ResponseWriter, r *http.Request, meth
 	path := "/Users/" + resolved.Client.clientUserID() + "/PlayingItems/" + resolved.OriginalID
 	_ = a.forwardNoContent(r, resolved.Client, method, path, query, nil)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handlePlayedItemAdd(w http.ResponseWriter, r *http.Request) {
+	a.handlePlayedItemState(w, r, http.MethodPost, true, false)
+}
+
+func (a *App) handlePlayedItemRemove(w http.ResponseWriter, r *http.Request) {
+	a.handlePlayedItemState(w, r, http.MethodDelete, false, false)
+}
+
+func (a *App) handlePlayedItemRemoveCompat(w http.ResponseWriter, r *http.Request) {
+	a.handlePlayedItemState(w, r, http.MethodPost, false, true)
+}
+
+func (a *App) handlePlayedItemState(w http.ResponseWriter, r *http.Request, method string, played, deleteCompat bool) {
+	virtualItemID := r.PathValue("itemId")
+	resolved := a.resolveRouteID(virtualItemID)
+	if resolved == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Item not found"})
+		return
+	}
+	if !a.requireServerAccess(w, r, resolved) {
+		return
+	}
+
+	// Hills sends the standard PlayedItems mutation with an empty JSON body
+	// (Content-Type: application/json, Content-Length: 0). decodeOptionalJSON
+	// intentionally represents that as nil. Preserve the declared media type
+	// when forwarding the empty body so this dedicated route keeps the client's
+	// wire shape while translating the user/item IDs and outbound credentials.
+	contentType := r.Header.Get("Content-Type")
+	body, err := decodeOptionalJSON(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "Invalid JSON body"})
+		return
+	}
+	if body == nil && contentType != "" {
+		body = rawRequestBody{data: nil, contentType: contentType}
+	}
+
+	path := fmt.Sprintf("/Users/%s/PlayedItems/%s", resolved.Client.clientUserID(), resolved.OriginalID)
+	if deleteCompat {
+		path += "/Delete"
+	}
+	query := cloneValues(r.URL.Query())
+	status, payload, err := a.forwardJSONOrNoContent(r, resolved.Client, method, path, query, body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
+		return
+	}
+
+	if a.WatchStore != nil {
+		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
+			if err := a.WatchStore.MarkPlayed(reqCtx.ProxyUser.UserID, virtualItemID, played); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local watched state"})
+				return
+			}
+		}
+	}
+
+	if payload == nil {
+		if status == 0 {
+			status = http.StatusNoContent
+		}
+		w.WriteHeader(status)
+		return
+	}
+	a.overlayLocalUserData(r, virtualItemID, payload)
+	cfg := a.ConfigStore.Snapshot()
+	rewriteResponseIDs(payload, resolved.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
+	writeJSON(w, status, payload)
 }
 
 func (a *App) handleUserItemUserData(w http.ResponseWriter, r *http.Request) {
