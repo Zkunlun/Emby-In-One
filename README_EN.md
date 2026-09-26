@@ -11,12 +11,19 @@
 
 [Changelog](Update.md) | [中文文档](README.md) | [Security Policy](SECURITY.md) | [Update Plan](Update%20Plan.md) | [V1.2.1 Legacy Docs](README_V1.2.1.md) | [GitHub](https://github.com/Zkunlun/Emby-In-One)
 
-Based on Go language, it implements a multi-server Emby aggregation proxy — merges media libraries from multiple upstream Emby servers into a single unified endpoint accessible by any standard Emby client. Supports multi-user management, independent watch history, UA spoofing, concurrent playback limits, and role-based access control.
+Emby-In-One is a multi-upstream aggregation proxy for standard Emby clients. It combines multiple Emby servers behind one endpoint and provides media aggregation, per-user isolation, playback proxying, access control, and unified administration and operations.
+
+## About This Project
+
+This repository is actively developed and maintained on top of [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One). Many thanks to the original author, [ArizeSky](https://github.com/ArizeSky), for creating Emby-In-One and establishing its early architecture and core functionality.
+
+The current repository continues that work with compatibility fixes, stability improvements, feature development, and ongoing releases. Future maintenance, bug fixes, and releases are tracked here.
+
+The current stable release is **V1.4.5**. The active codebase is primarily implemented in Go; the original Node.js V1.2.1 implementation is retained under [`legacy/`](legacy/) for historical reference and is not part of current builds or installations.
 
 ## Table of Contents
 
-- [Demo Site](#demo-site)
-- [Preview](#preview)
+- [About This Project](#about-this-project)
 - [Features Overview](#features-overview)
 - [Quick Installation](#quick-installation)
 - [System Requirements](#system-requirements)
@@ -32,42 +39,29 @@ Based on Go language, it implements a multi-server Emby aggregation proxy — me
 - [FAQ](#faq)
 - [Disclaimer](#disclaimer)
 - [Project Architecture](#project-architecture-developer-reference)
+- [Development & Contributions](#development--contributions)
+- [Relationship to the Original Project](#relationship-to-the-original-project)
+- [Credits](#credits)
 - [Star History](#star-history)
 - [License](#license)
 
-## Demo Site
-
-[Demo Site](https://emby.cothx.eu.cc/)
-Emby Connection Address: https://emby.cothx.eu.cc/
-
-> **Demo credentials are no longer published in this repository.** For security reasons, no plaintext account or password is provided here. To try the demo, contact the maintainer via GitHub [Issues](https://github.com/Zkunlun/Emby-In-One/issues) for a **periodically rotated** temporary account. Please do not redistribute demo credentials in public channels.
-
-## Preview
-
-![Preview 1](https://cdn.nodeimage.com/i/D293pIQcFNx4gXkfskPbnXFzmgCQ1JPx.webp)
-![Preview 2](https://cdn.nodeimage.com/i/iDAXrYaIXdm9efhwl2BtqJjRUmGfTSKU.webp)
-![Preview 3](https://cdn.nodeimage.com/i/K4jhTTMjv8rkHYiPNbXKUC0kXIzAXgq0.webp)
-![Preview 4](https://cdn.nodeimage.com/i/jCilzHTw7vzRJYaQFtbvd8ZOEaTxZvk6.webp)
-
-> Image hosting provided by [NodeImage](https://www.nodeimage.com), thanks for the support.
-
----
-
 ## Features Overview
 
-- **Multi-User Management** — Supports creating regular users, each independently configurable with an accessible set of upstream servers; Admins can manage users via Admin panel, REST API, and SSH menu.
-- **Per-User Home Library Hiding** — Admins can pick, per user (including themselves), which media libraries are hidden from the Emby client home screen (grouped by server, whole-server hiding supported); only the home entries are hidden — search, Latest Additions and Continue Watching stay unaffected, and changes take effect on the next refresh.
-- **Independent User Accounts** — Regular users possess independent watch progress, played status, favorites, and "Continue Watching / Next Up", isolated from other users and upstream shared accounts; Admins retain original upstream behavior. (Queries that **filter** lists by "Favorite / Played / Resumable" are answered from those same local records; a few filters such as "Unplayed" are still decided by the upstream account — see [Independent Watch History](#independent-watch-history))
-- **Concurrent Playback Limits** — Each upstream server can configure a maximum concurrent playback count (`maxConcurrent`). Playback requests exceeding this limit return 429; Auto-releases based on heartbeat timeout.
-- **Role-Based Access Control** — Admins have full access to all servers and the management panel; Regular users can only access their assigned servers and cannot access the admin API.
-- **Multi-Server Aggregation** — Merges and displays media libraries and search results from multiple servers. Uses Goroutine concurrent requests with configurable grace periods — fast servers return first, slower servers contribute within the grace window; timed-out data is silently backfilled in the background, so aggregation latency depends on the fastest server plus grace period rather than the slowest. When an upstream goes offline, already-aggregated content automatically falls back to other online servers via OtherInstances — Resume and NextUp remain unaffected.
-- **Smart Deduplication & Prioritization** — Identical videos are automatically merged with multiple version sources retained; Supports a 4-level metadata priority logic (Designated Tag > Chinese > Length > Order) to smartly pick the best display information.
-- **Advanced UA Spoofing** — Supports Infuse spoofing and client UA passthrough. Can also use `custom` mode to independently define all 5 Emby client identity headers for each upstream, bypassing common Emby UA restrictions.
-- **Network Proxy Pool** — Configure dedicated HTTP/HTTPS proxies separately for each upstream server, complete with a built-in one-click connectivity tester.
-- **Dual Playback Modes** — Proxy mode (traffic relayed, hides upstream, supports HLS/segments) or Redirect mode (302 redirects to upstream, saves proxy machine bandwidth; **it exposes the upstream account credential — see [Playback Mode Explained](#playback-mode-explained)**).
-- **Token Management & Session Stability** — Proxy tokens never expire (only removed on logout, password change, or manual revocation), preventing frequent 401 errors on long-idle devices; upstream tokens auto-recover via async re-login with 30-second debounce when expired; admin password changes automatically revoke all issued tokens.
-- **Passthrough Delayed Login** — Upstream servers in passthrough mode no longer attempt login with Infuse identity at startup; they wait for a real client connection before authenticating, avoiding phantom device records on upstream Emby.
-- **Full Control & Operations** — Built-in modern SSH CLI menu and Web admin panel; comes with persistent logs and SQLite ID mapping. SSH menu auto-detects Binary/Docker deployment mode, dispatching all operations to systemd or Docker Compose commands accordingly.
+| Area | Description |
+| --- | --- |
+| **Multi-Upstream Aggregation** | Combines media libraries, search results, and media items from multiple Emby servers behind one endpoint. Concurrent fan-out plus configurable grace periods reduce the impact of slow upstreams, while previously aggregated content can fall back to other online `OtherInstances`. |
+| **Media Merging & ID Virtualization** | Deduplicates movies, series, seasons, and episodes across servers while retaining multiple MediaSources for the same title. Clients see persistent Virtual IDs, while metadata priority rules select the preferred display metadata. |
+| **Multi-User & Independent Watch State** | Supports regular users with independent playback progress, played state, favorites, Resume, and NextUp. `IsFavorite`, `IsPlayed`, `IsResumable`, and `IsUnplayed` filters are also evaluated from the current user's local state, while admins keep upstream-account semantics. |
+| **Access Control & Library Visibility** | Admins have access to all upstreams and management features; regular users can be restricted to selected servers. Libraries or entire servers can also be hidden from a user's Emby home screen without affecting search, Latest, or Resume content. |
+| **Proxy & Direct Playback** | Supports both `proxy` and `redirect` playback modes. Proxy mode relays video, audio, HLS segments, subtitles, and related requests through EIO; Redirect mode returns a 302 to the upstream to reduce EIO bandwidth usage. |
+| **Upstream Authentication & Client Identity** | Upstreams can authenticate with username/password or API Key. Client identity supports `none`, `passthrough`, `infuse`, and `custom` modes, including passthrough/custom Emby identity headers and automatic upstream re-login after session failure. |
+| **Network Proxies & Health Checks** | Each upstream can use its own HTTP/HTTPS proxy with built-in connectivity testing. Background health checks retry offline upstreams in parallel and log online/offline transitions. |
+| **Concurrent Playback Control** | Each upstream can define a regular-user concurrency limit with `maxConcurrent`. Excess playback requests return `429 Too Many Requests`, and stale occupancy is released through playback heartbeat expiry. |
+| **Web Admin & SSH CLI** | Includes a Web admin panel, REST management API, and SSH management menu for upstreams, users, network proxies, global settings, logs, updates, and service lifecycle operations. |
+| **Logging & Security** | Includes persistent leveled logs with rotation, login-failure rate limiting, scrypt password storage, protected config/token file permissions, request-body limits, SSRF protections, and a CSP for the admin panel. |
+| **Multiple Deployment Options** | Supports GitHub Release binaries with systemd, Docker / Docker Compose, and running from Go source. Releases provide static builds for amd64, arm64, arm, mips, mipsle, and riscv64 with SHA256 checksums. |
+
+> `redirect` mode places upstream access credentials in the client-visible direct URL. Use it only when that security trade-off is acceptable; see [Playback Mode Explained](#playback-mode-explained) for details.
 
 ---
 
@@ -303,12 +297,12 @@ V1.4 adds multi-user support, allowing admins to create multiple regular users, 
 
 | Role | Permissions |
 |------|-------------|
-| Admin (admin) | Can access all servers, admin panel, admin API; Watch history shared with upstream servers |
-| Regular User (user) | Can only access assigned servers; Has independent watch history (isolated from other users and upstream accounts) |
+| Admin (admin) | Can access all servers, the admin panel, and management APIs; watch state is read directly from the upstream Emby account |
+| Regular User (user) | Can only access permitted servers; client-visible playback progress, played state, favorites, Resume, and NextUp are isolated through the local WatchStore |
 
 ### Independent Watch History
 
-Because all distributed users share the same upstream Emby account, upstream watch progress, played status, and favorites are shared. Starting from V1.4, a regular user's watch data is **local state**, isolated from the upstream account:
+Because all distributed users share the same upstream Emby account, watch progress, played state, and favorites are naturally shared on the upstream side. Real state changes from a regular user are still written upstream and are also written to that EIO user's WatchStore; reads use the **local record as authoritative state**, so one regular user's changes to the shared upstream account do not overwrite what another regular user sees:
 
 | Feature | Admin | Regular User |
 |---------|-------|--------------|
@@ -349,7 +343,7 @@ Admins can create and manage regular users through the following ways:
 
 ### Configuring Accessible Servers
 
-Each regular user can be assigned a set of accessible upstream servers (via server index list). After the user logs in, they can only see and play content on assigned servers. Users without any assigned servers (empty `allowedServers` list) cannot access any content.
+Each regular user can restrict upstream access through a list of stable server `serverId` values. When one or more `serverId` values are specified, the user can only browse and play content from those servers. If `allowedServers` is omitted, `null`, or an empty list, the server scope is **unrestricted (all upstreams are accessible)**.
 
 ### Concurrent Playback Limits
 
@@ -392,11 +386,11 @@ Authentication decision and fault tolerance logic:
 
 > **The global `playback.mode` is only the initial value for a new upstream.** Once an upstream exists its `playbackMode` has already been written with the value of that moment, so changing the global default later does **not** affect any existing upstream (same for the "default playback mode" field at the top of the panel). To change one upstream's mode, use the playback-mode dropdown in that server's edit dialog — it takes effect immediately.
 
-> ⚠ **Security warning for `redirect` (direct playback) mode**: direct playback mode writes the upstream account credential (`api_key`) into the `302` redirect link, and **any user who can play can extract it** — including users restricted by `AllowedServers` — then bypass this proxy and reach the upstream directly (equivalent to upstream admin rights). Therefore:
+> ⚠ **Security warning for `redirect` (direct playback) mode**: direct playback places the upstream account credential (`api_key`) in the `302` redirect URL. **Any user who can play can extract that credential** — including users restricted by `AllowedServers` — and bypass EIO with whatever permissions the shared upstream account itself has. If that shared account is an upstream administrator, the leaked credential effectively grants upstream administrator privileges. Therefore:
 >
-> - Use a **dedicated, restricted account for that upstream** (grant only the media-library playback permissions it needs, no admin rights, and cap concurrency where possible); never reuse the upstream's admin account or a shared one;
-> - Once leaked, the credential can only be revoked by changing the password or revoking the API key on the upstream side;
-> - If that risk is unacceptable, keep the default `proxy` mode.
+> - Use a **dedicated, restricted account for that upstream** with only the media-library playback permissions it needs; do not reuse an upstream administrator account or a broadly shared account;
+> - Once leaked, the credential can only be invalidated by changing the upstream password or revoking the API key;
+> - If this risk is unacceptable, keep the default `proxy` mode.
 
 An upstream can configure **multiple streaming lines** (`streamingUrls`, an ordered list): the first entry is the primary line, the rest are fallbacks. All lines must point to the same Emby server (multiple lines are multiple routes to one server, not mirrored servers — transcoding sessions live on the server itself, so switching lines across mirrors causes 404s).
 
@@ -411,7 +405,7 @@ Controls what client identity the proxy communicates with the upstream server. A
 | Value | User-Agent | X-Emby-Client | Usage Scenario |
 |-------|------------|---------------|----------------|
 | `none` | Proxy default identity | `Emby Aggregator` | Most servers — no client restrictions |
-| `passthrough` | True client UA (Infuse fallback) | True client value | Servers with client whitelists |
+| `passthrough` | Real client UA | Real client value | Servers with client allowlists; if no real identity has been captured yet, the initial upstream login is deferred until a real client connects |
 | `infuse` | `Infuse/7.7.1 (iPhone; iOS 17.4.1; Scale/3.00)` | `Infuse` | Servers strictly allowing Infuse |
 | `custom` | Custom value | Custom value | Servers needing complete control over client markings |
 
@@ -421,7 +415,7 @@ Controls what client identity the proxy communicates with the upstream server. A
 
 #### Passthrough Mode Principles
 
-Passthrough uses a five-level header resolution to ensure a reasonable client identity is offered to the upstream under any conditions:
+Passthrough resolves request-level client identity through five fallback levels. One important exception applies at first startup: if only level 5 (`infuse-fallback`) is available and no real client identity has been captured, username/password passthrough upstreams defer their initial login and admin-side connectivity validation instead of forcing a login with the fallback identity:
 
 1. **Live Request Header** — If the current request carries the `X-Emby-Client` header (a genuine Emby client), direct usage.
 2. **Current Token Captured Header** — When a real client (Infuse, Emby iOS, etc.) logs in to Emby-in-One, the proxy captures and stores the client's `User-Agent`, `X-Emby-Client`, `X-Emby-Device-Name`, etc. based on the proxy Token; future requests heavily tied to the same Token will reuse these.
@@ -431,7 +425,7 @@ Passthrough uses a five-level header resolution to ensure a reasonable client id
 
 Captured headers overlay the basic Infuse profile, ensuring even if the client hasn't sent all Emby header fields (like certain third-party Apps), a fully fleshed client identity can still be presented.
 
-When a client logs in, all offline passthrough servers automatically use the newly captured headers to attempt re-login. The successfully logged-in headers are persistently stored per-server; both health checks and reconnections post-reboot will use that server's last successful headers. Upon token revocation or expiration, its respective captured headers are cleaned as well.
+When a client logs in, offline passthrough upstreams automatically retry with the newly captured identity. Headers used for a successful upstream login are persisted per server, so health checks and reconnects can reuse that server's last successful identity after a restart. When a proxy token is revoked — for example through logout, an admin password change/reset, or user deletion — its token-scoped captured identity is removed as well. Proxy tokens do not expire automatically based on time.
 
 ### Metadata Priority (`priorityMetadata`)
 
@@ -462,10 +456,10 @@ Cross-server entries are initially interleaved (Round-Robin) before duplicated m
 
 Each upstream Item ID is mapped globally to a lone virtual ID — 16 random bytes (128 bits) from `crypto/rand`, rendered as a 32-character lowercase hex string with no dashes. Any IDs visible to clients are virtual.
 
-- **Storage**: SQLite (WAL pattern) persistence tied with memory cache aiding lookup speeds
-- **Mapping**: `virtualId <-> { originalId, serverIndex }`, saving additionally persisted `otherInstances` mapping interactions
-- **Persistence**: Re-mapping unnecessary post-restart; chief and appendage instance relationships are retrieved
-- **Cleanup**: Purging upstream servers automatically clears mappings belonging to that server and recalibrates later indices
+- **Storage**: Persistent SQLite storage in WAL mode, backed by an in-memory cache for fast lookups
+- **Mapping**: `virtualId <-> { originalId, serverId }`, with additional `otherInstances` relationships persisted as well; `serverId` is a stable server identity and does not depend on configuration order
+- **Persistence**: Virtual mappings and primary/additional instance relationships survive restarts; legacy `server_index` data is migrated to `server_id`
+- **Upstream deletion**: If a removed primary instance still has another upstream instance available, a remaining instance is promoted while preserving the Virtual ID and regular-user WatchStore state. Only truly orphaned items with no remaining instance lose their mapping and associated watch state
 
 ---
 
@@ -564,7 +558,7 @@ Access `http://your-ip:8096/admin`, logging in with the admin credentials from t
 
 ### Admin API
 
-All APIs require authentication (`X-Emby-Token` header or `api_key` query parameter). For security reasons, `/admin/api/*` endpoints only open to same-origin requests, denying unhindered cross-origin acceptances.
+All management APIs require authentication (`X-Emby-Token` header or `api_key` query parameter). For security reasons, `/admin/api/*` is exposed only with same-origin CORS behavior and does not grant arbitrary cross-origin access.
 
 ---
 
@@ -608,9 +602,9 @@ The actual location of `data/` can be changed with the top-level [`dataDir`](#da
 | GET | `/admin/api/status` | System status |
 | GET | `/admin/api/upstream` | List upstream servers |
 | POST | `/admin/api/upstream` | Add upstream server |
-| PUT | `/admin/api/upstream/:index` | Modify upstream server |
-| DELETE | `/admin/api/upstream/:index` | Delete upstream server (auto-cleans ID mappings) |
-| POST | `/admin/api/upstream/:index/reconnect` | Reconnect upstream server |
+| PUT | `/admin/api/upstream/:id` | Modify upstream server (stable `serverId`; legacy index lookup remains compatible) |
+| DELETE | `/admin/api/upstream/:id` | Delete upstream server; preserve Virtual IDs that still have other instances and remove only truly orphaned mappings/state |
+| POST | `/admin/api/upstream/:id/reconnect` | Reconnect upstream server |
 | POST | `/admin/api/upstream/reorder` | Adjust server ordering |
 | GET | `/admin/api/proxies` | List proxies |
 | POST | `/admin/api/proxies` | Add proxy |
@@ -634,12 +628,12 @@ The actual location of `data/` can be changed with the top-level [`dataDir`](#da
 
 ### Passthrough Upstream Login Failure (403)
 
-If no client identities have been logged upon the first installation, passthrough will default to using the Infuse identity. If the upstream nginx rejects Infuse:
-1. Log into Emby-in-One using any Emby client (Infuse, Emby iOS, etc.)
-2. The proxy will automatically capture the client header arrays and retry login over the passthrough server
-3. Upon a successful log-in, this server's specific client identity will become persisted; requiring no manual re-attempts after future restarts
-4. Monitor logs mapping `source` fields to verify which header source was used (`last-success` = last cleared traits, `captured-override` = retry overrides matching fully tracked headers, `infuse-fallback` = defaulting maneuvers completely devoid of captured targets)
-5. If the naturally captured client UA itself is also rejected by the upstream, explicitly log in using an allowed client to capture appropriate identities safely
+On a fresh installation with no real client identity captured yet, a username/password `passthrough` upstream **skips its initial login and remains offline** until a real client identity becomes available; it does not use the Infuse fallback to force the first upstream login:
+1. Sign in to Emby-In-One with a real Emby client (Infuse, Emby iOS, etc.) using the **admin** account
+2. After the proxy captures the client identity, it automatically retries offline passthrough upstreams
+3. Once login succeeds, the identity used for that server is persisted and can be reused after future restarts
+4. Identity-source information in the logs can help with diagnosis; for example, `last-success` means that server's previously successful identity. `infuse-fallback` remains the final internal fallback for identity resolution, but initial login/admin validation is deferred when that is the only available source
+5. If the captured client identity is still rejected upstream, sign in again as admin using a client that the upstream accepts
 
 ### Upstream Shows Offline / Login Timeout
 
@@ -775,6 +769,40 @@ Emby-In-One/
     ├── tests/                      #   Old Node tests (most no longer pass)
     └── package.json                #   Node dependencies (only used by npm --prefix legacy install)
 ```
+
+---
+
+## Development & Contributions
+
+The active codebase is implemented in Go. Reproducible bug reports, compatibility feedback, feature requests, and Pull Requests are welcome.
+
+When contributing code, please keep these principles in mind:
+
+- Bug fixes should include regression coverage for the underlying cause whenever practical, rather than patching only one client's visible symptom.
+- Keep changes focused and avoid mixing unrelated architectural refactors or formatting churn into the same PR.
+- Run tests relevant to the changed area before submitting; for shared backend behavior, `go test ./...` is recommended.
+- Changes to the admin panel should also verify frontend assets and embedded resources remain in sync. Changes to installation or release flows should verify versioning, installer behavior, and the Release workflow together.
+- Client compatibility reports are most useful when they include request paths, response differences, logs, or clear reproduction steps.
+
+---
+
+## Relationship to the Original Project
+
+Emby-In-One was originally created by [ArizeSky](https://github.com/ArizeSky), with the original repository at [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One). This repository continues development and maintenance on top of that project and retains its core multi-Emby aggregation design.
+
+This repository is not a simple mirror of the original project. Ongoing compatibility fixes, feature maintenance, releases, and the active Go codebase are maintained in [Zkunlun/Emby-In-One](https://github.com/Zkunlun/Emby-In-One). Existing code, design work, and historical contributions from the original project remain attributable to their respective authors and contributors.
+
+The original Node.js V1.2.1 implementation is retained under [`legacy/`](legacy/) for historical reference and is not part of current Go builds, images, or installation flows. For V1.2.1, refer to the original project's historical releases; for currently maintained versions, use this repository's Releases.
+
+This project continues to be distributed under the **GNU General Public License v3.0**. Modifications and redistribution must comply with GPL-3.0.
+
+---
+
+## Credits
+
+- Thanks to [ArizeSky](https://github.com/ArizeSky) for creating Emby-In-One and building the project's early architecture and core functionality.
+- Thanks to all contributors to both the original project and this repository, as well as issue reporters and users who helped test client compatibility.
+- Contributions to the maintained repository can be reviewed through [GitHub Contributors](https://github.com/Zkunlun/Emby-In-One/graphs/contributors) and the commit history.
 
 ---
 
