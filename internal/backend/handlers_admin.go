@@ -274,10 +274,17 @@ func (a *App) handleAdminUpstreamDelete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Clean up database records for this server
+	// Clean up database records for this server. A virtual item survives when it
+	// has another upstream instance; only true orphans lose per-user watch state.
+	var removedVirtualIDs []string
 	if a.IDStore != nil && serverID != "" {
-		if err := a.IDStore.RemoveByServerID(serverID); err != nil && a.Logger != nil {
-			a.Logger.Errorf("delete upstream %s: remove ID mappings: %v", serverID, err)
+		result, err := a.IDStore.RemoveByServerIDPreservingInstances(serverID)
+		if err != nil {
+			if a.Logger != nil {
+				a.Logger.Errorf("delete upstream %s: remove ID mappings: %v", serverID, err)
+			}
+		} else {
+			removedVirtualIDs = result.RemovedVirtualIDs
 		}
 	}
 	if a.UserStore != nil && serverID != "" {
@@ -285,9 +292,9 @@ func (a *App) handleAdminUpstreamDelete(w http.ResponseWriter, r *http.Request) 
 			a.Logger.Errorf("delete upstream %s: remove user server grants: %v", serverID, err)
 		}
 	}
-	if a.WatchStore != nil && serverID != "" {
-		if err := a.WatchStore.DeleteServerData(serverID); err != nil && a.Logger != nil {
-			a.Logger.Errorf("delete upstream %s: delete watch progress: %v", serverID, err)
+	if a.WatchStore != nil && len(removedVirtualIDs) > 0 {
+		if err := a.WatchStore.DeleteVirtualItems(removedVirtualIDs); err != nil && a.Logger != nil {
+			a.Logger.Errorf("delete upstream %s: delete orphan watch progress: %v", serverID, err)
 		}
 	}
 	if a.HiddenLibraries != nil && serverID != "" {
@@ -606,13 +613,13 @@ func (a *App) handleAdminUsersList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		result = append(result, map[string]any{
-			"id":             u.ID,
-			"username":       u.Username,
-			"enabled":        u.Enabled,
-			"allowedServers": u.AllowedServers,
+			"id":              u.ID,
+			"username":        u.Username,
+			"enabled":         u.Enabled,
+			"allowedServers":  u.AllowedServers,
 			"hiddenLibraries": a.hiddenLibrariesJSONFor(u.ID),
-			"serverNames":    serverNames,
-			"createdAt":      u.CreatedAt,
+			"serverNames":     serverNames,
+			"createdAt":       u.CreatedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -664,11 +671,11 @@ func (a *App) handleAdminUsersUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var input struct {
-		Username         *string              `json:"username"`
-		Password         *string              `json:"password"`
-		Enabled          *bool                `json:"enabled"`
-		AllowedServers   *[]string           `json:"allowedServers"`
-		HiddenLibraries  map[string]*[]string `json:"hiddenLibraries"`
+		Username        *string              `json:"username"`
+		Password        *string              `json:"password"`
+		Enabled         *bool                `json:"enabled"`
+		AllowedServers  *[]string            `json:"allowedServers"`
+		HiddenLibraries map[string]*[]string `json:"hiddenLibraries"`
 	}
 	if err := decodeJSONBody(r, &input); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request body"})

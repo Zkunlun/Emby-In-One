@@ -33,7 +33,7 @@ func newFilterStub(t *testing.T, items []map[string]any) *filterStubUpstream {
 				"AccessToken": "tok-a",
 				"User":        map[string]any{"Id": "user-a"},
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/Users/user-a/Items":
+		case r.Method == http.MethodGet && (r.URL.Path == "/Users/user-a/Items" || r.URL.Path == "/Items"):
 			query := r.URL.Query()
 			stub.recordItemRequest(query)
 			page, total := filterStubPage(items, query)
@@ -418,10 +418,11 @@ func TestUserItemsFilterScopedByParentId(t *testing.T) {
 	})
 }
 
-// TestUserItemsUnplayedFilterPassesThroughAndHints covers the filter the proxy
-// cannot answer: it stays upstream, and the operator gets told that it still
-// follows the shared account.
-func TestUserItemsUnplayedFilterPassesThroughAndHints(t *testing.T) {
+// TestUserItemsUnplayedFilterIsLocal proves IsUnplayed is computed from the
+// proxy user's local state, not the shared upstream account. Upstream says Alpha
+// is played and Bravo is unplayed; locally we deliberately mark Bravo played, so
+// the correct per-user result is Alpha only.
+func TestUserItemsUnplayedFilterIsLocal(t *testing.T) {
 	stub := newFilterStub(t, []map[string]any{
 		filterStubItem("movie-a", "Alpha", "lib-1", 2001, filterStubUserData(false, true, 0)),
 		filterStubItem("movie-b", "Bravo", "lib-1", 2002, filterStubUserData(false, false, 0)),
@@ -429,28 +430,49 @@ func TestUserItemsUnplayedFilterPassesThroughAndHints(t *testing.T) {
 
 	withTempAppConfig(t, singleUpstreamConfig(stub.server.URL), func(app *App, handler http.Handler) {
 		userToken := createRegularUser(t, handler)
+		serverID := app.Upstream.Clients()[0].ID
+		markPlayedLocally(t, handler, app, userToken, app.IDStore.GetOrCreateVirtualID("movie-b", serverID))
 
 		rr := doJSONRequest(t, handler, http.MethodGet,
-			"/Users/"+app.Auth.ProxyUserID()+"/Items?Filters=IsUnplayed&Limit=50", nil, userToken)
+			"/Users/"+app.Auth.ProxyUserID()+"/Items?Filters=IsUnplayed&Limit=50&SortBy=SortName&SortOrder=Ascending", nil, userToken)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
 		}
 
 		forwarded := stub.lastItemRequest(t)
-		if forwarded.Get("Filters") != "IsUnplayed" {
-			t.Fatalf("Filters = %q, want IsUnplayed forwarded untouched", forwarded.Get("Filters"))
+		if forwarded.Get("Filters") != "" {
+			t.Fatalf("Filters = %q, want IsUnplayed stripped before upstream", forwarded.Get("Filters"))
 		}
-		// Nothing here localizes the filter, so the upstream's answer is served as-is.
-		// (The paging window is the proxy's business on this path and is covered by the
-		// merged-path paging tests, so it is not asserted here.)
-		if got := itemNames(t, rr.Body.Bytes()); !reflect.DeepEqual(got, []string{"Alpha", "Bravo"}) {
-			t.Fatalf("unplayed filter returned %v, want the upstream answer [Alpha Bravo]", got)
+		if got := itemNames(t, rr.Body.Bytes()); !reflect.DeepEqual(got, []string{"Alpha"}) {
+			t.Fatalf("unplayed filter returned %v, want local result [Alpha]", got)
 		}
-		if notice := rr.Header().Get(filterNoticeHeader); !strings.Contains(notice, "IsUnplayed") {
-			t.Fatalf("missing filter notice header, got %q", notice)
+		if notice := rr.Header().Get(filterNoticeHeader); notice != "" {
+			t.Fatalf("localized IsUnplayed unexpectedly emitted notice %q", notice)
 		}
-		if !filterNoticeLogged(app, "IsUnplayed") {
-			t.Fatalf("no warning logged for the un-isolated filter; entries: %#v", app.Logger.Entries(0))
+		if filterNoticeLogged(app, "IsUnplayed") {
+			t.Fatalf("localized IsUnplayed unexpectedly logged a shared-state warning")
+		}
+	})
+}
+
+func TestItemsCollectionUnplayedFilterIsLocal(t *testing.T) {
+	stub := newFilterStub(t, []map[string]any{
+		filterStubItem("movie-a", "Alpha", "lib-1", 2001, filterStubUserData(false, true, 0)),
+		filterStubItem("movie-b", "Bravo", "lib-1", 2002, filterStubUserData(false, false, 0)),
+	})
+	withTempAppConfig(t, singleUpstreamConfig(stub.server.URL), func(app *App, handler http.Handler) {
+		userToken := createRegularUser(t, handler)
+		serverID := app.Upstream.Clients()[0].ID
+		markPlayedLocally(t, handler, app, userToken, app.IDStore.GetOrCreateVirtualID("movie-b", serverID))
+		rr := doJSONRequest(t, handler, http.MethodGet, "/Items?Filters=IsUnplayed&Limit=50&SortBy=SortName&SortOrder=Ascending", nil, userToken)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+		}
+		if got := itemNames(t, rr.Body.Bytes()); !reflect.DeepEqual(got, []string{"Alpha"}) {
+			t.Fatalf("GET /Items unplayed returned %v, want [Alpha]", got)
+		}
+		if forwarded := stub.lastItemRequest(t); forwarded.Get("Filters") != "" {
+			t.Fatalf("GET /Items forwarded local IsUnplayed as %q", forwarded.Get("Filters"))
 		}
 	})
 }

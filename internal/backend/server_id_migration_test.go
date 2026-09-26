@@ -50,6 +50,7 @@ func TestMigrateDatabaseToServerID(t *testing.T) {
 		played INTEGER NOT NULL DEFAULT 0,
 		is_favorite INTEGER NOT NULL DEFAULT 0,
 		last_played INTEGER NOT NULL DEFAULT 0,
+		updated_at INTEGER NOT NULL DEFAULT 0,
 		item_type TEXT,
 		name TEXT,
 		production_year INTEGER,
@@ -126,18 +127,15 @@ func TestMigrateDatabaseToServerID(t *testing.T) {
 		t.Errorf("u1 AllowedServers = %v, want ['srv-aaa', 'srv-bbb']", u.AllowedServers)
 	}
 
-	// 5. Verify user_watch_progress migrated
+	// 5. Legacy watch state is intentionally not migrated by Phase 3. The server-id
+	// migration may reshape the old table, but NewWatchStore detects the legacy
+	// schema (no updated_at) and resets it before creating the new UserState schema.
 	watchStore, err := NewWatchStore(store.db, nil)
 	if err != nil {
 		t.Fatalf("NewWatchStore: %v", err)
 	}
-
-	progress := watchStore.GetProgress("u1", "virt-1")
-	if progress == nil {
-		t.Fatalf("progress for u1 virt-1 not found")
-	}
-	if progress.ServerID != "srv-aaa" {
-		t.Errorf("progress.ServerID = %q, want 'srv-aaa'", progress.ServerID)
+	if progress := watchStore.GetProgress("u1", "virt-1"); progress != nil {
+		t.Fatalf("legacy watch progress unexpectedly migrated: %#v", progress)
 	}
 
 	// Delete user and verify cascade on user_servers

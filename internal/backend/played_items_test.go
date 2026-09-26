@@ -84,6 +84,9 @@ func TestPlayedItemsHillsEmptyJSONBodyWatchedAndUnwatched(t *testing.T) {
 		if progress == nil || !progress.Played {
 			t.Fatalf("local watched state after POST = %#v, want Played=true", progress)
 		}
+		if want := parseLocalPlayedAt(playedAt); progress.LastPlayed != want {
+			t.Fatalf("local LastPlayed = %d, want DatePlayed %d", progress.LastPlayed, want)
+		}
 
 		rr = doAuthJSON(t, handler, http.MethodDelete, basePath, nil, token)
 		if rr.Code != http.StatusOK {

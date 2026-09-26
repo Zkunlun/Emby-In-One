@@ -106,6 +106,7 @@ func (a *App) handleFallbackProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg := a.ConfigStore.Snapshot()
 		rewriteResponseIDs(payload, serverID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
+		a.normalizeLocalUserDataPayload(r, payload)
 		writeJSON(w, resp.StatusCode, payload)
 		return
 	}

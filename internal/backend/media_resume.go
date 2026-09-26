@@ -142,26 +142,21 @@ func (a *App) enrichWatchItems(r *http.Request, reqCtx *RequestContext, items []
 		}
 	}
 
-	// Build result in original order, overlay local UserData
+	// Build result in original order, then run the same local UserData normalizer
+	// used by every other media response so percentage/history fields cannot leak.
 	var result []map[string]any
 	for _, wp := range items {
 		item, ok := fetched[wp.OriginalItemID]
 		if !ok {
 			continue
 		}
-		// Rewrite upstream IDs to virtual
 		rewriteResponseIDs(item, wp.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
-		// Overlay local UserData
-		ud, _ := item["UserData"].(map[string]any)
-		if ud == nil {
-			ud = map[string]any{}
+		if _, ok := item["UserData"].(map[string]any); !ok {
+			item["UserData"] = map[string]any{}
 		}
-		ud["PlaybackPositionTicks"] = wp.PositionTicks
-		ud["Played"] = wp.Played
-		ud["IsFavorite"] = wp.IsFavorite
-		item["UserData"] = ud
 		result = append(result, item)
 	}
+	a.overlayLocalUserDataItems(r, result)
 	return result
 }
 

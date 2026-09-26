@@ -46,6 +46,7 @@ type userStateFilter struct {
 	favorite  bool
 	played    bool
 	resumable bool
+	unplayed  bool
 	// passthrough keeps every filter value the proxy cannot answer locally; it stays
 	// in the upstream query so the client's intent is never silently dropped.
 	passthrough []string
@@ -55,7 +56,7 @@ type userStateFilter struct {
 }
 
 // active reports whether any part of the filter is answered locally.
-func (f userStateFilter) active() bool { return f.favorite || f.played || f.resumable }
+func (f userStateFilter) active() bool { return f.favorite || f.played || f.resumable || f.unplayed }
 
 // parseUserStateFilter reads the Filters query parameter. Contradictory or unknown
 // values are kept verbatim in passthrough.
@@ -84,6 +85,8 @@ func parseUserStateFilter(values url.Values) userStateFilter {
 				f.played = true
 			case filterIsResumable:
 				f.resumable = true
+			case filterIsUnplayed:
+				f.unplayed = true
 			default:
 				f.passthrough = append(f.passthrough, value)
 				if isUnlocalizedUserFilter(normalized) {
@@ -92,22 +95,14 @@ func parseUserStateFilter(values url.Values) userStateFilter {
 			}
 		}
 	}
-	// IsPlayed and IsUnplayed contradict each other. Leaving both upstream lets the
-	// upstream resolve them its own way; letting the local predicate decide would
-	// only fight the upstream answer.
-	if f.played && containsFilter(f.passthrough, filterIsUnplayed) {
-		f.played = false
-	}
 	return f
 }
 
-// isUnlocalizedUserFilter names the user-state filters the local store cannot
-// answer. IsUnplayed is a complement (unwatched = everything minus watched) and the
-// local records only hold what the user touched; Likes/Dislikes are not recorded at
-// all, and IsFavoriteOrLiked includes those likes.
+// isUnlocalizedUserFilter names the remaining user-state filters the local store
+// cannot answer. Likes/Dislikes are not recorded, and IsFavoriteOrLiked includes likes.
 func isUnlocalizedUserFilter(normalized string) bool {
 	switch normalized {
-	case filterIsUnplayed, "likes", "dislikes", "isfavoriteorliked":
+	case "likes", "dislikes", "isfavoriteorliked":
 		return true
 	default:
 		return false
@@ -267,10 +262,9 @@ func satisfiesUserState(p WatchProgress, f userStateFilter) bool {
 	return true
 }
 
-// filterItemsByLocalUserState keeps the upstream candidates the local record matches.
-// Every item that survives has already been rewritten to virtual IDs, so the local
-// record keyed by virtual ID applies directly. It also returns each survivor's
-// last-played stamp, which is what the local sort falls back to.
+// filterItemsByLocalUserState evaluates user-state predicates against the exact
+// candidate set. This also makes IsUnplayed local: an item with no local row is
+// naturally unwatched instead of inheriting the shared upstream account's state.
 func (a *App) filterItemsByLocalUserState(r *http.Request, items []map[string]any, f userStateFilter) ([]map[string]any, map[string]int64) {
 	reqCtx := requestContextFrom(r.Context())
 	if reqCtx == nil || reqCtx.ProxyUser == nil || a.WatchStore == nil {
@@ -280,19 +274,47 @@ func (a *App) filterItemsByLocalUserState(r *http.Request, items []map[string]an
 		a.Logger.Warnf("local user-state filter scanned %d upstream items (limit %d): the result may be truncated",
 			len(items), localFilterScanLimit)
 	}
-	matched := a.localUserStateRows(reqCtx.ProxyUser.UserID, f)
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if id := itemID(item); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	rows := a.WatchStore.GetProgressBatch(reqCtx.ProxyUser.UserID, ids)
 	kept := make([]map[string]any, 0, len(items))
-	recency := make(map[string]int64, len(matched))
+	recency := make(map[string]int64, len(items))
 	for _, item := range items {
 		id := itemID(item)
-		row, ok := matched[id]
-		if !ok {
+		row, exists := rows[id]
+		if !satisfiesCandidateUserState(row, exists, f) {
 			continue
 		}
-		recency[id] = row.LastPlayed
+		if exists {
+			stamp := row.UpdatedAt
+			if stamp <= 0 {
+				stamp = row.LastPlayed
+			}
+			recency[id] = stamp
+		}
 		kept = append(kept, item)
 	}
 	return kept, recency
+}
+
+func satisfiesCandidateUserState(p WatchProgress, exists bool, f userStateFilter) bool {
+	if f.favorite && (!exists || !p.IsFavorite) {
+		return false
+	}
+	if f.played && (!exists || !p.Played) {
+		return false
+	}
+	if f.resumable && (!exists || !(p.PositionTicks > 0 && !p.Played)) {
+		return false
+	}
+	if f.unplayed && exists && p.Played {
+		return false
+	}
+	return true
 }
 
 // localItemSort re-orders a locally filtered page. The metadata batch that feeds it

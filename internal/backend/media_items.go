@@ -12,7 +12,21 @@ import (
 func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 	query := cloneValues(r.URL.Query())
 	if !hasBatchIDQuery(query) {
-		a.handleFallbackProxy(w, r)
+		filter, localFilter := a.prepareLocalUserFilter(w, r, query)
+		if !localFilter {
+			a.handleFallbackProxy(w, r)
+			return
+		}
+		// A regular user's state filter cannot be forwarded to the shared upstream
+		// account. Fetch the candidate set across allowed servers, then filter/page it
+		// locally using virtual IDs.
+		results := a.fetchItemsAcrossUpstreams(r.Context(), requestContextFrom(r.Context()), "/Items", query, nil)
+		merged := a.mergedItemsPayload(results, a.clientFacingUserIDFor(r))
+		items := asItems(merged)
+		kept, recency := a.filterItemsByLocalUserState(r, items, filter)
+		localItemSort(kept, r.URL.Query(), recency)
+		a.overlayLocalUserDataItems(r, kept)
+		writeJSON(w, http.StatusOK, paginateItems(kept, r.URL.Query()))
 		return
 	}
 	// The candidate set is the ID list the client sent, so a user-state filter can be
@@ -392,6 +406,7 @@ func (a *App) handleItemThemeMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := a.ConfigStore.Snapshot()
 	rewriteResponseIDs(payload, resolved.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
+	a.normalizeLocalUserDataPayload(r, payload)
 	writeJSON(w, http.StatusOK, payload)
 }
 

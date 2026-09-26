@@ -236,7 +236,7 @@ func TestRecordProgressUpsertUpdatesPlayedAndFavorite(t *testing.T) {
 		t.Fatal("Played should be true after upsert with played=true")
 	}
 
-	// 3. Another progress event with played=false should NOT revert played=true
+	// 3. Starting/replaying the item with progress makes it in-progress again.
 	if err := ws.RecordProgress(&WatchProgress{
 		ProxyUserID: "user1", VirtualItemID: "ep1",
 		ServerID: "srv-0", OriginalItemID: "orig-ep1",
@@ -246,8 +246,8 @@ func TestRecordProgressUpsertUpdatesPlayedAndFavorite(t *testing.T) {
 	}
 
 	got = ws.GetProgress("user1", "ep1")
-	if !got.Played {
-		t.Fatal("Played should remain true after progress event with played=false")
+	if got.Played || got.PositionTicks != 500 {
+		t.Fatalf("replay progress = %#v, want Played=false PositionTicks=500", got)
 	}
 }
 

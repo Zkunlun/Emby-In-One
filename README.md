@@ -1,6 +1,6 @@
 # Emby-In-One
 
-> **Version: V1.4.4**
+> **Version: V1.4.5**
 
 [![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -76,7 +76,7 @@ Emby 连接地址：https://emby.cothx.eu.cc/
 
 > **旧版 Node.js 部署说明**：如果您希望部署基于 Node.js 的 V1.2.1 稳定版，请前往原项目的 [Releases 页面](https://github.com/ArizeSky/Emby-In-One/releases) 下载 V1.2.1 的 Source code 源码压缩包，解压后同样运行 `bash install.sh` 即可。 仓库中的 `legacy/` 目录保留了 V1.2.1 的 Node.js 源码，**仅供对照参考**（Go 版的 ID 虚拟化以它为蓝本），它不参与 Go 版的构建、镜像或安装流程，详见 `legacy/README.md`。
 
-本项目优先推荐在 Linux 服务器直接使用 Release 二进制部署 V1.4.4（无需本地编译）；Docker 方式适合希望自行构建镜像的场景。
+本项目优先推荐在 Linux 服务器直接使用 Release 二进制部署 V1.4.5（无需本地编译）；Docker 方式适合希望自行构建镜像的场景。
 
 ### 方式一：Release 二进制一键安装（首推）
 
@@ -88,7 +88,7 @@ sudo bash release-install.sh
 可选：指定版本安装。
 
 ```bash
-sudo bash release-install.sh V1.4.4
+sudo bash release-install.sh V1.4.5
 ```
 
 该脚本会自动完成：
@@ -318,15 +318,15 @@ V1.4 新增多用户支持，允许管理员创建多个普通用户，每个用
 | 已播放状态 (Played) | 上游服务器数据 | 本地独立记录 |
 | 收藏 (Favorite) | 上游服务器数据 | 本地独立记录 |
 | 浏览页面中的 UserData | 直接透传上游 | 叠加本地状态覆盖 |
-| 列表筛选（只看收藏 / 已观看 / 继续观看中） | 上游服务器筛选 | 本地记录筛选 |
+| 列表筛选（只看收藏 / 已观看 / 未观看 / 继续观看中） | 上游服务器筛选 | 本地记录筛选 |
 
-**列表筛选（V1.4.4 起本地化）：**
+**列表筛选（V1.4.4 起本地化，V1.4.5 补齐 `IsUnplayed`）：**
 
-- `Filters=IsFavorite`、`IsPlayed`、`IsResumable` 由**本地记录**筛选：代理先向该目录取候选集，再与本地集合取交集，随后在本地排序、分页并修正总数——"只看收藏"返回的就是该用户自己的收藏，本地收藏但上游账户没收藏的条目同样会出现。`ParentId`、`Recursive`、`IncludeItemTypes` 等目录约束仍由上游执行。
+- `Filters=IsFavorite`、`IsPlayed`、`IsResumable`、`IsUnplayed` 由**本地记录**筛选：代理先向该目录取候选集，再按当前代理用户的 WatchStore 状态判断，随后在本地排序、分页并修正总数。`IsUnplayed` 的本地语义是：没有本地记录的条目天然视为未观看，只有本地记录明确为 `Played=true` 才从未观看集合排除。`ParentId`、`Recursive`、`IncludeItemTypes` 等目录约束仍由上游执行。
 - 排序：`SortName`、`DateCreated`、`ProductionYear`、`CommunityRating` 在本地排序；其余排序键（如 `DatePlayed`）降级为按本地"最近播放 / 收藏时间"排序。
 - 无法识别的筛选值（如 `IsFolder`）原样转发上游，客户端意图不会被静默丢弃。
 
-> **已知限制**：`Filters=IsUnplayed`（未观看）仍是**补集**语义——"未观看 = 全部 − 已观看"，而本地只记录用户碰过的条目，拿不到"全集"，因此它仍由上游共享账户决定；`IsFavoriteOrLiked`（含"喜欢"）同理，本地没有记录"喜欢"状态。使用这些筛选时，代理会返回响应头 `X-Emby-In-One-Filter-Notice` 并写入一条 WARN 日志（同一筛选每分钟最多一条），提示该筛选未按用户隔离。
+> **已知限制**：`Likes`、`Dislikes`、`IsFavoriteOrLiked` 仍使用上游共享语义，因为本地 WatchStore 尚未记录“喜欢 / 不喜欢”状态。使用这些未本地化筛选时，代理会返回响应头 `X-Emby-In-One-Filter-Notice` 并写入节流 WARN 日志。
 
 **分页：** 不带 `ParentId` 的聚合列表（`GET /Users/{id}/Items` 不指定目录）由代理在**合并、去重之后**统一切页，因此 `TotalRecordCount` 是合并后的总数、`StartIndex` 也按合并后的顺序生效。本地筛选同样如此（先取候选集，再本地排序分页）。
 
@@ -587,7 +587,7 @@ emby-in-one
 - 查看日志
 - 卸载服务（支持保留配置和数据）
 
-> SSH 菜单自动检测当前部署方式（Binary / Docker），所有操作自动分发到 systemd 或 Docker Compose 对应命令。Docker 模式下更新采用源码重建流程。菜单没有单独的「查看版本」选项——当前版本号直接显示在菜单标题栏上（形如 `Emby In One 管理菜单 v1.4.4`）。
+> SSH 菜单自动检测当前部署方式（Binary / Docker），所有操作自动分发到 systemd 或 Docker Compose 对应命令。Docker 模式下更新采用源码重建流程。菜单没有单独的「查看版本」选项——当前版本号直接显示在菜单标题栏上（形如 `Emby In One 管理菜单 v1.4.5`）。
 
 ---
 

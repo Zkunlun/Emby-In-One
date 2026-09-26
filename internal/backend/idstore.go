@@ -25,6 +25,11 @@ type IDStoreStats struct {
 	Persistent   bool `json:"persistent"`
 }
 
+type ServerRemovalResult struct {
+	RemovedVirtualIDs  []string
+	PromotedVirtualIDs []string
+}
+
 type idEntry struct {
 	OriginalID     string
 	ServerID       string
@@ -340,53 +345,103 @@ func (s *IDStore) evictExpiredStreamState() {
 	}
 }
 
-// RemoveByServerID removes every mapping belonging to the deleted upstream,
-// both primary entries registered for it and additional-instance entries on surviving primaries.
-// It cascades to drop additional instances belonging to primaries on the deleted server.
+// RemoveByServerID preserves a virtual identity when the deleted primary has a
+// surviving additional instance. Only media with no remaining instance are removed.
 func (s *IDStore) RemoveByServerID(serverID string) error {
+	_, err := s.RemoveByServerIDPreservingInstances(serverID)
+	return err
+}
+
+func (s *IDStore) RemoveByServerIDPreservingInstances(serverID string) (ServerRemovalResult, error) {
+	var result ServerRemovalResult
 	if serverID == "" {
-		return nil
+		return result, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	type promotionPlan struct {
+		primary AdditionalInstance
+		others  []AdditionalInstance
+	}
+	promotions := map[string]promotionPlan{}
+	removed := map[string]struct{}{}
+
+	for virtualID, entry := range s.virtualToOriginal {
+		if entry.ServerID != serverID {
+			continue
+		}
+		remaining := make([]AdditionalInstance, 0, len(entry.OtherInstances))
+		for _, other := range entry.OtherInstances {
+			if other.ServerID != serverID {
+				remaining = append(remaining, other)
+			}
+		}
+		if len(remaining) == 0 {
+			removed[virtualID] = struct{}{}
+			result.RemovedVirtualIDs = append(result.RemovedVirtualIDs, virtualID)
+			continue
+		}
+		promotions[virtualID] = promotionPlan{primary: remaining[0], others: append([]AdditionalInstance(nil), remaining[1:]...)}
+		result.PromotedVirtualIDs = append(result.PromotedVirtualIDs, virtualID)
+	}
+
 	if s.db != nil {
-		err := s.db.withWriteTx(func() error {
-			// 1. Cascade cleanup: delete additional instances owned by primaries that belong to this server.
-			if err := s.db.execParams(
-				`DELETE FROM id_additional_instances WHERE virtual_id IN (SELECT virtual_id FROM id_mappings WHERE server_id = ?)`,
-				serverID,
-			); err != nil {
-				return err
+		if err := s.db.withWriteTx(func() error {
+			for virtualID, plan := range promotions {
+				if err := s.db.execParams(`UPDATE id_mappings SET original_id = ?, server_id = ? WHERE virtual_id = ?`, plan.primary.OriginalID, plan.primary.ServerID, virtualID); err != nil {
+					return err
+				}
+				if err := s.db.execParams(`DELETE FROM id_additional_instances WHERE virtual_id = ?`, virtualID); err != nil {
+					return err
+				}
+				for _, other := range plan.others {
+					if err := s.db.execParams(`INSERT OR IGNORE INTO id_additional_instances (virtual_id, original_id, server_id) VALUES (?, ?, ?)`, virtualID, other.OriginalID, other.ServerID); err != nil {
+						return err
+					}
+				}
 			}
-			// 2. Delete additional instances that point directly to this server.
-			if err := s.db.execParams(`DELETE FROM id_additional_instances WHERE server_id = ?`, serverID); err != nil {
-				return err
+			for virtualID := range removed {
+				if err := s.db.execParams(`DELETE FROM id_additional_instances WHERE virtual_id = ?`, virtualID); err != nil {
+					return err
+				}
+				if err := s.db.execParams(`DELETE FROM id_mappings WHERE virtual_id = ?`, virtualID); err != nil {
+					return err
+				}
 			}
-			// 3. Delete primary mappings for this server.
-			return s.db.execParams(`DELETE FROM id_mappings WHERE server_id = ?`, serverID)
-		})
-		if err != nil {
-			return err
+			// Surviving primaries only need the deleted server removed from their
+			// additional-instance list.
+			return s.db.execParams(`DELETE FROM id_additional_instances WHERE server_id = ?`, serverID)
+		}); err != nil {
+			return ServerRemovalResult{}, err
 		}
 	}
 
 	for virtualID, entry := range s.virtualToOriginal {
-		if entry.ServerID == serverID {
+		if plan, ok := promotions[virtualID]; ok {
+			entry.OriginalID = plan.primary.OriginalID
+			entry.ServerID = plan.primary.ServerID
+			entry.OtherInstances = append([]AdditionalInstance(nil), plan.others...)
+			continue
+		}
+		if _, ok := removed[virtualID]; ok {
 			delete(s.virtualToOriginal, virtualID)
+			delete(s.activeStreamServer, virtualID)
 			continue
 		}
 		kept := entry.OtherInstances[:0]
 		for _, other := range entry.OtherInstances {
-			if other.ServerID == serverID {
-				continue
+			if other.ServerID != serverID {
+				kept = append(kept, other)
 			}
-			kept = append(kept, other)
 		}
 		entry.OtherInstances = kept
+		if active, ok := s.activeStreamServer[virtualID]; ok && active.ServerID == serverID {
+			delete(s.activeStreamServer, virtualID)
+		}
 	}
 	s.rebuildIndexesLocked()
-	return nil
+	return result, nil
 }
 
 // rebuildIndexesLocked recomputes both derived indexes from virtualToOriginal.

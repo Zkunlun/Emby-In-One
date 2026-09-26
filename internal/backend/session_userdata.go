@@ -520,7 +520,12 @@ func (a *App) handlePlayedItemState(w http.ResponseWriter, r *http.Request, meth
 
 	if a.WatchStore != nil {
 		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
-			if err := a.WatchStore.MarkPlayed(reqCtx.ProxyUser.UserID, virtualItemID, played); err != nil {
+			if err := a.ensureWatchRecordMetadata(r, reqCtx, virtualItemID, resolved); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to prepare local watched state"})
+				return
+			}
+			playedAt := parseLocalPlayedAt(query.Get("DatePlayed"))
+			if err := a.WatchStore.MarkPlayedAt(reqCtx.ProxyUser.UserID, virtualItemID, played, playedAt); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local watched state"})
 				return
 			}
@@ -556,9 +561,27 @@ func (a *App) handleUserItemUserData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var playedValue *bool
+	var favoriteValue *bool
+	var positionValue *int64
+	var runtimeValue int64
+	var localPlayedAt int64
 	if bodyMap, ok := body.(map[string]any); ok {
 		if played, ok := bodyMap["Played"].(bool); ok {
 			playedValue = &played
+		}
+		if favorite, ok := bodyMap["IsFavorite"].(bool); ok {
+			favoriteValue = &favorite
+		}
+		if position, ok := numericInt64(bodyMap["PlaybackPositionTicks"]); ok {
+			positionValue = &position
+		}
+		if runtime, ok := numericInt64(bodyMap["RunTimeTicks"]); ok {
+			runtimeValue = runtime
+		} else if runtime, ok := numericInt64(bodyMap["RuntimeTicks"]); ok {
+			runtimeValue = runtime
+		}
+		if text, _ := bodyMap["LastPlayedDate"].(string); text != "" {
+			localPlayedAt = parseLocalPlayedAt(text)
 		}
 	}
 	status, payload, err := a.forwardJSONOrNoContent(r, resolved.Client, http.MethodPost, fmt.Sprintf("/Users/%s/Items/%s/UserData", resolved.Client.clientUserID(), resolved.OriginalID), nil, body)
@@ -566,14 +589,45 @@ func (a *App) handleUserItemUserData(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
 		return
 	}
-	// Dual-write: record played status to WatchStore for non-admin users. This runs
-	// only after the upstream accepted the change, matching handleFavoriteItemAdd and
-	// handleFavoriteItemRemove. Writing first left the local state permanently ahead of
-	// the upstream whenever the forward failed — and MarkPlayed inserts a skeleton row
-	// (server_index = 0) even for an item that was never watched.
+	// Dual-write only after the upstream accepted the change. The local record is
+	// seeded with route/item metadata first so explicit mutations never create a
+	// server-less skeleton that Resume/NextUp cannot resolve later.
 	if a.WatchStore != nil {
-		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" && playedValue != nil {
-			_ = a.WatchStore.MarkPlayed(reqCtx.ProxyUser.UserID, virtualItemID, *playedValue)
+		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
+			if positionValue != nil || playedValue != nil || favoriteValue != nil {
+				if err := a.ensureWatchRecordMetadata(r, reqCtx, virtualItemID, resolved); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to prepare local user state"})
+					return
+				}
+			}
+			// A UserData payload may carry Played=false together with a non-zero
+			// PlaybackPositionTicks. Apply the unplayed transition first so the explicit
+			// position that follows is preserved as the new in-progress state. Played=true
+			// stays last because a completed item must finish at position zero.
+			if playedValue != nil && !*playedValue {
+				if err := a.WatchStore.MarkPlayedAt(reqCtx.ProxyUser.UserID, virtualItemID, false, localPlayedAt); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local watched state"})
+					return
+				}
+			}
+			if positionValue != nil {
+				if err := a.WatchStore.UpdatePositionAt(reqCtx.ProxyUser.UserID, virtualItemID, *positionValue, runtimeValue, localPlayedAt); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local playback position"})
+					return
+				}
+			}
+			if favoriteValue != nil {
+				if err := a.WatchStore.SetFavorite(reqCtx.ProxyUser.UserID, virtualItemID, *favoriteValue); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local favorite state"})
+					return
+				}
+			}
+			if playedValue != nil && *playedValue {
+				if err := a.WatchStore.MarkPlayedAt(reqCtx.ProxyUser.UserID, virtualItemID, true, localPlayedAt); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local watched state"})
+					return
+				}
+			}
 		}
 	}
 	if payload == nil {
@@ -610,10 +664,18 @@ func (a *App) handleFavoriteItemAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
 		return
 	}
-	// Dual-write favorite
+	// Dual-write favorite after upstream success; metadata seeding prevents a
+	// favorite-only first interaction from becoming an unroutable skeleton row.
 	if a.WatchStore != nil {
 		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
-			_ = a.WatchStore.SetFavorite(reqCtx.ProxyUser.UserID, virtualItemID, true)
+			if err := a.ensureWatchRecordMetadata(r, reqCtx, virtualItemID, resolved); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to prepare local favorite state"})
+				return
+			}
+			if err := a.WatchStore.SetFavorite(reqCtx.ProxyUser.UserID, virtualItemID, true); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local favorite state"})
+				return
+			}
 		}
 	}
 	if payload == nil {
@@ -649,10 +711,17 @@ func (a *App) handleFavoriteItemRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
 		return
 	}
-	// Dual-write favorite removal
+	// Dual-write favorite removal after upstream success.
 	if a.WatchStore != nil {
 		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
-			_ = a.WatchStore.SetFavorite(reqCtx.ProxyUser.UserID, virtualItemID, false)
+			if err := a.ensureWatchRecordMetadata(r, reqCtx, virtualItemID, resolved); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to prepare local favorite state"})
+				return
+			}
+			if err := a.WatchStore.SetFavorite(reqCtx.ProxyUser.UserID, virtualItemID, false); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local favorite state"})
+				return
+			}
 		}
 	}
 	if payload == nil {
@@ -668,78 +737,38 @@ func (a *App) handleFavoriteItemRemove(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, payload)
 }
 
-// overlayLocalUserData patches the UserData fields in a response payload
-// to reflect the local per-user state (for non-admin users only).
-// overlayLocalUserDataItems overlays local UserData on each item in a list.
-// Items must have an "Id" field with the virtual item ID.
+// These compatibility wrappers keep existing explicit handlers small while all
+// regular-user UserData semantics live in user_state.go.
 func (a *App) overlayLocalUserDataItems(r *http.Request, items []map[string]any) {
-	if a.WatchStore == nil {
+	if a.WatchStore == nil || !isRegularProxyUser(r) || len(items) == 0 {
 		return
 	}
 	reqCtx := requestContextFrom(r.Context())
-	if reqCtx == nil || reqCtx.ProxyUser == nil || reqCtx.ProxyUser.Role == "admin" {
-		return
-	}
+	ids := make([]string, 0, len(items))
 	for _, item := range items {
 		if id, _ := item["Id"].(string); id != "" {
-			a.overlayLocalUserData(r, id, item)
+			ids = append(ids, id)
 		}
+	}
+	rows := a.WatchStore.GetProgressBatch(reqCtx.ProxyUser.UserID, ids)
+	for _, item := range items {
+		id, _ := item["Id"].(string)
+		applyUserDataStateToItem(item, progressPtr(rows, id))
+	}
+}
+
+func applyUserDataStateToItem(item map[string]any, row *WatchProgress) {
+	if item == nil {
+		return
+	}
+	if ud, ok := item["UserData"].(map[string]any); ok {
+		applyUserDataState(ud, row)
+	}
+	if isUserDataMap(item) {
+		applyUserDataState(item, row)
 	}
 }
 
 func (a *App) overlayLocalUserData(r *http.Request, virtualItemID string, payload any) {
-	if a.WatchStore == nil {
-		return
-	}
-	reqCtx := requestContextFrom(r.Context())
-	if reqCtx == nil || reqCtx.ProxyUser == nil || reqCtx.ProxyUser.Role == "admin" {
-		return
-	}
-	progress := a.WatchStore.GetProgress(reqCtx.ProxyUser.UserID, virtualItemID)
-	if progress == nil {
-		// No local record → clear upstream admin's UserData to avoid leaking
-		clearUpstreamUserData(payload)
-		return
-	}
-	m, ok := payload.(map[string]any)
-	if !ok {
-		return
-	}
-	// Overlay top-level fields if this IS a UserData object
-	if _, hasPlayPos := m["PlaybackPositionTicks"]; hasPlayPos {
-		m["PlaybackPositionTicks"] = progress.PositionTicks
-		m["Played"] = progress.Played
-		m["IsFavorite"] = progress.IsFavorite
-	}
-	// Overlay nested UserData if present
-	if ud, ok := m["UserData"].(map[string]any); ok {
-		ud["PlaybackPositionTicks"] = progress.PositionTicks
-		ud["Played"] = progress.Played
-		ud["IsFavorite"] = progress.IsFavorite
-	}
-}
-
-// clearUpstreamUserData resets UserData fields to a clean state, preventing
-// the upstream admin's watch history from leaking to non-admin users.
-func clearUpstreamUserData(payload any) {
-	m, ok := payload.(map[string]any)
-	if !ok {
-		return
-	}
-	// Top-level UserData fields (when payload IS a UserData object)
-	if _, hasPlayPos := m["PlaybackPositionTicks"]; hasPlayPos {
-		m["PlaybackPositionTicks"] = 0
-		m["Played"] = false
-		m["IsFavorite"] = false
-		m["PlayedPercentage"] = 0
-		delete(m, "LastPlayedDate")
-	}
-	// Nested UserData (when payload is an item with UserData sub-object)
-	if ud, ok := m["UserData"].(map[string]any); ok {
-		ud["PlaybackPositionTicks"] = 0
-		ud["Played"] = false
-		ud["IsFavorite"] = false
-		ud["PlayedPercentage"] = 0
-		delete(ud, "LastPlayedDate")
-	}
+	a.normalizeLocalUserDataForItem(r, virtualItemID, payload)
 }

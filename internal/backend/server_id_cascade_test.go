@@ -35,21 +35,30 @@ func TestRemoveByServerIDCascadeClean(t *testing.T) {
 		t.Fatalf("virtB setup incorrect: %+v", r)
 	}
 
-	// Delete srv-A
-	if err := store.RemoveByServerID("srv-A"); err != nil {
-		t.Fatalf("RemoveByServerID(srv-A): %v", err)
+	// Delete srv-A. virtA has a surviving srv-B instance, so its virtual identity
+	// must be preserved and srv-B promoted to primary.
+	result, err := store.RemoveByServerIDPreservingInstances("srv-A")
+	if err != nil {
+		t.Fatalf("RemoveByServerIDPreservingInstances(srv-A): %v", err)
+	}
+	if len(result.PromotedVirtualIDs) != 1 || result.PromotedVirtualIDs[0] != virtA {
+		t.Fatalf("promoted = %#v, want [%s]", result.PromotedVirtualIDs, virtA)
+	}
+	if len(result.RemovedVirtualIDs) != 0 {
+		t.Fatalf("removed = %#v, want none", result.RemovedVirtualIDs)
 	}
 
 	// Verify:
-	// a. virtA must be completely gone (primary was on srv-A, and the child instance on srv-B should also be cleaned up!)
-	if r := store.ResolveVirtualID(virtA); r != nil {
-		t.Errorf("virtA should be removed completely, but got: %+v", r)
+	// a. virtA survives under the same virtual ID, now routed to srv-B.
+	rA := store.ResolveVirtualID(virtA)
+	if rA == nil || rA.ServerID != "srv-B" || rA.OriginalID != "movie-1-b" {
+		t.Fatalf("virtA was not promoted correctly: %+v", rA)
 	}
 	if r := store.ResolveByOriginalID("movie-1"); r != nil {
-		t.Errorf("movie-1 on srv-A should not be resolvable, but got: %+v", r)
+		t.Errorf("deleted srv-A original should not be resolvable, got: %+v", r)
 	}
-	if r := store.ResolveByOriginalID("movie-1-b"); r != nil {
-		t.Errorf("movie-1-b (orphan additional instance) should not be resolvable, but got: %+v", r)
+	if r := store.ResolveByOriginalID("movie-1-b"); r == nil || r.ServerID != "srv-B" {
+		t.Errorf("promoted srv-B original should resolve, got: %+v", r)
 	}
 
 	// b. virtB must still exist on srv-B, but its additional instance from srv-A must be gone!

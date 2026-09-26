@@ -1,5 +1,45 @@
 # Emby-In-One 更新日志
 
+## V1.4.5
+
+发布日期：2026-09-26（V1.4.5 正式版）
+
+> V1.4.5 是一次针对 **V1.4.4 既有多用户隔离能力的补全与收敛**。V1.4.4 已经拥有本地 WatchStore、普通用户独立进度 / Played / Favorite / Resume / NextUp；本版重点修复剩余的共享上游状态泄漏、读取路径不一致、完整 UserData 写入、`IsUnplayed` 筛选以及多实例删除等边界，使“普通用户本地权威、管理员上游权威、写入继续双写”的模型在更多 Emby API 路径上保持一致。
+
+### 多用户状态隔离补全
+
+- **角色语义固定**：管理员继续直接使用上游 Emby 的 PlaybackPosition / Played / Favorite / Resume / NextUp / History / UserData；普通用户的 EIO 可见个人状态以本地 WatchStore 为权威，不再因为其他用户改变共享上游账号而发生变化。
+- **普通用户仍然双写**：真实播放、进度、停止、Played、Favorite 与 UserData 变更继续先发送到对应上游，同时维护当前普通用户的本地状态；双写不等于双读，普通用户读回时仍由本地状态覆盖。
+- **统一 UserData Normalizer**：在 ID 改写后递归覆盖普通用户的 `PlaybackPositionTicks`、`Played`、`IsFavorite`、`PlayedPercentage` 与 `LastPlayedDate`；Admin 跳过该覆盖。上游共享账号的 `Rating`、`PlayCount`、`UnplayedItemCount` 等未本地实现的个人字段不会继续泄漏到普通用户。
+- **覆盖更多响应路径**：Items、Views、Latest、详情、ThemeMedia、Resume 以及 generic JSON fallback 等路径统一进入本地 UserData 归一化；上游未返回 `UserData` 时，只要是明确的媒体对象且本地已有状态，也可补出本地 UserData。
+- **批量查询避免 N+1**：新增 WatchStore 批量读取接口，递归响应覆盖按 Virtual ID 批量取状态，而不是逐项目查询 SQLite。
+
+### 播放时间、状态写入与元数据
+
+- `last_played` 重新明确为**真实播放 / 历史时间**，新增 `updated_at` 用于普通状态更新时间；Favorite / Unfavorite 不再制造假的 LastPlayedDate。
+- Played / UserData 支持客户端 `DatePlayed`，兼容 Emby 紧凑时间与 RFC3339；标记 Unplayed 会清零 Resume position，但保留历史 `last_played`。
+- 修复同一 UserData 请求同时携带 `Played=false` 与非零 `PlaybackPositionTicks` 时进度被错误清零的问题；现在先处理 Unplayed，再落进度。
+- 显式 Played / Favorite / UserData 操作在本地记录缺少媒体信息时会根据 Virtual ID 回源补齐 server / original item / episode / series metadata，再持久化状态，避免生成无法用于 Resume / NextUp 的空壳记录。
+
+### 本地筛选与多实例一致性
+
+- **`IsUnplayed` 正式本地化**：普通用户查询 `Filters=IsUnplayed` 时，代理会移除上游共享状态筛选并获取候选集；没有本地 WatchStore 记录的项目天然视为未观看，只有本地记录 `Played=true` 才从结果中排除。
+- `IsFavorite`、`IsPlayed`、`IsResumable` 继续使用本地状态；`Likes`、`Dislikes`、`IsFavoriteOrLiked` 仍为上游共享语义，并继续通过 notice / WARN 提示。
+- 删除一个上游实例时，如果同一 Virtual ID 仍有 OtherInstance，则提升剩余实例并保留 Virtual ID 与普通用户 WatchStore；只有最后一个实例消失时才删除对应观看状态。
+
+### 实例迁移与验收
+
+- 本次 WatchStore 状态模型按**不迁移旧本地用户状态**处理；正式部署时保留 Virtual ID / 多实例映射和上游 Emby 状态，清空旧 EIO 普通用户、授权、旧登录 Token 与旧 watch state，再由新版本创建新的状态表。
+- zouter-HK 正式实例完成真实客户端验收：Admin 与 User A / User B 状态独立；User A / User B 的播放进度、收藏、已观看标记互相独立；普通用户最新播放仍成功双写到上游，上游账号保存最新播放状态，Admin 与上游状态保持同步。
+- V1.4.4 已修复并验收的 Vivid 剧集列表问题保持 CLOSED；此前“流光画廊无法播放”的观察最终确认属于 CapyPlayer 客户端内部问题，不再作为 EIO 缺陷跟踪。
+
+### 验证说明
+
+- Phase 3 功能实现后，`go test ./internal/backend -count=1` 与 `go test ./... -count=1` 均通过。
+- 完整 backend `-race` 在 Windows 环境运行约 601 秒后以失败状态结束，但可见日志没有出现 `WARNING: DATA RACE`；按维护者决定，本版不把该次 race 运行作为发布阻塞项，也未继续做最终人工 diff review。
+
+---
+
 ## V1.4.4
 
 发布日期：2026-09-26（V1.4.4 正式版）

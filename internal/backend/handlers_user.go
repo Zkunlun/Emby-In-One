@@ -151,11 +151,13 @@ func (a *App) handleUserViews(w http.ResponseWriter, r *http.Request) {
 		return items
 	})
 	allViews := flattenItems(groups)
-	writeJSON(w, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"Items":            toAnySlice(allViews),
 		"TotalRecordCount": len(allViews),
 		"StartIndex":       0,
-	})
+	}
+	a.normalizeLocalUserDataPayload(r, payload)
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (a *App) handleUserGroupingOptions(w http.ResponseWriter, r *http.Request) {

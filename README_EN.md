@@ -1,6 +1,6 @@
 # Emby-In-One
 
-> **Version: V1.4.4**
+> **Version: V1.4.5**
 
 [![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -75,7 +75,7 @@ Emby Connection Address: https://emby.cothx.eu.cc/
 
 > **Notice for Legacy Node.js Deployment**: If you wish to deploy the V1.2.1 stable Node.js version, please use the original project's [Releases page](https://github.com/ArizeSky/Emby-In-One/releases) to download the V1.2.1 Source code archive, extract it, and run `bash install.sh`. The `legacy/` directory in this repository keeps the V1.2.1 Node.js source **for reference only** (the Go ID virtualization was written against it); it takes part in no build, image or install of the Go version — see `legacy/README.md`.
 
-This project primarily recommends using Release binaries for V1.4.4 directly on Linux servers (no local Go build required); Docker deployment is suitable for scenarios where you want to build the image yourself.
+This project primarily recommends using Release binaries for V1.4.5 directly on Linux servers (no local Go build required); Docker deployment is suitable for scenarios where you want to build the image yourself.
 
 ### Method 1: Release Binary One-Click Install (Primary Recommendation)
 
@@ -87,7 +87,7 @@ sudo bash release-install.sh
 Optional: install a specific version.
 
 ```bash
-sudo bash release-install.sh V1.4.4
+sudo bash release-install.sh V1.4.5
 ```
 
 This script will automatically:
@@ -317,15 +317,15 @@ Because all distributed users share the same upstream Emby account, upstream wat
 | Played Status | Upstream server data | Local independent record |
 | Favorite | Upstream server data | Local independent record |
 | UserData in browsing pages | Direct passthrough from upstream | Overlay local state over it |
-| List filtering (favorites / played / resumable) | Upstream server filtering | Local record filtering |
+| List filtering (favorites / played / unplayed / resumable) | Upstream server filtering | Local record filtering |
 
-**List filtering (local since V1.4.4):**
+**List filtering (local since V1.4.4; `IsUnplayed` completed in V1.4.5):**
 
-- `Filters=IsFavorite`, `IsPlayed` and `IsResumable` are answered from the **local records**: the proxy fetches the candidate set for that container, intersects it with the local set, then sorts, pages and recounts locally. "Favorites only" therefore returns that user's own favorites, including items favorited locally that the upstream account never favorited. Container constraints such as `ParentId`, `Recursive` and `IncludeItemTypes` are still applied upstream.
+- `Filters=IsFavorite`, `IsPlayed`, `IsResumable` and `IsUnplayed` are answered from the **local records**: the proxy fetches the candidate set for that container, evaluates it against the current proxy user's WatchStore state, then sorts, pages and recounts locally. For `IsUnplayed`, an item with no local row is naturally unwatched; only a local row with `Played=true` excludes it. Container constraints such as `ParentId`, `Recursive` and `IncludeItemTypes` are still applied upstream.
 - Sorting: `SortName`, `DateCreated`, `ProductionYear` and `CommunityRating` are sorted locally; any other sort key (e.g. `DatePlayed`) degrades to the local "recently played / favorited" order.
 - Unrecognized filter values (e.g. `IsFolder`) are forwarded upstream untouched, so the client's intent is never silently dropped.
 
-> **Known limitation**: `Filters=IsUnplayed` is a **complement** ("unwatched = everything minus watched") and the local records only hold items the user has touched, so there is no way to enumerate the full set — it is still decided by the shared upstream account. `IsFavoriteOrLiked` is the same story: the "liked" state is not recorded locally. When such a filter is used, the proxy returns the `X-Emby-In-One-Filter-Notice` response header and writes one WARN log line (at most one per filter per minute) saying so.
+> **Known limitation**: `Likes`, `Dislikes` and `IsFavoriteOrLiked` still use shared upstream semantics because the local WatchStore does not yet record liked/disliked state. These unlocalized filters return the `X-Emby-In-One-Filter-Notice` response header and emit a throttled WARN log.
 
 **Paging:** the aggregated list without a `ParentId` (`GET /Users/{id}/Items` with no container) is paged by the proxy **after** merging and deduplicating, so `TotalRecordCount` is the merged total and `StartIndex` counts in merged order. Local filtering works the same way: the candidate set is fetched first, then sorted and paged locally.
 
@@ -586,7 +586,7 @@ Available commands:
 - View logs
 - Uninstall service (supports preserving config and data)
 
-> The SSH menu auto-detects the current deployment method (Binary / Docker), dispatching all operations to the corresponding systemd or Docker Compose commands. Docker mode updates use a source-rebuild workflow. There is no separate "check version" entry — the current version is shown directly in the menu title bar (e.g. `Emby In One 管理菜单 v1.4.4`).
+> The SSH menu auto-detects the current deployment method (Binary / Docker), dispatching all operations to the corresponding systemd or Docker Compose commands. Docker mode updates use a source-rebuild workflow. There is no separate "check version" entry — the current version is shown directly in the menu title bar (e.g. `Emby In One 管理菜单 v1.4.5`).
 
 ---
 

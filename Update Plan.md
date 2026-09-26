@@ -1,6 +1,19 @@
 # Emby-In-One Update Plan
 
-当前稳定版本：**V1.4.4**
+当前稳定版本：**V1.4.5**
+
+---
+
+## ✅ V1.4.5（已完成）：多用户观看状态隔离补全
+
+V1.4.4 已具备普通用户独立 WatchStore；V1.4.5 在该基础上补全读取、写入、筛选、回退和多实例删除等边界，使用户隔离语义更严谨。
+
+- Admin 保持上游 Emby 原生状态语义；普通用户读取以本地 WatchStore 为权威，写入继续双写本地与上游。
+- 统一普通用户 `UserData` 覆盖：PlaybackPosition、Played、Favorite、PlayedPercentage、LastPlayedDate 均来自本地状态，避免共享上游账号反向污染。
+- `IsUnplayed` 改为普通用户本地语义：无本地记录即未观看，本地 `Played=true` 才排除；Likes / Dislikes / IsFavoriteOrLiked 仍为上游语义。
+- Played / Favorite / 完整 UserData 写入补齐元数据种子，保证 Resume / NextUp 等本地计算可路由。
+- 上游实例删除时，仅最后一个实例消失才删除对应 WatchStore；存在 OtherInstance 时提升实例并保留 Virtual ID 与用户状态。
+- zouter-HK 正式实例已完成 User A / User B / Admin 实机验收：两普通用户播放进度、收藏、已观看互相独立；上游保存最新双写状态；Admin 与上游同步。
 
 ---
 
