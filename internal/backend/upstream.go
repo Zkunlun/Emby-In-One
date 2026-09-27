@@ -58,13 +58,43 @@ var spoofProfiles = map[string]map[string]string{
 
 const recoveryDebounce = 30 * time.Second
 
+var errNoUsableStreamBase = errors.New("no usable stream base available")
+
 func isUpstreamLoginPath(path string) bool {
 	return path == "/Users/AuthenticateByName" || path == "/Users/Me"
+}
+
+// isStreamUnavailableStatus classifies HTTP responses that mean the stream
+// route cannot currently fulfill media traffic. Keep this shared between
+// background liveness probes and proxy playback so both paths use one health
+// definition. Other HTTP responses, including 404 and 500, still prove that
+// the configured route answered and are not line failures by themselves.
+func isStreamUnavailableStatus(status int) bool {
+	switch status {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 type rawRequestBody struct {
 	data        []byte
 	contentType string
+}
+
+type streamBaseHealthState uint8
+
+const (
+	streamBaseUnknown streamBaseHealthState = iota
+	streamBaseAlive
+	streamBaseDead
+)
+
+type streamBaseHealth struct {
+	state                 streamBaseHealthState
+	lastFailure           time.Time
+	observationGeneration uint64
 }
 
 type UpstreamClient struct {
@@ -88,10 +118,10 @@ type UpstreamClient struct {
 	recoveryMu     sync.Mutex
 	lastRecovery   time.Time
 	onAuthError    func(c *UpstreamClient)
-	// streamFailures tracks per-stream-base connect-level failure times for
-	// liveness marking; guarded by mu. A base marked dead is skipped by
-	// streamBaseCandidates until streamFailureCooldown passes.
-	streamFailures map[string]time.Time
+	// streamHealth stores explicit per-stream-base liveness. Configured bases start
+	// unknown; a dead base stays dead until a successful request/probe marks it alive.
+	// lastFailure only throttles when a dead base may be probed again.
+	streamHealth map[string]streamBaseHealth
 }
 
 type UpstreamPool struct {
@@ -128,6 +158,10 @@ func (p *UpstreamPool) LoginAll() {
 		}
 		client.Login(context.Background(), nil, identity)
 	}
+	// Login completion is the first point at startup where stream lines are
+	// meaningful to probe. Kick the health runner now instead of waiting for the
+	// first periodic health interval.
+	p.triggerStreamProbe()
 	if p.logger != nil {
 		online := 0
 		for _, client := range clients {
@@ -161,6 +195,14 @@ func (p *UpstreamPool) Reload(cfg Config) {
 			newClient.UserID = old.UserID
 			newClient.Online = old.Online
 			newClient.LastError = old.LastError
+			// Preserve explicit liveness only for stream bases that still exist in
+			// the rebuilt client. Removed lines must disappear, while newly added
+			// lines keep the unknown state initialized by newUpstreamClient.
+			for _, base := range newClient.StreamBaseURLs {
+				if health, exists := old.streamHealth[base]; exists {
+					newClient.streamHealth[base] = health
+				}
+			}
 			old.mu.RUnlock()
 		}
 		clients = append(clients, newClient)
@@ -191,6 +233,10 @@ func (p *UpstreamPool) Reload(cfg Config) {
 	}
 
 	p.restartHealthChecks(cfg.Timeouts)
+	// Existing online sessions are carried into the rebuilt clients above. Probe
+	// their stream lines immediately so a config/settings reload cannot leave
+	// redirect selection on stale liveness data until the next ticker.
+	p.triggerStreamProbe()
 }
 
 func (p *UpstreamPool) handleUpstreamAuthError(c *UpstreamClient) {
@@ -277,6 +323,11 @@ func newUpstreamClient(cfg Config, upstream UpstreamConfig, index int, logger *L
 		streamBases = []string{baseURL}
 	}
 
+	streamHealth := make(map[string]streamBaseHealth, len(streamBases))
+	for _, base := range streamBases {
+		streamHealth[base] = streamBaseHealth{state: streamBaseUnknown}
+	}
+
 	// Resolve proxy: per-upstream transport if proxyId is set, otherwise shared
 	transport := http.RoundTripper(sharedTransport)
 	if proxy := findProxy(cfg.Proxies, upstream.ProxyID); proxy != nil {
@@ -308,59 +359,170 @@ func newUpstreamClient(cfg Config, upstream UpstreamConfig, index int, logger *L
 			Timeout:       time.Duration(timeouts.API) * time.Millisecond,
 			CheckRedirect: redirectPolicy(upstream.FollowRedirects),
 		},
-		transport:      transport,
-		logger:         logger,
-		timeouts:       timeouts,
-		streamFailures: make(map[string]time.Time),
+		transport:    transport,
+		logger:       logger,
+		timeouts:     timeouts,
+		streamHealth: streamHealth,
 	}
 }
 
-// streamFailureCooldown is how long a stream base stays marked dead after a
-// connect-level failure or a failed liveness probe. Short enough that a flapped
-// line recovers on the next request; long enough that a dead line is not
-// retried on every segment.
+// streamFailureCooldown is a revalidation throttle for a dead stream base.
+// Time passing never makes a dead base healthy by itself; after this delay the
+// background probe may test it again, and only a successful probe/request can
+// transition it back to alive.
 const streamFailureCooldown = 60 * time.Second
 
-// markStreamBaseFailed records a connect-level failure for one stream base.
-func (c *UpstreamClient) markStreamBaseFailed(base string) {
+// beginStreamBaseObservation reserves the next observation generation for one
+// stream base. Generations are intentionally per-base: activity on one line must
+// never make an in-flight observation on another line stale. Reserving happens
+// immediately before network I/O, so preparation failures do not supersede a
+// valid observation that is already in flight.
+func (c *UpstreamClient) beginStreamBaseObservation(base string) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.streamFailures == nil {
-		c.streamFailures = make(map[string]time.Time)
+	if c.streamHealth == nil {
+		c.streamHealth = make(map[string]streamBaseHealth)
 	}
-	c.streamFailures[base] = time.Now()
+	health := c.streamHealth[base]
+	health.observationGeneration++
+	if health.observationGeneration == 0 { // practically unreachable uint64 wraparound
+		health.observationGeneration = 1
+	}
+	c.streamHealth[base] = health
+	return health.observationGeneration
 }
 
-// markStreamBaseAlive clears the failure mark for one stream base. A successful
-// request or liveness probe through the line proves it works again.
-func (c *UpstreamClient) markStreamBaseAlive(base string) {
+// markStreamBaseFailedObservation applies a network failure only if it belongs
+// to the most recently started observation for this base. An older probe/request
+// may finish later, but its stale result cannot overwrite newer evidence.
+func (c *UpstreamClient) markStreamBaseFailedObservation(base string, generation uint64) bool {
+	if generation == 0 {
+		return false
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.streamFailures, base)
+	health, ok := c.streamHealth[base]
+	if !ok || health.observationGeneration != generation {
+		return false
+	}
+	health.state = streamBaseDead
+	health.lastFailure = time.Now()
+	c.streamHealth[base] = health
+	return true
 }
 
-// streamBaseCandidates returns the stream bases in configured order, skipping
-// those marked dead within the cooldown. When every base is marked dead the
-// full ordered list is returned anyway: a wrong liveness verdict must never
-// leave the upstream with no stream base at all.
-func (c *UpstreamClient) streamBaseCandidates() []string {
+// markStreamBaseAliveObservation applies reachable-line evidence under the same
+// per-base generation fence used for failures.
+func (c *UpstreamClient) markStreamBaseAliveObservation(base string, generation uint64) bool {
+	if generation == 0 {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	health, ok := c.streamHealth[base]
+	if !ok || health.observationGeneration != generation {
+		return false
+	}
+	health.state = streamBaseAlive
+	health.lastFailure = time.Time{}
+	c.streamHealth[base] = health
+	return true
+}
+
+// markStreamBaseFailed is the direct/manual state mutation helper used by tests
+// and non-network callers. Treat it as a new observation so any older in-flight
+// network result cannot undo the explicit state change.
+func (c *UpstreamClient) markStreamBaseFailed(base string) {
+	generation := c.beginStreamBaseObservation(base)
+	c.markStreamBaseFailedObservation(base, generation)
+}
+
+// markStreamBaseAlive is the symmetric direct/manual helper.
+func (c *UpstreamClient) markStreamBaseAlive(base string) {
+	generation := c.beginStreamBaseObservation(base)
+	c.markStreamBaseAliveObservation(base, generation)
+}
+
+// streamBaseProbeCandidates returns configured bases that should be checked by
+// the next background probe. Unknown/alive bases are always observed; dead bases
+// are held until the cooldown expires, at which point they may be revalidated.
+// Eligibility to probe is not eligibility for playback.
+func (c *UpstreamClient) streamBaseProbeCandidates(now time.Time) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if len(c.StreamBaseURLs) <= 1 {
+		return nil
+	}
+	bases := make([]string, 0, len(c.StreamBaseURLs))
+	for _, base := range c.StreamBaseURLs {
+		health, ok := c.streamHealth[base]
+		if !ok || health.state != streamBaseDead || health.lastFailure.IsZero() || now.Sub(health.lastFailure) >= streamFailureCooldown {
+			bases = append(bases, base)
+		}
+	}
+	return bases
+}
+
+// streamPlaybackAndRecoveryCandidates snapshots stream-line health in configured
+// order. Unknown/alive lines are immediately playable. Dead lines never become
+// playable merely because time passed; once their cooldown expires they appear
+// only in the recovery list. Callers decide whether a recovery attempt is
+// appropriate for their playback mode.
+func (c *UpstreamClient) streamPlaybackAndRecoveryCandidates(now time.Time) ([]string, []string) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	bases := c.StreamBaseURLs
 	if len(bases) == 0 {
-		return []string{c.StreamBaseURL}
+		bases = []string{c.StreamBaseURL}
 	}
-	live := make([]string, 0, len(bases))
+
+	playback := make([]string, 0, len(bases))
+	recovery := make([]string, 0, len(bases))
 	for _, base := range bases {
-		if failed, ok := c.streamFailures[base]; ok && time.Since(failed) < streamFailureCooldown {
+		health, ok := c.streamHealth[base]
+		if !ok || health.state != streamBaseDead {
+			playback = append(playback, base)
 			continue
 		}
-		live = append(live, base)
+		if health.lastFailure.IsZero() || now.Sub(health.lastFailure) >= streamFailureCooldown {
+			recovery = append(recovery, base)
+		}
 	}
-	if len(live) == 0 {
-		return append([]string(nil), bases...)
+	return playback, recovery
+}
+
+// streamBaseCandidates returns redirect playback candidates in configured order.
+// Unknown and confirmed-alive bases remain eligible; confirmed-dead bases remain
+// excluded until successful traffic or a probe explicitly revives them. All-dead
+// therefore returns an empty list rather than leaking a known-dead fallback URL.
+func (c *UpstreamClient) streamBaseCandidates() []string {
+	playback, _ := c.streamPlaybackAndRecoveryCandidates(time.Now())
+	return playback
+}
+
+// streamRedirectRecoveryCandidates returns cooldown-expired dead lines only when
+// redirect has no immediately playable line. Request-scoped recovery must never
+// probe an aged dead line merely to restore its priority while another usable line
+// already exists.
+func (c *UpstreamClient) streamRedirectRecoveryCandidates(now time.Time) []string {
+	playback, recovery := c.streamPlaybackAndRecoveryCandidates(now)
+	if len(playback) > 0 {
+		return nil
 	}
-	return live
+	return recovery
+}
+
+// streamProxyCandidates returns the bases a proxied media request may actually
+// contact. While any unknown/alive line exists, dead lines stay excluded even if
+// their cooldown has elapsed; background probes are responsible for restoring
+// them. Only when every configured line is dead may proxy playback perform a
+// controlled recovery attempt, limited to dead lines whose cooldown has expired.
+func (c *UpstreamClient) streamProxyCandidates(now time.Time) []string {
+	playback, recovery := c.streamPlaybackAndRecoveryCandidates(now)
+	if len(playback) > 0 {
+		return playback
+	}
+	return recovery
 }
 
 func (p *UpstreamPool) GetClient(index int) *UpstreamClient {
@@ -746,13 +908,14 @@ func (c *UpstreamClient) BuildURLForMode(path string, params url.Values, stream 
 	}
 	base := c.BaseURL
 	if stream {
-		// The redirect hands one URL to the client for the whole playback, so it
-		// must be a line that currently answers: take the first live candidate.
-		if candidates := c.streamBaseCandidates(); len(candidates) > 0 {
-			base = candidates[0]
-		} else {
-			base = c.StreamBaseURL
+		// A direct redirect hands one URL to the client for the whole playback.
+		// Never manufacture that URL from a line already known dead; request-scoped
+		// recovery must revive a line before URL construction reaches this point.
+		candidates := c.streamBaseCandidates()
+		if len(candidates) == 0 {
+			return "", errNoUsableStreamBase
 		}
+		base = candidates[0]
 	}
 	fullURL, err := url.Parse(base + path)
 	if err != nil {
@@ -788,10 +951,10 @@ func (c *UpstreamClient) doRequest(ctx context.Context, reqCtx *RequestContext, 
 // same snapshot for the URL, the body and the authentication headers, so a user
 // ID can never be paired with another login's token.
 //
-// For stream requests with fallback stream bases configured, a connect-level
-// failure (DNS, TCP, TLS — anything that never produced a response) is retried
-// against the next base. Any HTTP response, including a 4xx or 5xx, stops the
-// attempts: the upstream answered, so the failure is not the line's.
+// For stream requests with fallback stream bases configured, transport failures
+// (DNS, TCP, TLS — anything that never produced a response) and HTTP statuses
+// classified as stream-unavailable are retried against the next base. Other HTTP
+// responses stop the attempts because the configured route answered.
 func (c *UpstreamClient) doRequestForMode(ctx context.Context, reqCtx *RequestContext, method, path string, params url.Values, body any, headers http.Header, stream bool, mode outboundAuthMode) (*http.Response, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -806,12 +969,23 @@ func (c *UpstreamClient) doRequestForMode(ctx context.Context, reqCtx *RequestCo
 		return c.doRequestOnce(ctx, reqCtx, method, path, params, body, headers, stream, mode, c.BaseURL)
 	}
 
-	bases := c.streamBaseCandidates()
+	bases := c.streamProxyCandidates(time.Now())
+	if len(bases) == 0 {
+		return nil, errors.New("no eligible stream base; all known bases are dead and cooling down")
+	}
 	var lastErr error
 	for _, base := range bases {
 		resp, err := c.doRequestOnce(ctx, reqCtx, method, path, params, body, headers, stream, mode, base)
 		if err == nil {
-			c.markStreamBaseAlive(base)
+			if isStreamUnavailableStatus(resp.StatusCode) {
+				status := resp.Status
+				_ = resp.Body.Close()
+				lastErr = fmt.Errorf("stream base returned %s", status)
+				if c.logger != nil {
+					c.logger.Warnf("[%s] Stream base %s returned %s; trying next fallback", c.Name, formatOutboundURLForLog(base), status)
+				}
+				continue
+			}
 			return resp, nil
 		}
 		lastErr = err
@@ -823,9 +997,8 @@ func (c *UpstreamClient) doRequestForMode(ctx context.Context, reqCtx *RequestCo
 		if _, isPrep := asPreparationError(err); isPrep {
 			return nil, err
 		}
-		c.markStreamBaseFailed(base)
 		if c.logger != nil {
-			c.logger.Warnf("[%s] Stream base %s failed (%s); trying next fallback", c.Name, base, redactURLInError(err))
+			c.logger.Warnf("[%s] Stream base %s failed (%s); trying next fallback", c.Name, formatOutboundURLForLog(base), redactURLInError(err))
 		}
 	}
 	return nil, lastErr
@@ -920,11 +1093,22 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 			c.Name, method, formatOutboundURLForLog(preparedURL.url.String()), stream,
 			outboundChangeSummary(changed), bodyOutcome.support)
 	}
+	// Reserve stream observation ordering only after all request preparation has
+	// succeeded and immediately before the network operation starts. A later-started
+	// request/probe on this same base therefore supersedes this result even if the
+	// earlier operation happens to finish last.
+	streamObservation := uint64(0)
+	if stream {
+		streamObservation = c.beginStreamBaseObservation(base)
+	}
 	// This is a reverse proxy forwarding client requests to admin-configured upstream Emby
 	// servers. The base URL (c.BaseURL/c.StreamBaseURL) is set by the administrator.
 	// User-controlled path segments are inherent to proxy functionality.
 	resp, doErr := client.Do(request) // CodeQL: intentional proxy forwarding to admin-configured upstream
 	if doErr != nil {
+		if stream && !errors.Is(doErr, context.Canceled) && !errors.Is(doErr, context.DeadlineExceeded) {
+			c.markStreamBaseFailedObservation(base, streamObservation)
+		}
 		if c.logger != nil {
 			c.logger.Errorf("[%s] Request failed: %s %s: %s", c.Name, method,
 				formatOutboundURLForLog(preparedURL.url.String()), redactURLInError(doErr))
@@ -934,6 +1118,13 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 		// the client, so the wrapped message is redacted here rather than at each
 		// of them; Unwrap keeps errors.Is/As working for cancellation checks.
 		return nil, &redactedError{err: doErr}
+	}
+	if stream {
+		if isStreamUnavailableStatus(resp.StatusCode) {
+			c.markStreamBaseFailedObservation(base, streamObservation)
+		} else {
+			c.markStreamBaseAliveObservation(base, streamObservation)
+		}
 	}
 	if c.logger != nil {
 		c.logger.Debugf("[%s] <- %s %s %d", c.Name, method, formatOutboundURLForLog(preparedURL.url.String()), resp.StatusCode)

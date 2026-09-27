@@ -130,6 +130,9 @@ func validateUpstreamDraft(draft UpstreamConfig) error {
 	if err := validateSpoofClient(draft.SpoofClient); err != nil {
 		return err
 	}
+	if draft.PlaybackMode == "redirect" && strings.TrimSpace(draft.ProxyID) != "" {
+		return &httpError{message: "直连播放模式不能使用 HTTP 网络代理；请先取消网络代理，或改用代理播放模式"}
+	}
 	if err := validateHTTPURL(draft.URL); err != nil {
 		return err
 	}

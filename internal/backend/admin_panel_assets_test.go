@@ -357,6 +357,23 @@ func TestAdminPanelDiskFallbackRefusesBackslashPaths(t *testing.T) {
 	}
 }
 
+func TestAdminPanelDisablesNetworkProxyForRedirectMode(t *testing.T) {
+	withEmbeddedPanel(t, func(handler http.Handler) {
+		html := fetchAdminPath(t, handler, "/admin/admin.html").Body.String()
+		if !strings.Contains(html, `:disabled="serverForm.playbackMode === 'redirect'"`) {
+			t.Fatal("redirect mode must disable the network proxy selector")
+		}
+		if !strings.Contains(html, "直连模式下媒体流由客户端直接访问源服务器，不能使用 EIO 的 HTTP 网络代理") {
+			t.Fatal("redirect mode must explain why network proxy is unavailable")
+		}
+
+		js := fetchAdminPath(t, handler, "/admin/admin.js").Body.String()
+		if !strings.Contains(js, `'serverForm.playbackMode'(v)`) || !strings.Contains(js, "this.serverForm.proxyId = null") {
+			t.Fatal("switching to redirect mode must clear the pending proxy selection")
+		}
+	})
+}
+
 func mustGetwd(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()

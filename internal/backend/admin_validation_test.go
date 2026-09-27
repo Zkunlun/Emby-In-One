@@ -89,3 +89,73 @@ func TestAdminSettingsAcceptsZeroGracePeriod(t *testing.T) {
 		}
 	})
 }
+
+func TestValidateUpstreamDraftPlaybackProxyMatrix(t *testing.T) {
+	base := UpstreamConfig{
+		Name:         "test-upstream",
+		URL:          "https://emby.example",
+		Username:     "user",
+		Password:     "pass",
+		SpoofClient:  "none",
+		PlaybackMode: "proxy",
+	}
+	cases := []struct {
+		name         string
+		playbackMode string
+		proxyID      string
+		wantErr      bool
+	}{
+		{name: "proxy without network proxy", playbackMode: "proxy"},
+		{name: "proxy with network proxy", playbackMode: "proxy", proxyID: "proxy-1"},
+		{name: "redirect without network proxy", playbackMode: "redirect"},
+		{name: "redirect with whitespace proxy id", playbackMode: "redirect", proxyID: "  "},
+		{name: "redirect with network proxy", playbackMode: "redirect", proxyID: "proxy-1", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			draft := base
+			draft.PlaybackMode = tc.playbackMode
+			draft.ProxyID = tc.proxyID
+			err := validateUpstreamDraft(draft)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected redirect + proxyId to be rejected")
+				}
+				if !strings.Contains(err.Error(), "直连播放模式不能使用 HTTP 网络代理") {
+					t.Fatalf("unexpected validation error: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
+
+func TestAdminUpstreamRejectsRedirectWithProxy(t *testing.T) {
+	withTempApp(t, func(app *App, handler http.Handler) {
+		token := loginToken(t, handler, "secret")
+		before := len(app.ConfigStore.Snapshot().Upstream)
+
+		rr := doJSONRequest(t, handler, http.MethodPost, "/admin/api/upstream", map[string]any{
+			"name":         "redirect-with-proxy",
+			"url":          "https://emby.example",
+			"username":     "user",
+			"password":     "pass",
+			"authType":     "password",
+			"playbackMode": "redirect",
+			"spoofClient":  "none",
+			"proxyId":      "proxy-1",
+		}, token)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "直连播放模式不能使用 HTTP 网络代理") {
+			t.Fatalf("unexpected error body: %s", rr.Body.String())
+		}
+		if got := len(app.ConfigStore.Snapshot().Upstream); got != before {
+			t.Fatalf("rejected upstream changed config length: got %d want %d", got, before)
+		}
+	})
+}

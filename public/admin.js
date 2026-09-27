@@ -42,7 +42,8 @@ createApp({
     }
   },
   watch: {
-    currentPage(v) { if(this._refreshTimer) clearTimeout(this._refreshTimer); this._refreshTimer = setTimeout(()=>{this.refresh(); this.$nextTick(() => lucide.createIcons());}, 50); }
+    currentPage(v) { if(this._refreshTimer) clearTimeout(this._refreshTimer); this._refreshTimer = setTimeout(()=>{this.refresh(); this.$nextTick(() => lucide.createIcons());}, 50); },
+    'serverForm.playbackMode'(v) { if(v === 'redirect' && this.serverForm) this.serverForm.proxyId = null; }
   },
   mounted() { const t = localStorage.getItem('eio_token'); if(t) this.checkAuth(t); this.$nextTick(() => lucide.createIcons()); },
   methods: {

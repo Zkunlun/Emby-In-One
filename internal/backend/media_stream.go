@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // streamRoute describes one media stream endpoint: the upstream path prefix
@@ -73,10 +74,33 @@ func (a *App) proxyStream(w http.ResponseWriter, r *http.Request, route streamRo
 			route.label, route.pathPrefix, virtualItemID, rest, client.Name, upstreamPath)
 	}
 
-	// Redirect mode: hand the client a direct upstream stream URL. The URL is
-	// prepared by the shared layer, so its identity and its single credential come
-	// from one auth snapshot and no local token can leak into it.
+	// Redirect mode: hand the client a direct upstream stream URL. Unknown/alive
+	// lines keep the zero-wait fast path. Only an all-dead set enters request-scoped
+	// recovery; cooldown-expired dead lines are probed concurrently without
+	// credentials, and a line must be explicitly revived before it can receive a 302.
 	if a.streamPlaybackMode(client) == "redirect" {
+		playback, recovery := client.streamPlaybackAndRecoveryCandidates(time.Now())
+		if len(playback) == 0 {
+			if len(recovery) == 0 {
+				if a.Logger != nil {
+					a.Logger.Warnf("%s redirect unavailable: all stream lines are dead and cooling down", route.label)
+				}
+				writeJSON(w, http.StatusBadGateway, map[string]any{"message": "No available upstream stream line"})
+				return
+			}
+			client.probeSelectedStreamBases(r.Context(), recovery, client.redirectRecoveryProbeTimeout())
+			if r.Context().Err() != nil {
+				return
+			}
+			if len(client.streamBaseCandidates()) == 0 {
+				if a.Logger != nil {
+					a.Logger.Warnf("%s redirect recovery failed: no stream line recovered", route.label)
+				}
+				writeJSON(w, http.StatusBadGateway, map[string]any{"message": "No available upstream stream line"})
+				return
+			}
+		}
+
 		redirectURL, err := client.BuildURL(upstreamPath, query, true, reqCtx)
 		if err != nil {
 			if !writePreparationError(w, err) {
