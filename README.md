@@ -1,6 +1,6 @@
 # Emby-In-One
 
-> **Version: V1.4.5**
+> **Version: V1.4.6**
 
 [![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -19,7 +19,7 @@ Emby-In-One 是一个面向标准 Emby 客户端的多上游聚合代理，将�
 
 当前仓库在原项目基础上继续进行兼容性修复、稳定性优化、功能完善与版本发布，后续维护、Bug 修复和 Release 以本仓库为准。
 
-当前稳定版为 **V1.4.5**。现行主线以 Go 实现为主；原项目的 Node.js V1.2.1 实现保留在 [`legacy/`](legacy/) 中用于历史参考，不参与现行版本的构建与安装。
+当前稳定版为 **V1.4.6**。现行主线以 Go 实现为主；原项目的 Node.js V1.2.1 实现保留在 [`legacy/`](legacy/) 中用于历史参考，不参与现行版本的构建与安装。
 
 ## 目录
 
@@ -53,9 +53,9 @@ Emby-In-One 是一个面向标准 Emby 客户端的多上游聚合代理，将�
 | **媒体合并与 ID 虚拟化** | 对跨服务器的电影、剧集、季和单集进行去重聚合，相同内容可保留多个 MediaSource；对客户端统一暴露持久化 Virtual ID，并通过元数据优先级选择展示信息。 |
 | **多用户与独立观看状态** | 支持创建普通用户并分配可访问的上游服务器。普通用户拥有独立的播放进度、已观看、收藏、Resume 与 NextUp 状态；`IsFavorite`、`IsPlayed`、`IsResumable`、`IsUnplayed` 等列表筛选同样按本地用户状态计算，管理员保持上游账户语义。 |
 | **权限与媒体库可见性** | 管理员拥有全部上游和管理能力；普通用户只能访问被授权的服务器。可按用户隐藏客户端首页中的指定媒体库或整台服务器的库入口，不影响搜索、最新添加和继续观看等内容访问。 |
-| **播放代理与直连** | 支持 `proxy` 与 `redirect` 两种播放模式。代理模式由 EIO 转发视频、音频、HLS 分片、字幕等请求；Redirect 模式通过 302 让客户端直接访问上游以减少 EIO 带宽占用。 |
+| **播放代理与直连** | 支持 `proxy` 与 `redirect` 两种播放模式及有序多推流线路。Proxy 可在 transport error 或 502/503/504 时自动切换备用线路；Redirect 会避开已知故障线路，并在全部线路不可用时执行有界恢复探测。 |
 | **上游认证与客户端身份** | 上游支持用户名/密码或 API Key 认证；客户端身份支持 `none`、`passthrough`、`infuse`、`custom` 模式，可透传或自定义 Emby 客户端身份头，并支持上游会话失效后的自动重新登录。 |
-| **网络代理与健康检查** | 可为不同上游单独绑定 HTTP/HTTPS 网络代理并测试连通性；后台并行执行健康检查，对离线上游持续重连，并记录上下线状态变化。 |
+| **网络代理与健康检查** | Proxy 播放模式可为不同上游单独绑定 HTTP/HTTPS 网络代理并测试连通性；Redirect 直连模式禁止绑定服务端 HTTP 代理。后台并行执行上游 API 健康检查与多推流线路存活探测，并记录状态变化。 |
 | **并发播放控制** | 每台上游可单独设置普通用户最大并发播放数 `maxConcurrent`，超限返回 `429 Too Many Requests`，并通过播放心跳自动释放失效占用。 |
 | **Web 管理与 SSH CLI** | 提供 Web 管理面板、REST 管理 API 和 SSH 管理菜单，可管理上游、用户、网络代理、系统设置、日志、更新及服务生命周期。 |
 | **日志与安全机制** | 提供持久化分级日志、自动轮转、登录失败限速、scrypt 密码存储、配置与 Token 文件权限保护、请求体限制、SSRF 防护及管理面板 CSP。 |
@@ -69,7 +69,7 @@ Emby-In-One 是一个面向标准 Emby 客户端的多上游聚合代理，将�
 
 > **旧版 Node.js 部署说明**：如果您希望部署基于 Node.js 的 V1.2.1 稳定版，请前往原项目的 [Releases 页面](https://github.com/ArizeSky/Emby-In-One/releases) 下载 V1.2.1 的 Source code 源码压缩包，解压后同样运行 `bash install.sh` 即可。 仓库中的 `legacy/` 目录保留了 V1.2.1 的 Node.js 源码，**仅供对照参考**（Go 版的 ID 虚拟化以它为蓝本），它不参与 Go 版的构建、镜像或安装流程，详见 `legacy/README.md`。
 
-本项目优先推荐在 Linux 服务器直接使用 Release 二进制部署 V1.4.5（无需本地编译）；Docker 方式适合希望自行构建镜像的场景。
+本项目优先推荐在 Linux 服务器直接使用 Release 二进制部署 V1.4.6（无需本地编译）；Docker 方式适合希望自行构建镜像的场景。
 
 ### 方式一：Release 二进制一键安装（首推）
 
@@ -81,7 +81,7 @@ sudo bash release-install.sh
 可选：指定版本安装。
 
 ```bash
-sudo bash release-install.sh V1.4.5
+sudo bash release-install.sh V1.4.6
 ```
 
 该脚本会自动完成：
@@ -394,9 +394,10 @@ V1.4 新增多用户支持，允许管理员创建多个普通用户，每个用
 
 上游可以配置**多条推流线路**（`streamingUrls`，有序列表）：第 1 条为主线路，其余为备用。所有线路必须指向同一台 Emby 服务器（多条线路 = 到同一服务器的多条路由，而不是多台镜像服务器——转码会话存在服务器本地，跨镜像切换线路会导致 404）。
 
-- **代理模式**：主线路连接失败（连接拒绝/超时/TLS 错误）时自动切换备用线路，客户端无感知；上游返回的任何 HTTP 状态（含 404/403）不视为线路故障。
-- **直连模式**：按线路健康状态选择——每个健康检查周期对所有备用线路做连接级探测（任何 HTTP 响应都算存活，包括只转发 `/Videos/`、`/Audio/` 的分流反代返回的 403/404），被标记死亡的线路 60 秒内不再选用，之后自动恢复候选。302 发出后流量不经过代理，播放中途的线路故障由播放器重新拉取清单时自然切换。
-- 留空时与 `url`（前端地址）一致，行为与单条 `streamingUrl` 相同。
+- **代理模式**：按配置顺序优先使用 unknown / alive 线路；遇到连接拒绝、超时、TLS 等 transport error，或上游返回 502/503/504 时，将当前线路标记为 dead 并尝试下一条线路。404、500 等业务响应证明线路仍可达，会直接返回客户端而不误切线路。故障切换只发生在拿到可用响应之前，不会在响应 body 已开始传输后跨线路拼接媒体流。
+- **直连模式**：按线路健康状态选择，已知 dead 的线路不会用于 302。后台会对多条推流线路执行轻量存活探测；dead 状态不会仅因为时间经过而自动变回 alive。失败后有 60 秒冷却窗口，冷却到期后线路才允许再次被探测/恢复；当全部线路都 dead 时，当前 Redirect 请求会对符合条件的线路并发执行一次最长 5 秒的受控恢复探测，恢复成功后才重新返回 302，否则返回 502。302 发出后媒体流量不再经过 EIO，因此已开始播放后的链路中断仍由播放器自身重试。
+- **网络代理约束**：Redirect 是客户端直接连接推流地址，服务端 HTTP 网络代理无法参与该连接，因此 Redirect 上游不能同时配置 `proxyId`；管理面板会禁用并清空该选项，后端也会拒绝这种组合。Proxy 模式不受此限制。
+- 留空时与 `url`（前端地址）一致，行为与单条 `streamingUrl` 相同；旧 `streamingUrl` 单值配置继续兼容。
 
 ### UA 伪装详解 (`spoofClient`)
 
@@ -465,9 +466,11 @@ Passthrough 的请求级客户端身份解析采用五级 fallback。需要注�
 
 ## 健康检查
 
-- 每 60 秒（可通过 `timeouts.healthInterval` 配置）对所有上游服务器**并行**执行 `GET /System/Info/Public`
+- 每 60 秒（可通过 `timeouts.healthInterval` 配置）对所有上游服务器**并行**执行 `GET /System/Info/Public`，维护 API 上游 ONLINE / OFFLINE 状态
+- 配置多条 `streamingUrls` 时，同时维护独立的推流线路健康状态；transport error 与 502/503/504 视为线路不可用，404/500 等可达 HTTP 响应仍视为存活
+- 推流线路健康状态独立于 API 上游状态：某台 Emby 的 API 可以在线，但某条专用推流入口仍可能被标记为 dead 并从播放候选中排除
 - Passthrough 服务器优先使用该服务器上次成功登录的 headers（持久化存储），其次使用最近捕获的客户端头，避免被 nginx 拒绝
-- 状态变化时记录日志（ONLINE → OFFLINE / OFFLINE → ONLINE）
+- API 上游状态变化时记录日志（ONLINE → OFFLINE / OFFLINE → ONLINE）；配置 Reload 会保留未变化推流 URL 的既有健康状态，不会把已知 dead 线路重置为 unknown
 - 健康检查定时器在优雅关机（graceful shutdown）时自动清理
 
 ---
@@ -580,7 +583,7 @@ emby-in-one
 - 查看日志
 - 卸载服务（支持保留配置和数据）
 
-> SSH 菜单自动检测当前部署方式（Binary / Docker），所有操作自动分发到 systemd 或 Docker Compose 对应命令。Docker 模式下更新采用源码重建流程。菜单没有单独的「查看版本」选项——当前版本号直接显示在菜单标题栏上（形如 `Emby In One 管理菜单 v1.4.5`）。
+> SSH 菜单自动检测当前部署方式（Binary / Docker），所有操作自动分发到 systemd 或 Docker Compose 对应命令。Docker 模式下更新采用源码重建流程。菜单没有单独的「查看版本」选项——当前版本号直接显示在菜单标题栏上（形如 `Emby In One 管理菜单 v1.4.6`）。
 
 ---
 

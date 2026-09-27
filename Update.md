@@ -1,5 +1,40 @@
 # Emby-In-One 更新日志
 
+## V1.4.6
+
+发布日期：2026-09-27（V1.4.6 正式版）
+
+> V1.4.6 聚焦 **多推流线路的真实容灾能力**。V1.4.4 已支持按顺序配置 `streamingUrls` 主线路与备用线路，本版补齐线路级健康探测、Proxy 自动故障切换、Redirect 受控恢复、Reload 状态继承与并发观察时序保护，并明确 Redirect 与 HTTP 网络代理不能同时使用。
+
+### 多推流线路健康检查与故障切换
+
+- **线路级后台探测**：对配置的多条推流线路并发执行轻量探测；transport error 与 502/503/504 视为不可用，404/500 等能够证明目标服务器可达的 HTTP 响应仍视为线路存活。Probe 不携带播放凭据，并复用现有 transport / redirect 策略。
+- **Proxy 自动切换**：代理播放按配置顺序优先使用 unknown / alive 线路；遇到 transport error 或 502/503/504 时将当前线路标记为 dead 并尝试下一条线路。404、500 等业务响应直接返回客户端，不会被误判为需要切线路。
+- **不做中途流拼接**：故障切换只发生在拿到可用响应之前；一旦响应已经交给客户端，不会在 body 传输中途切到另一条线路，避免不同媒体流被拼接。
+- **Redirect 跳过 dead 线路**：直连模式不会再对已知 dead 的线路返回 302；存在 alive / unknown 线路时继续按配置顺序选择。
+- **All-dead 受控恢复**：当全部线路都处于 dead 状态时，冷却期内直接返回 502；冷却到期的线路会在当前请求内并发做一次有界恢复探测，任一线路恢复后才重新允许 302。请求级恢复探测最长 5 秒，避免直连请求被健康检查长期阻塞。
+
+### 状态一致性与并发语义
+
+- **Reload 保留健康状态**：保存配置或触发 `UpstreamPool.Reload()` 时，只继承新旧 `streamingUrls` URL 交集中的健康状态与最近失败时间；新增 URL 从 unknown 开始，删除 URL 不会残留。
+- **避免旧 Probe 覆盖新结果**：每条 stream base 独立维护 observation generation。网络观察在请求真正发出前领取版本，结果回写时只允许当前最新 generation 更新该线路状态，因此较早开始、较晚结束的 Probe/请求不能覆盖后来开始的真实播放结果。
+- **线路之间互不干扰**：generation 比较只发生在同一个 stream base 内，一条线路上的新观察不会让另一条线路正在执行的合法观察失效。
+
+### Redirect 与 HTTP 网络代理配置收敛
+
+- **Redirect 禁止 HTTP 网络代理**：Redirect 模式的媒体 URL 是返回给客户端直接访问的 302 地址，服务端 HTTP 代理无法参与这条连接。本版在后端配置校验中拒绝 `redirect + proxyId` 组合。
+- **管理面板同步约束**：切换到 Redirect 时会自动清空 HTTP 网络代理选择，并禁用对应选择器；切回 Proxy 后恢复可选，避免保存出逻辑互相矛盾的配置。
+- **Proxy 模式不受影响**：HTTP 网络代理仍可正常用于 Proxy 播放及其他上游请求。
+
+### 兼容性与验证
+
+- 旧单值 `streamingUrl` 配置继续有效，无需迁移；已有多值 `streamingUrls` 的顺序语义保持不变。
+- Redirect 模式 302 URL 携带上游 AccessToken 的既有安全取舍未在本版改变；相关长期改进仍保留在 V1.5 技术债中。
+- 发布前已完成定向测试以及完整 `internal/backend` 回归，`go vet ./internal/backend`、`go build ./internal/backend`、`git diff --check` 均通过；仓库级 `go vet ./...` 与 `go test -timeout 15m ./...` 继续由正式 Tag 触发的 GitHub Release workflow 作为最终发布门禁。
+- 当前工作区版本已在 Skyline 测试实例启动验证，并升级到 zouter-HK 现网实例；升级后 5/5 上游登录成功、8096 正常监听、管理入口 HTTP 200。
+
+---
+
 ## V1.4.5
 
 发布日期：2026-09-26（V1.4.5 正式版）

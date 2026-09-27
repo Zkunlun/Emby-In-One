@@ -1,6 +1,6 @@
 # Emby-In-One
 
-> **Version: V1.4.5**
+> **Version: V1.4.6**
 
 [![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -19,7 +19,7 @@ This repository is actively developed and maintained on top of [ArizeSky/Emby-In
 
 The current repository continues that work with compatibility fixes, stability improvements, feature development, and ongoing releases. Future maintenance, bug fixes, and releases are tracked here.
 
-The current stable release is **V1.4.5**. The active codebase is primarily implemented in Go; the original Node.js V1.2.1 implementation is retained under [`legacy/`](legacy/) for historical reference and is not part of current builds or installations.
+The current stable release is **V1.4.6**. The active codebase is primarily implemented in Go; the original Node.js V1.2.1 implementation is retained under [`legacy/`](legacy/) for historical reference and is not part of current builds or installations.
 
 ## Table of Contents
 
@@ -53,9 +53,9 @@ The current stable release is **V1.4.5**. The active codebase is primarily imple
 | **Media Merging & ID Virtualization** | Deduplicates movies, series, seasons, and episodes across servers while retaining multiple MediaSources for the same title. Clients see persistent Virtual IDs, while metadata priority rules select the preferred display metadata. |
 | **Multi-User & Independent Watch State** | Supports regular users with independent playback progress, played state, favorites, Resume, and NextUp. `IsFavorite`, `IsPlayed`, `IsResumable`, and `IsUnplayed` filters are also evaluated from the current user's local state, while admins keep upstream-account semantics. |
 | **Access Control & Library Visibility** | Admins have access to all upstreams and management features; regular users can be restricted to selected servers. Libraries or entire servers can also be hidden from a user's Emby home screen without affecting search, Latest, or Resume content. |
-| **Proxy & Direct Playback** | Supports both `proxy` and `redirect` playback modes. Proxy mode relays video, audio, HLS segments, subtitles, and related requests through EIO; Redirect mode returns a 302 to the upstream to reduce EIO bandwidth usage. |
+| **Proxy & Direct Playback** | Supports `proxy` and `redirect` playback modes plus ordered multi-line streaming. Proxy can fail over on transport errors or 502/503/504 responses; Redirect skips known-dead lines and performs bounded recovery probing when every line is unavailable. |
 | **Upstream Authentication & Client Identity** | Upstreams can authenticate with username/password or API Key. Client identity supports `none`, `passthrough`, `infuse`, and `custom` modes, including passthrough/custom Emby identity headers and automatic upstream re-login after session failure. |
-| **Network Proxies & Health Checks** | Each upstream can use its own HTTP/HTTPS proxy with built-in connectivity testing. Background health checks retry offline upstreams in parallel and log online/offline transitions. |
+| **Network Proxies & Health Checks** | Upstreams in Proxy playback mode can use per-upstream HTTP/HTTPS proxies with connectivity testing; Redirect direct playback cannot use a server-side HTTP proxy. Background checks cover both upstream API reachability and multi-line stream liveness. |
 | **Concurrent Playback Control** | Each upstream can define a regular-user concurrency limit with `maxConcurrent`. Excess playback requests return `429 Too Many Requests`, and stale occupancy is released through playback heartbeat expiry. |
 | **Web Admin & SSH CLI** | Includes a Web admin panel, REST management API, and SSH management menu for upstreams, users, network proxies, global settings, logs, updates, and service lifecycle operations. |
 | **Logging & Security** | Includes persistent leveled logs with rotation, login-failure rate limiting, scrypt password storage, protected config/token file permissions, request-body limits, SSRF protections, and a CSP for the admin panel. |
@@ -69,7 +69,7 @@ The current stable release is **V1.4.5**. The active codebase is primarily imple
 
 > **Notice for Legacy Node.js Deployment**: If you wish to deploy the V1.2.1 stable Node.js version, please use the original project's [Releases page](https://github.com/ArizeSky/Emby-In-One/releases) to download the V1.2.1 Source code archive, extract it, and run `bash install.sh`. The `legacy/` directory in this repository keeps the V1.2.1 Node.js source **for reference only** (the Go ID virtualization was written against it); it takes part in no build, image or install of the Go version — see `legacy/README.md`.
 
-This project primarily recommends using Release binaries for V1.4.5 directly on Linux servers (no local Go build required); Docker deployment is suitable for scenarios where you want to build the image yourself.
+This project primarily recommends using Release binaries for V1.4.6 directly on Linux servers (no local Go build required); Docker deployment is suitable for scenarios where you want to build the image yourself.
 
 ### Method 1: Release Binary One-Click Install (Primary Recommendation)
 
@@ -81,7 +81,7 @@ sudo bash release-install.sh
 Optional: install a specific version.
 
 ```bash
-sudo bash release-install.sh V1.4.5
+sudo bash release-install.sh V1.4.6
 ```
 
 This script will automatically:
@@ -394,9 +394,10 @@ Authentication decision and fault tolerance logic:
 
 An upstream can configure **multiple streaming lines** (`streamingUrls`, an ordered list): the first entry is the primary line, the rest are fallbacks. All lines must point to the same Emby server (multiple lines are multiple routes to one server, not mirrored servers — transcoding sessions live on the server itself, so switching lines across mirrors causes 404s).
 
-- **Proxy mode**: on a connect-level failure of the primary line (connection refused / timeout / TLS error) the proxy automatically switches to the next fallback, invisibly to the client. Any HTTP status returned by the upstream (including 404/403) is not treated as a line failure.
-- **Redirect mode**: the line is chosen by liveness — every health-check cycle probes fallback lines at the connect level (any HTTP response counts as alive, including the 403/404 returned by split-tunnel reverse proxies that only forward `/Videos/` and `/Audio/`). A line marked dead is skipped for 60 seconds, then becomes a candidate again. After the 302 the traffic no longer passes through the proxy; a line failure mid-playback is handled naturally when the player re-fetches the manifest.
-- When left empty the stream base equals `url` (the front-end address), same as a single `streamingUrl`.
+- **Proxy mode**: lines are tried in configuration order, preferring unknown/alive entries. Connection refusal, timeout, TLS and other transport errors, plus HTTP 502/503/504, mark the current line dead and trigger a retry on the next line. Business responses such as 404 or 500 prove that the line is reachable and are returned to the client rather than treated as failover signals. Failover only happens before a usable response is returned; EIO never splices a second line into a response body that has already started.
+- **Redirect mode**: known-dead lines are excluded from 302 selection. Background liveness probes maintain the line state, and time alone never changes dead back to alive. A failed line has a 60-second cooldown before it may be probed/recovered again. If every line is dead, the current Redirect request concurrently probes eligible lines with a request-level cap of 5 seconds; a 302 is returned only after a line is observed alive, otherwise the request returns 502. Once the 302 has been sent, media traffic bypasses EIO, so failures during an already-running stream remain the player's responsibility to retry.
+- **Network-proxy constraint**: Redirect makes the client connect directly to the stream URL, so a server-side HTTP proxy cannot participate in that connection. A Redirect upstream therefore cannot also configure `proxyId`; the admin panel disables/clears that choice and the backend rejects the invalid combination. Proxy mode is unaffected.
+- When left empty the stream base equals `url` (the front-end address), same as a single `streamingUrl`; the legacy single-value `streamingUrl` setting remains supported.
 
 ### UA Spoofing Explained (`spoofClient`)
 
@@ -465,10 +466,12 @@ Each upstream Item ID is mapped globally to a lone virtual ID — 16 random byte
 
 ## Health Check
 
-- Operates `GET /System/Info/Public` **in parallel** across all upstreams every 60 seconds (configurable via `timeouts.healthInterval`)
-- Passthrough servers preferentially apply the server's prior successful login headers (persisted storage), relying next on the most recently captured headers guarding against nginx declines
-- Traces logs on state alterations (ONLINE → OFFLINE / OFFLINE → ONLINE)
-- Timers for health assessment instantly clear during graceful shutdowns
+- Runs `GET /System/Info/Public` **in parallel** across all upstreams every 60 seconds (configurable via `timeouts.healthInterval`) to maintain API-level ONLINE / OFFLINE state
+- With multiple `streamingUrls`, EIO also maintains independent per-line stream health; transport errors and 502/503/504 mark a stream line unavailable, while reachable HTTP responses such as 404/500 still count as alive
+- Stream-line health is separate from API health: an Emby API can be online while one dedicated streaming route is dead and excluded from playback candidates
+- Passthrough servers preferentially apply the server's prior successful login headers (persisted storage), falling back to the most recently captured headers to avoid nginx/client-allowlist rejections
+- API online/offline transitions are logged; configuration Reload preserves health for unchanged streaming URLs instead of resetting known-dead lines to unknown
+- Health-check timers are cleared during graceful shutdown
 
 ---
 
@@ -580,7 +583,7 @@ Available commands:
 - View logs
 - Uninstall service (supports preserving config and data)
 
-> The SSH menu auto-detects the current deployment method (Binary / Docker), dispatching all operations to the corresponding systemd or Docker Compose commands. Docker mode updates use a source-rebuild workflow. There is no separate "check version" entry — the current version is shown directly in the menu title bar (e.g. `Emby In One 管理菜单 v1.4.5`).
+> The SSH menu auto-detects the current deployment method (Binary / Docker), dispatching all operations to the corresponding systemd or Docker Compose commands. Docker mode updates use a source-rebuild workflow. There is no separate "check version" entry — the current version is shown directly in the menu title bar (e.g. `Emby In One 管理菜单 v1.4.6`).
 
 ---
 
