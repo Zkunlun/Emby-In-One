@@ -142,7 +142,7 @@ func validateUpstreamDraft(draft UpstreamConfig) error {
 		}
 	}
 	hasAPIKey := strings.TrimSpace(draft.APIKey) != ""
-	hasUserPassword := strings.TrimSpace(draft.Username) != "" && draft.Password != ""
+	hasUserPassword := strings.TrimSpace(draft.Username) != ""
 	if hasAPIKey == hasUserPassword {
 		return &httpError{message: "上游认证方式必须为 apiKey 或 用户名+密码 二选一"}
 	}
@@ -467,7 +467,7 @@ func applyAdminUpstreamInput(dst *UpstreamConfig, body adminUpstreamInput, isCre
 	if body.Username != nil {
 		dst.Username = *body.Username
 	}
-	if body.Password != nil && *body.Password != "" {
+	if body.Password != nil {
 		dst.Password = *body.Password
 	}
 	if body.APIKey != nil && *body.APIKey != "" {

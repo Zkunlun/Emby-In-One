@@ -269,7 +269,7 @@
         </div>
         <div v-if="serverForm.authType === 'password'" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div><label class="text-sm font-medium">用户名</label><input type="text" v-model="serverForm.username" class="w-full px-4 py-2 border rounded-lg outline-none"></div>
-          <div><label class="text-sm font-medium">密码</label><input type="password" v-model="serverForm.password" class="w-full px-4 py-2 border rounded-lg outline-none"></div>
+          <div><label class="text-sm font-medium">密码</label><input type="password" v-model="serverForm.password" class="w-full px-4 py-2 border rounded-lg outline-none"><p class="mt-1 text-xs text-slate-400">可留空；适用于上游账号本身未设置密码的情况。</p></div>
         </div>
         <div v-else><label class="text-sm font-medium">API Key</label><input type="text" v-model="serverForm.apiKey" class="w-full px-4 py-2 border rounded-lg outline-none"></div>
       </div>
@@ -283,7 +283,7 @@
       <div class="flex justify-between items-center text-xl font-bold"><h3>{{ editUserId ? '编辑用户' : '添加用户' }}</h3><button @click="showUserModal = false" class="text-slate-400"><i data-lucide="x" class="w-6 h-6"></i></button></div>
       <div class="space-y-4">
         <div><label class="text-sm font-medium">用户名</label><input type="text" v-model="userForm.username" class="w-full px-4 py-2 border rounded-lg outline-none"></div>
-        <div><label class="text-sm font-medium">密码</label><input type="password" v-model="userForm.password" minlength="8" maxlength="128" :placeholder="editUserId ? '留空不修改' : '8–128 字符'" class="w-full px-4 py-2 border rounded-lg outline-none"><p class="mt-1 text-xs text-slate-400">长度需为 8–128 字符{{ editUserId ? '；留空表示不修改' : '' }}。</p></div>
+        <div><label class="text-sm font-medium">密码</label><input type="password" v-model="userForm.password" maxlength="128" placeholder="可留空；非空密码 8–128 字符" class="w-full px-4 py-2 border rounded-lg outline-none"><p class="mt-1 text-xs text-slate-400">可留空；非空密码长度需为 8–128 字符。编辑时清空并保存会将该用户密码设置为空。</p></div>
         <div v-if="editUserId" class="flex items-center space-x-2"><input type="checkbox" v-model="userForm.enabled" class="w-4 h-4 rounded border-slate-300 text-blue-600"><label class="text-sm font-medium">启用</label></div>
         <div><label class="text-sm font-medium block mb-2">允许访问的服务器</label>
           <p class="text-xs text-slate-400 mb-2">不勾选任何服务器表示允许访问全部</p>

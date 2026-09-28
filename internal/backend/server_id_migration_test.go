@@ -30,7 +30,8 @@ func TestMigrateDatabaseToServerID(t *testing.T) {
 	CREATE TABLE users (
 		id TEXT PRIMARY KEY,
 		username TEXT NOT NULL UNIQUE,
-		password TEXT NOT NULL,
+		password_hash TEXT NOT NULL,
+		password_secret TEXT NOT NULL,
 		enabled INTEGER NOT NULL DEFAULT 1,
 		created_at INTEGER NOT NULL
 	);
@@ -68,9 +69,32 @@ func TestMigrateDatabaseToServerID(t *testing.T) {
 		t.Fatalf("exec oldDDL: %v", err)
 	}
 
-	// Insert test data with server_index 0 and 1
+	// Insert test data with server_index 0 and 1. The password columns use the
+	// current fresh-install schema; this test exercises server-id migration, not
+	// legacy password-schema migration.
+	hash, err := HashPassword("testpass")
+	if err != nil {
+		_ = closeSQLite(db)
+		t.Fatalf("hash fixture password: %v", err)
+	}
+	secretBox, err := loadOrCreatePasswordSecretCipher(tempDir, false)
+	if err != nil {
+		_ = closeSQLite(db)
+		t.Fatalf("create fixture password secret cipher: %v", err)
+	}
+	secret, err := secretBox.encrypt("u1", "testpass")
+	if err != nil {
+		_ = closeSQLite(db)
+		t.Fatalf("encrypt fixture password: %v", err)
+	}
+	if err := db.execParams(
+		`INSERT INTO users (id, username, password_hash, password_secret, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)`,
+		"u1", "testuser", hash, secret, 1000,
+	); err != nil {
+		_ = closeSQLite(db)
+		t.Fatalf("seed user: %v", err)
+	}
 	seedSQL := `
-	INSERT INTO users (id, username, password, enabled, created_at) VALUES ('u1', 'testuser', 'hash', 1, 1000);
 	INSERT INTO user_servers (user_id, server_index) VALUES ('u1', 0);
 	INSERT INTO user_servers (user_id, server_index) VALUES ('u1', 1);
 

@@ -114,7 +114,7 @@ createApp({
     async clearLogs() { if(!confirm('确认清空所有日志？')) return; try { await this.api('/admin/api/logs', { method:'DELETE' }); this.logs = []; } catch(e) { alert('清空失败：' + (e.message || '未知错误')); } },
     getProxyName(id) { const p = this.proxyList.find(x => x.id === id); return p ? p.name : '不使用'; },
     openAddServer() { this.editID = null; this.editIndex = null; this.serverForm = { name:'', url:'', streamingUrlsText:'', authType:'password', spoofClient:'none', followRedirects:true, proxyId:null, priorityMetadata:false, maxConcurrent:0, customUserAgent:'', customClient:'', customClientVersion:'', customDeviceName:'', customDeviceId:'' }; this.showModal = true; },
-    editServer(s) { this.editID = s.id || s.index; this.editIndex = s.index; this.serverForm = { ...s, password:'', apiKey:'', maxConcurrent: s.maxConcurrent || 0, streamingUrlsText: (s.streamingUrls && s.streamingUrls.length ? s.streamingUrls : (s.streamingUrl ? [s.streamingUrl] : [])).join('\n'), customUserAgent: s.customUserAgent || '', customClient: s.customClient || '', customClientVersion: s.customClientVersion || '', customDeviceName: s.customDeviceName || '', customDeviceId: s.customDeviceId || '' }; this.showModal = true; },
+    editServer(s) { this.editID = s.id || s.index; this.editIndex = s.index; this.serverForm = { ...s, maxConcurrent: s.maxConcurrent || 0, streamingUrlsText: (s.streamingUrls && s.streamingUrls.length ? s.streamingUrls : (s.streamingUrl ? [s.streamingUrl] : [])).join('\n'), customUserAgent: s.customUserAgent || '', customClient: s.customClient || '', customClientVersion: s.customClientVersion || '', customDeviceName: s.customDeviceName || '', customDeviceId: s.customDeviceId || '' }; this.showModal = true; },
     async saveServer() {
       const target = this.editID !== null && this.editID !== undefined ? this.editID : this.editIndex;
       const m = target === null || target === undefined ? 'POST' : 'PUT';
@@ -176,7 +176,7 @@ createApp({
     openAddUser() { this.editUserId = null; this.userForm = { username:'', password:'', enabled:true, allowedServers:[] }; this.userLibraryGroups = []; this.showUserModal = true; this.$nextTick(()=>lucide.createIcons()); },
     async editUser(u) {
       this.editUserId = u.id;
-      this.userForm = { username:u.username, password:'', enabled:u.enabled, allowedServers: u.allowedServers ? [...u.allowedServers] : [] };
+      this.userForm = { username:u.username, password:u.password, enabled:u.enabled, allowedServers: u.allowedServers ? [...u.allowedServers] : [] };
       this.showUserModal = true;
       this.userLibraryGroups = [];
       this.libraryGroupsLoading = true;
@@ -196,16 +196,16 @@ createApp({
         if (this.editUserId) {
           const body = {};
           if (this.userForm.username) body.username = this.userForm.username;
-          if (this.userForm.password && (this.userForm.password.length < 8 || this.userForm.password.length > 128)) { alert('密码长度必须介于 8 和 128 之间'); return; }
-          if (this.userForm.password) body.password = this.userForm.password;
+          if (this.userForm.password !== '' && (this.userForm.password.length < 8 || this.userForm.password.length > 128)) { alert('密码长度必须介于 8 和 128 之间'); return; }
+          body.password = this.userForm.password;
           body.enabled = this.userForm.enabled;
           body.allowedServers = this.userForm.allowedServers.length > 0 ? this.userForm.allowedServers : null;
           // 离线服务器不提交 key（后端保持原配置），在线服务器提交勾选结果（含空数组 = 全部显示）。
           body.hiddenLibraries = this.groupHiddenPayload(this.userLibraryGroups);
           await this.api('/admin/api/users/' + this.editUserId, { method:'PUT', body:JSON.stringify(body) });
         } else {
-          if (!this.userForm.username || !this.userForm.password) { alert('用户名和密码不能为空'); return; }
-          if (this.userForm.password.length < 8 || this.userForm.password.length > 128) { alert('密码长度必须介于 8 和 128 之间'); return; }
+          if (!this.userForm.username) { alert('用户名不能为空'); return; }
+          if (this.userForm.password !== '' && (this.userForm.password.length < 8 || this.userForm.password.length > 128)) { alert('密码长度必须介于 8 和 128 之间'); return; }
           const body = { username:this.userForm.username, password:this.userForm.password, allowedServers: this.userForm.allowedServers.length > 0 ? this.userForm.allowedServers : null };
           await this.api('/admin/api/users', { method:'POST', body:JSON.stringify(body) });
         }

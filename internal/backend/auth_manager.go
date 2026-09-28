@@ -292,7 +292,7 @@ func (m *AuthManager) RevokeAllTokens() {
 }
 
 // AuthenticateUser generates a token for an already-verified user from UserStore.
-func (m *AuthManager) AuthenticateUser(user *User) (map[string]any, string, error) {
+func (m *AuthManager) AuthenticateUser(user *User, hasPassword bool) (map[string]any, string, error) {
 	token := randomHex(16)
 	m.mu.Lock()
 	m.tokens[token] = tokenInfo{
@@ -308,7 +308,7 @@ func (m *AuthManager) AuthenticateUser(user *User) (map[string]any, string, erro
 	}
 	cfg := m.configStore.Snapshot()
 	response := map[string]any{
-		"User":        m.BuildUserObjectForUser(user),
+		"User":        m.BuildUserObjectForUser(user, hasPassword),
 		"AccessToken": token,
 		"ServerId":    cfg.Server.ID,
 		"SessionInfo": map[string]any{
@@ -329,14 +329,14 @@ func (m *AuthManager) AuthenticateUser(user *User) (map[string]any, string, erro
 }
 
 // BuildUserObjectForUser returns an Emby-compatible User object for a regular user.
-func (m *AuthManager) BuildUserObjectForUser(user *User) map[string]any {
+func (m *AuthManager) BuildUserObjectForUser(user *User, hasPassword bool) map[string]any {
 	cfg := m.configStore.Snapshot()
 	return map[string]any{
 		"Name":                      user.Username,
 		"ServerId":                  cfg.Server.ID,
 		"Id":                        user.ID,
-		"HasPassword":               true,
-		"HasConfiguredPassword":     true,
+		"HasPassword":               hasPassword,
+		"HasConfiguredPassword":     hasPassword,
 		"HasConfiguredEasyPassword": false,
 		"EnableAutoLogin":           false,
 		"Policy": map[string]any{

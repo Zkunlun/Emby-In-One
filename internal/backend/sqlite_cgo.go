@@ -24,7 +24,8 @@ const (
 )
 
 type sqliteDB struct {
-	ptr *C.sqlite3
+	ptr  *C.sqlite3
+	path string
 
 	// writeMu serializes every write statement and transaction issued on this handle.
 	// All stores share one SQLite connection, and a transaction is connection-scoped:
@@ -45,11 +46,11 @@ func openSQLite(path string) (*sqliteDB, error) {
 	if rc := C.sqlite3_open(cPath, &db); rc != 0 {
 		errMsg := C.GoString(C.sqlite3_errmsg(db))
 		if db != nil {
-			_ = closeSQLite(&sqliteDB{ptr: db})
+			_ = closeSQLite(&sqliteDB{ptr: db, path: path})
 		}
 		return nil, fmt.Errorf("sqlite open: %s", errMsg)
 	}
-	handle := &sqliteDB{ptr: db}
+	handle := &sqliteDB{ptr: db, path: path}
 	// Defense in depth: the write lock above already serializes writers, but a busy
 	// timeout keeps a second connection (or a future one) from failing instantly.
 	if err := handle.exec(`PRAGMA busy_timeout = 5000`); err != nil {

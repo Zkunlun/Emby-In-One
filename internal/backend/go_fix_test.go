@@ -196,7 +196,11 @@ func TestAdminLogsDownloadDoesNotLeakNonAdminUser(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create user: %v", err)
 		}
-		response, _, err := app.Auth.AuthenticateUser(user)
+		hasPassword, err := app.UserStore.hasPassword(user)
+		if err != nil {
+			t.Fatalf("resolve user password state: %v", err)
+		}
+		response, _, err := app.Auth.AuthenticateUser(user, hasPassword)
 		if err != nil {
 			t.Fatalf("authenticate user: %v", err)
 		}

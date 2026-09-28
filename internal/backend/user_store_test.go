@@ -312,3 +312,108 @@ func TestUserStoreUpdatePassword(t *testing.T) {
 		t.Error("new password should work")
 	}
 }
+
+func TestUserStorePasswordUpdateExactSemantics(t *testing.T) {
+	store := newTestUserStore(t)
+
+	user, err := store.Create("exact-pw", "initial-pass", nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	before := store.Get(user.ID)
+	if before == nil {
+		t.Fatal("created user missing")
+	}
+	beforePlain, err := store.passwordPlaintext(before)
+	if err != nil || beforePlain != "initial-pass" {
+		t.Fatalf("initial plaintext = %q, err=%v", beforePlain, err)
+	}
+
+	// Omitted password means no write at all: both authentication hash and encrypted
+	// recoverable value must remain byte-for-byte unchanged.
+	if err := store.Update(user.ID, nil, nil, nil, nil); err != nil {
+		t.Fatalf("Update omitted password: %v", err)
+	}
+	unchanged := store.Get(user.ID)
+	if unchanged.PasswordHash != before.PasswordHash || unchanged.PasswordSecret != before.PasswordSecret {
+		t.Fatalf("omitted password rewrote credentials: before=%q/%q after=%q/%q", before.PasswordHash, before.PasswordSecret, unchanged.PasswordHash, unchanged.PasswordSecret)
+	}
+
+	transitions := []string{"", "second-pass", ""}
+	previous := unchanged
+	for _, next := range transitions {
+		next := next
+		if err := store.Update(user.ID, nil, &next, nil, nil); err != nil {
+			t.Fatalf("Update password %q: %v", next, err)
+		}
+		got := store.Get(user.ID)
+		if got == nil {
+			t.Fatal("updated user missing")
+		}
+		if got.PasswordHash == "" || got.PasswordSecret == "" {
+			t.Fatalf("password %q stored empty hash/secret: %#v", next, got)
+		}
+		plain, err := store.passwordPlaintext(got)
+		if err != nil {
+			t.Fatalf("decrypt password %q: %v", next, err)
+		}
+		if plain != next {
+			t.Fatalf("decrypted password = %q, want %q", plain, next)
+		}
+		if got.PasswordHash == previous.PasswordHash {
+			t.Fatalf("explicit password write %q reused old hash", next)
+		}
+		if got.PasswordSecret == previous.PasswordSecret {
+			t.Fatalf("explicit password write %q reused old encrypted secret", next)
+		}
+		previous = got
+	}
+}
+
+func TestUserStoreEmptyPasswordUpdatePersistsAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("openSQLite: %v", err)
+	}
+	store, err := NewUserStore(db, nil)
+	if err != nil {
+		t.Fatalf("NewUserStore: %v", err)
+	}
+	user, err := store.Create("persist-empty", "initial-pass", nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	empty := ""
+	if err := store.Update(user.ID, nil, &empty, nil, nil); err != nil {
+		t.Fatalf("Update empty password: %v", err)
+	}
+	if err := closeSQLite(db); err != nil {
+		t.Fatalf("closeSQLite: %v", err)
+	}
+
+	db2, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatalf("reopen SQLite: %v", err)
+	}
+	defer closeSQLite(db2)
+	store2, err := NewUserStore(db2, nil)
+	if err != nil {
+		t.Fatalf("NewUserStore reopen: %v", err)
+	}
+	loaded := store2.Get(user.ID)
+	if loaded == nil {
+		t.Fatal("updated user missing after reopen")
+	}
+	if loaded.PasswordHash == "" || loaded.PasswordSecret == "" {
+		t.Fatalf("reopened empty-password user lost hash/secret: %#v", loaded)
+	}
+	plain, err := store2.passwordPlaintext(loaded)
+	if err != nil {
+		t.Fatalf("decrypt reopened password: %v", err)
+	}
+	if plain != "" {
+		t.Fatalf("reopened plaintext = %q, want empty", plain)
+	}
+}

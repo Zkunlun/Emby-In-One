@@ -374,6 +374,75 @@ func TestAdminPanelDisablesNetworkProxyForRedirectMode(t *testing.T) {
 	})
 }
 
+func TestAdminPanelEmptyPasswordEditingContract(t *testing.T) {
+	withEmbeddedPanel(t, func(handler http.Handler) {
+		js := fetchAdminPath(t, handler, "/admin/admin.js").Body.String()
+		html := fetchAdminPath(t, handler, "/admin/admin.html").Body.String()
+
+		// Editing an upstream must refill the credentials returned by the admin API.
+		// Clearing the password field is an intentional password="" update, not a
+		// signal to preserve an old secret.
+		if strings.Contains(js, "password:'', apiKey:''") {
+			t.Error("editServer still erases the current upstream credentials instead of refilling them")
+		}
+		if !strings.Contains(js, "const payload = { ...this.serverForm") {
+			t.Error("saveServer must submit the current password field verbatim, including an empty string")
+		}
+
+		// Editing a regular user uses the recoverable password returned by the admin
+		// API. A normal save always sends the field, so manually clearing it sets an
+		// empty password. toggleUser remains a separate partial update.
+		if strings.Contains(js, "this.userForm = { username:u.username, password:'',") {
+			t.Error("editUser still blanks the password instead of refilling the current password")
+		}
+		if !strings.Contains(js, "password:u.password") {
+			t.Error("editUser must refill userForm.password from the admin user payload")
+		}
+		if strings.Contains(js, "if (this.userForm.password) body.password = this.userForm.password") {
+			t.Error("saveUser still drops an explicit empty password during edit")
+		}
+		if !strings.Contains(js, "body.password = this.userForm.password") {
+			t.Error("editing a user must submit password even when it is empty")
+		}
+
+		// Empty is a valid password; only a non-empty password is constrained to
+		// 8..128 characters. Creation therefore requires a username, not a truthy
+		// password value.
+		if strings.Contains(js, "if (!this.userForm.username || !this.userForm.password)") {
+			t.Error("new-user validation still rejects an empty password")
+		}
+		if strings.Contains(js, "if (this.userForm.password && (this.userForm.password.length < 8 || this.userForm.password.length > 128))") {
+			t.Error("password length validation still treats truthiness as the empty-password contract")
+		}
+		if !strings.Contains(js, "this.userForm.password !== '' && (this.userForm.password.length < 8 || this.userForm.password.length > 128)") {
+			t.Error("password validation must allow empty and enforce 8..128 only for non-empty values")
+		}
+
+		userPasswordInput := regexp.MustCompile(`<input[^>]*v-model="userForm\.password"[^>]*>`).FindString(html)
+		if userPasswordInput == "" {
+			t.Error("admin.html no longer contains the regular-user password input")
+		} else if strings.Contains(userPasswordInput, `minlength="8"`) {
+			t.Errorf("regular-user password input still forbids empty passwords in HTML: %s", userPasswordInput)
+		}
+		if strings.Contains(html, "留空不修改") {
+			t.Error("regular-user password help still says blank means no change; blank must mean set empty password")
+		}
+
+		serverPasswordLine := regexp.MustCompile(`(?m)^.*v-model="serverForm\.password".*$`).FindString(html)
+		if serverPasswordLine == "" {
+			t.Error("admin.html no longer contains the upstream password input")
+		} else if !strings.Contains(serverPasswordLine, "可留空") {
+			t.Error("upstream password help must explain that blank is a valid empty password")
+		}
+		userPasswordLine := regexp.MustCompile(`(?m)^.*v-model="userForm\.password".*$`).FindString(html)
+		if userPasswordLine == "" {
+			t.Error("admin.html no longer contains the regular-user password row")
+		} else if !strings.Contains(userPasswordLine, "可留空") {
+			t.Error("regular-user password help must explain that blank is a valid empty password")
+		}
+	})
+}
+
 func mustGetwd(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()

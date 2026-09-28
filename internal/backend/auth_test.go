@@ -20,6 +20,29 @@ func TestHashAndVerifyPassword(t *testing.T) {
 	}
 }
 
+func TestHashAndVerifyEmptyPassword(t *testing.T) {
+	hashed, err := HashPassword("")
+	if err != nil {
+		t.Fatalf("hash empty password: %v", err)
+	}
+	if hashed == "" {
+		t.Fatal("HashPassword returned empty stored hash for empty password")
+	}
+	if ok := VerifyPassword("", hashed); !ok {
+		t.Fatal("VerifyPassword returned false for matching empty password")
+	}
+	if ok := VerifyPassword("wrong", hashed); ok {
+		t.Fatal("VerifyPassword returned true for wrong password against empty-password hash")
+	}
+	nonEmptyHash, err := HashPassword("nonempty")
+	if err != nil {
+		t.Fatalf("hash non-empty password: %v", err)
+	}
+	if ok := VerifyPassword("", nonEmptyHash); ok {
+		t.Fatal("VerifyPassword returned true for empty password against non-empty-password hash")
+	}
+}
+
 func TestVerifyPasswordRejectsPlaintext(t *testing.T) {
 	// Plaintext stored password must always be rejected, even if it matches input
 	if VerifyPassword("secret", "secret") {

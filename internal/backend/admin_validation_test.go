@@ -1,7 +1,9 @@
 package backend
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -129,6 +131,182 @@ func TestValidateUpstreamDraftPlaybackProxyMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected validation error: %v", err)
 			}
+		})
+	}
+}
+
+func TestValidateUpstreamDraftAuthMatrix(t *testing.T) {
+	base := UpstreamConfig{
+		Name:         "test-upstream",
+		URL:          "https://emby.example",
+		SpoofClient:  "none",
+		PlaybackMode: "proxy",
+	}
+	cases := []struct {
+		name     string
+		username string
+		password string
+		apiKey   string
+		wantErr  bool
+	}{
+		{name: "password auth with nonempty password", username: "alice", password: "abc12345"},
+		{name: "password auth with empty password", username: "alice", password: ""},
+		{name: "missing username and password", wantErr: true},
+		{name: "password without username", password: "abc12345", wantErr: true},
+		{name: "api key auth", apiKey: "KEY123"},
+		{name: "empty api key only", apiKey: "", wantErr: true},
+		{name: "username empty password plus api key", username: "alice", apiKey: "KEY123", wantErr: true},
+		{name: "username nonempty password plus api key", username: "alice", password: "abc12345", apiKey: "KEY123", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			draft := base
+			draft.Username = tc.username
+			draft.Password = tc.password
+			draft.APIKey = tc.apiKey
+			err := validateUpstreamDraft(draft)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("validateUpstreamDraft(%q, %q, %q) succeeded, want error", tc.username, tc.password, tc.apiKey)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validateUpstreamDraft(%q, %q, %q) error = %v, want nil", tc.username, tc.password, tc.apiKey, err)
+			}
+		})
+	}
+}
+
+func TestApplyAdminUpstreamInputPasswordUpdateSemantics(t *testing.T) {
+	strptr := func(v string) *string { return &v }
+
+	base := UpstreamConfig{
+		Name:         "test-upstream",
+		URL:          "https://emby.example",
+		Username:     "alice",
+		Password:     "abc12345",
+		SpoofClient:  "none",
+		PlaybackMode: "proxy",
+	}
+
+	t.Run("omitted password keeps existing value", func(t *testing.T) {
+		draft := base
+		applyAdminUpstreamInput(&draft, adminUpstreamInput{}, false)
+		if draft.Password != "abc12345" {
+			t.Fatalf("password = %q, want existing password preserved", draft.Password)
+		}
+	})
+
+	t.Run("nonempty password replaces existing value", func(t *testing.T) {
+		draft := base
+		applyAdminUpstreamInput(&draft, adminUpstreamInput{Password: strptr("xyz12345")}, false)
+		if draft.Password != "xyz12345" {
+			t.Fatalf("password = %q, want replacement password", draft.Password)
+		}
+	})
+
+	t.Run("explicit empty password clears existing value", func(t *testing.T) {
+		draft := base
+		applyAdminUpstreamInput(&draft, adminUpstreamInput{Password: strptr("")}, false)
+		if draft.Password != "" {
+			t.Fatalf("password = %q, want explicit empty password", draft.Password)
+		}
+	})
+}
+
+func TestApplyAdminUpstreamInputAuthTypeClearsInactiveCredentials(t *testing.T) {
+	strptr := func(v string) *string { return &v }
+
+	t.Run("password auth clears stale api key even with empty password", func(t *testing.T) {
+		draft := UpstreamConfig{APIKey: "STALE-KEY"}
+		applyAdminUpstreamInput(&draft, adminUpstreamInput{
+			AuthType: strptr("password"),
+			Username: strptr("alice"),
+			Password: strptr(""),
+			APIKey:   strptr("SHOULD-NOT-SURVIVE"),
+		}, false)
+		if draft.Username != "alice" || draft.Password != "" {
+			t.Fatalf("password credentials = %q/%q, want alice/empty", draft.Username, draft.Password)
+		}
+		if draft.APIKey != "" {
+			t.Fatalf("apiKey = %q, want inactive credential cleared", draft.APIKey)
+		}
+	})
+
+	t.Run("apiKey auth clears stale username and password", func(t *testing.T) {
+		draft := UpstreamConfig{Username: "old-user", Password: "old-pass"}
+		applyAdminUpstreamInput(&draft, adminUpstreamInput{
+			AuthType: strptr("apiKey"),
+			Username: strptr("SHOULD-NOT-SURVIVE"),
+			Password: strptr("SHOULD-NOT-SURVIVE"),
+			APIKey:   strptr("KEY123"),
+		}, false)
+		if draft.APIKey != "KEY123" {
+			t.Fatalf("apiKey = %q, want KEY123", draft.APIKey)
+		}
+		if draft.Username != "" || draft.Password != "" {
+			t.Fatalf("inactive username/password = %q/%q, want both cleared", draft.Username, draft.Password)
+		}
+	})
+}
+
+func TestAdminUpstreamRejectsInvalidAuthBoundaries(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"AccessToken": "should-not-be-used",
+			"User":        map[string]any{"Id": "should-not-be-used"},
+		})
+	}))
+	defer upstream.Close()
+
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "password auth missing username with empty password",
+			body: map[string]any{"authType": "password", "username": "", "password": ""},
+		},
+		{
+			name: "password auth missing username with nonempty password",
+			body: map[string]any{"authType": "password", "username": "", "password": "abc12345"},
+		},
+		{
+			name: "apiKey auth requires nonempty key",
+			body: map[string]any{"authType": "apiKey", "apiKey": "", "username": "stale-user", "password": "stale-pass"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withTempApp(t, func(app *App, handler http.Handler) {
+				token := loginToken(t, handler, "secret")
+				beforeAttempts := attempts
+				body := map[string]any{
+					"name":         "invalid-auth",
+					"url":          upstream.URL,
+					"playbackMode": "proxy",
+					"spoofClient":  "none",
+				}
+				for key, value := range tc.body {
+					body[key] = value
+				}
+
+				rr := doJSONRequest(t, handler, http.MethodPost, "/admin/api/upstream", body, token)
+				if rr.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, want 400; body=%s", rr.Code, rr.Body.String())
+				}
+				if got := len(app.ConfigStore.Snapshot().Upstream); got != 0 {
+					t.Fatalf("invalid auth mutated config: upstream count = %d, want 0", got)
+				}
+				if attempts != beforeAttempts {
+					t.Fatalf("invalid auth reached upstream validation: attempts %d -> %d", beforeAttempts, attempts)
+				}
+			})
 		})
 	}
 }

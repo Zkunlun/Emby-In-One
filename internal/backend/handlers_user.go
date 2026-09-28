@@ -55,7 +55,12 @@ func (a *App) handleAuthenticateByName(w http.ResponseWriter, r *http.Request) {
 	if a.UserStore != nil {
 		user := a.UserStore.Authenticate(body.Username, password)
 		if user != nil {
-			response, _, authErr := a.Auth.AuthenticateUser(user)
+			hasPassword, stateErr := a.UserStore.hasPassword(user)
+			if stateErr != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "failed to read user password state"})
+				return
+			}
+			response, _, authErr := a.Auth.AuthenticateUser(user, hasPassword)
 			if authErr != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": authErr.Error()})
 				return
@@ -86,17 +91,24 @@ func (a *App) handleUsersPublic(w http.ResponseWriter, r *http.Request) {
 		"HasPassword":               true,
 		"HasConfiguredPassword":     true,
 		"HasConfiguredEasyPassword": false,
+		"EnableAutoLogin":           false,
 	}}
 	if a.UserStore != nil {
 		for _, user := range a.UserStore.List() {
 			if user.Enabled {
+				hasPassword, err := a.UserStore.hasPassword(user)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "failed to read user password state"})
+					return
+				}
 				users = append(users, map[string]any{
 					"Name":                      user.Username,
 					"ServerId":                  cfg.Server.ID,
 					"Id":                        user.ID,
-					"HasPassword":               true,
-					"HasConfiguredPassword":     true,
+					"HasPassword":               hasPassword,
+					"HasConfiguredPassword":     hasPassword,
 					"HasConfiguredEasyPassword": false,
+					"EnableAutoLogin":           false,
 				})
 			}
 		}
@@ -109,7 +121,12 @@ func (a *App) handleUserObject(w http.ResponseWriter, r *http.Request) {
 	if reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role == "user" && a.UserStore != nil {
 		user := a.UserStore.Get(reqCtx.ProxyUser.UserID)
 		if user != nil && user.Enabled {
-			writeJSON(w, http.StatusOK, a.Auth.BuildUserObjectForUser(user))
+			hasPassword, err := a.UserStore.hasPassword(user)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "failed to read user password state"})
+				return
+			}
+			writeJSON(w, http.StatusOK, a.Auth.BuildUserObjectForUser(user, hasPassword))
 			return
 		}
 		if user == nil {

@@ -60,7 +60,7 @@ func spendVerifyTime(password string) {
 }
 
 func VerifyPassword(plain, stored string) bool {
-	if plain == "" || stored == "" {
+	if stored == "" {
 		return false
 	}
 	if !IsHashedPassword(stored) {

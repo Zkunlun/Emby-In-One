@@ -134,4 +134,30 @@ func TestAdminUpstreamAuthTypeSwitch(t *testing.T) {
 			}
 		})
 	})
+
+	t.Run("apiKey to empty password", func(t *testing.T) {
+		upstream := newAuthSwitchUpstream(t)
+		withTempAppConfig(t, apiKeyUpstreamConfig(upstream.URL, "OLD-KEY"), func(app *App, handler http.Handler) {
+			token := loginToken(t, handler, "secret")
+
+			rr := doJSONRequest(t, handler, http.MethodPut, "/admin/api/upstream/0", map[string]any{
+				"name": "A", "url": upstream.URL,
+				"authType": "password", "username": "u2", "password": "",
+			}, token)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("switch status = %d, body=%s", rr.Code, rr.Body.String())
+			}
+
+			updated := app.ConfigStore.Snapshot().Upstream[0]
+			if updated.APIKey != "" {
+				t.Errorf("apiKey = %q, want it cleared", updated.APIKey)
+			}
+			if updated.Username != "u2" || updated.Password != "" {
+				t.Errorf("username/password = %q/%q, want u2/empty", updated.Username, updated.Password)
+			}
+			if !upstream.saw("/Users/AuthenticateByName") {
+				t.Errorf("the switch never attempted empty-password login, upstream saw %v", upstream.requests())
+			}
+		})
+	})
 }

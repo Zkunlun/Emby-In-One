@@ -81,6 +81,7 @@ func (a *App) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminUpstreamList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	cfg := a.ConfigStore.Snapshot()
 	clients := a.Upstream.Clients()
 	onlineByIndex := map[int]bool{}
@@ -90,8 +91,14 @@ func (a *App) handleAdminUpstreamList(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0, len(cfg.Upstream))
 	for index, upstream := range cfg.Upstream {
 		authType := "password"
+		username := upstream.Username
+		password := upstream.Password
+		apiKey := ""
 		if upstream.APIKey != "" {
 			authType = "apiKey"
+			username = ""
+			password = ""
+			apiKey = upstream.APIKey
 		}
 		streamingURLs := append([]string(nil), upstream.StreamingURLs...)
 		out = append(out, map[string]any{
@@ -99,7 +106,9 @@ func (a *App) handleAdminUpstreamList(w http.ResponseWriter, r *http.Request) {
 			"index":               index,
 			"name":                upstream.Name,
 			"url":                 sanitizeUpstreamURL(upstream.URL),
-			"username":            upstream.Username,
+			"username":            username,
+			"password":            password,
+			"apiKey":              apiKey,
 			"authType":            authType,
 			"online":              onlineByIndex[index],
 			"playbackMode":        upstream.PlaybackMode,
@@ -595,6 +604,7 @@ func (a *App) handleAdminLogsClear(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminUsersList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	if a.UserStore == nil {
 		writeJSON(w, http.StatusOK, []any{})
 		return
@@ -612,9 +622,15 @@ func (a *App) handleAdminUsersList(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		password, err := a.UserStore.passwordPlaintext(u)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "failed to decrypt user password"})
+			return
+		}
 		result = append(result, map[string]any{
 			"id":              u.ID,
 			"username":        u.Username,
+			"password":        password,
 			"enabled":         u.Enabled,
 			"allowedServers":  u.AllowedServers,
 			"hiddenLibraries": a.hiddenLibrariesJSONFor(u.ID),
@@ -639,13 +655,15 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request body"})
 		return
 	}
-	if input.Username == "" || input.Password == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "用户名和密码不能为空"})
+	if input.Username == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "用户名不能为空"})
 		return
 	}
-	if err := validatePassword("password", input.Password); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
+	if input.Password != "" {
+		if err := validatePassword("password", input.Password); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
 	}
 	cfg := a.ConfigStore.Snapshot()
 	if strings.EqualFold(input.Username, cfg.Admin.Username) {
@@ -698,6 +716,9 @@ func (a *App) handleAdminUsersUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	if input.Password != nil || (input.Enabled != nil && !*input.Enabled) {
+		a.Auth.RevokeTokensByUserID(id)
+	}
 	if a.HiddenLibraries != nil {
 		if input.HiddenLibraries != nil {
 			if err := a.applyHiddenLibrariesPatch(id, input.HiddenLibraries); err != nil {
@@ -720,9 +741,6 @@ func (a *App) handleAdminUsersUpdate(w http.ResponseWriter, r *http.Request) {
 	} else if len(input.HiddenLibraries) > 0 {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "数据库不可用，首页库隐藏未启用"})
 		return
-	}
-	if input.Enabled != nil && !*input.Enabled {
-		a.Auth.RevokeTokensByUserID(id)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
