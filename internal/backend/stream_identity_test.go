@@ -167,11 +167,11 @@ func TestSessionForwardsUpstreamUserID(t *testing.T) {
 // when a request cannot be prepared, and checks that an ordinary network failure
 // keeps its existing contract.
 //
-// The session handlers only reach the preparation layer for an upstream that
-// "online" already describes, and that state requires a user ID and a token. The
-// reachable preparation failure on these routes is therefore the body field
-// itself: an event that carries no UserId at all cannot satisfy the declared
-// current-user rule, and the handler must report that instead of a bare 204.
+// Session availability requires Online and a token, while a missing upstream
+// user ID must reach preparation and preserve its original kind/field response.
+// Authentication recovery is disabled in this fixture so it cannot change the
+// client state between the forwarding and handler assertions. Offline state is
+// then set explicitly and checked independently.
 func TestOutboundIdentitySessionStatus(t *testing.T) {
 	t.Run("an unpreparable current-user event reports its own status", func(t *testing.T) {
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +195,9 @@ func TestOutboundIdentitySessionStatus(t *testing.T) {
 			// write. Only the identity source is removed; the handler's own routing
 			// checks still pass.
 			client := app.Upstream.GetClient(0)
+			client.onAuthError = nil // Recovery timing is covered by dedicated tests.
 			client.mu.Lock()
+			client.Online = true
 			client.UserID = ""
 			client.mu.Unlock()
 
@@ -212,14 +214,28 @@ func TestOutboundIdentitySessionStatus(t *testing.T) {
 				t.Fatalf("preparation status = %d, want 503", status)
 			}
 
-			// The handler keeps its own routing gate: an upstream it no longer
-			// considers online is answered without preparing anything. That is why
-			// this test drives the forwarding sink directly above, which is where the
-			// preparation status is actually decided.
+			// A token-bearing online client with no user ID reaches preparation;
+			// the handler must preserve the preparation response, not reclassify it.
 			rr := doJSONRequest(t, handler, http.MethodPost, "/Sessions/Playing/Progress",
 				map[string]any{"ItemId": virtualItem, "UserId": app.Auth.ProxyUserID(), "PositionTicks": 5}, token)
-			if rr.Code != http.StatusServiceUnavailable || phase1GErrorCode(t, rr) != "UPSTREAM_SESSION_UNAVAILABLE" {
-				t.Fatalf("offline-upstream status = %d, want 503 UPSTREAM_SESSION_UNAVAILABLE (body=%s)", rr.Code, rr.Body.String())
+			var payload map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode preparation response: %v, body=%s", err, rr.Body.String())
+			}
+			if rr.Code != http.StatusServiceUnavailable || payload["kind"] != "missing-upstream-auth-state" || payload["field"] != "body.UserId" {
+				t.Fatalf("preparation response = %d %s, want 503 missing-upstream-auth-state/body.UserId", rr.Code, rr.Body.String())
+			}
+
+			// Test the availability gate with explicit offline state so this
+			// assertion does not depend on a background recovery goroutine.
+			client.mu.Lock()
+			client.Online = false
+			client.UserID = streamUpstreamUserID
+			client.mu.Unlock()
+			offline := doJSONRequest(t, handler, http.MethodPost, "/Sessions/Playing/Progress",
+				map[string]any{"ItemId": virtualItem, "UserId": app.Auth.ProxyUserID(), "PositionTicks": 5}, token)
+			if offline.Code != http.StatusServiceUnavailable || phase1GErrorCode(t, offline) != "UPSTREAM_SESSION_UNAVAILABLE" {
+				t.Fatalf("offline-upstream status = %d, want 503 UPSTREAM_SESSION_UNAVAILABLE (body=%s)", offline.Code, offline.Body.String())
 			}
 		})
 	})
