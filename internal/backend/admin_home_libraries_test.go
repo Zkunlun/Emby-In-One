@@ -164,7 +164,7 @@ func TestAdminUsersUpdateHiddenLibraries(t *testing.T) {
 		serverID := app.Upstream.Clients()[0].ID
 
 		createRR := doJSONRequest(t, handler, http.MethodPost, "/admin/api/users", map[string]any{
-			"username": "bob", "password": "password123",
+			"username": "bob", "password": "password123", "allowedServers": []string{serverID},
 		}, token)
 		if createRR.Code != http.StatusCreated {
 			t.Fatalf("create user status = %d, body=%s", createRR.Code, createRR.Body.String())
@@ -217,19 +217,19 @@ func TestAdminUsersUpdateHiddenLibraries(t *testing.T) {
 			t.Fatalf("narrowing allowed servers must prune srv-x, got %#v", hidden)
 		}
 
-		// An empty AllowedServers means "all servers": pruning must not run
-		// and the stored config must survive.
+		// An explicit empty AllowedServers list means no upstream access, so all
+		// stored hidden-library config for the user must be pruned.
 		if err := app.HiddenLibraries.SetServerHidden(userID, "srv-y", []string{"lib-8"}); err != nil {
 			t.Fatalf("SetServerHidden srv-y: %v", err)
 		}
-		openRR := doJSONRequest(t, handler, http.MethodPut, "/admin/api/users/"+userID, map[string]any{
+		clearRR := doJSONRequest(t, handler, http.MethodPut, "/admin/api/users/"+userID, map[string]any{
 			"allowedServers": []string{},
 		}, token)
-		if openRR.Code != http.StatusOK {
-			t.Fatalf("open status = %d, body=%s", openRR.Code, openRR.Body.String())
+		if clearRR.Code != http.StatusOK {
+			t.Fatalf("clear status = %d, body=%s", clearRR.Code, clearRR.Body.String())
 		}
-		if hidden := app.HiddenLibraries.UserHiddenJSON(userID); len(hidden["srv-y"]) != 1 {
-			t.Fatalf("empty allowedServers must keep the hidden config, got %#v", hidden)
+		if hidden := app.HiddenLibraries.UserHiddenJSON(userID); len(hidden) != 0 {
+			t.Fatalf("empty allowedServers must prune all hidden config, got %#v", hidden)
 		}
 	})
 }

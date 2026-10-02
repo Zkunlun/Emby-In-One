@@ -8,6 +8,57 @@ import (
 	"strings"
 )
 
+type playbackInfoLeaseReservation struct {
+	Applies  bool
+	UserID   string
+	ServerID string
+	DeviceID string
+	Result   playbackLeaseResult
+}
+
+// commitPlaybackInfoLease commits the successful upstream's PlaySessionID onto
+// the lease that will own the playback. If PlaybackInfo fell back to another
+// upstream, reserve that target first and only retire a source provisional lease
+// when this request created it and still owns its exact revision.
+func (a *App) commitPlaybackInfoLease(lease *playbackInfoLeaseReservation, itemID, serverID, playSessionID string) bool {
+	if lease == nil || !lease.Applies {
+		return true
+	}
+
+	sourceServerID := lease.ServerID
+	sourceResult := lease.Result
+	if serverID != sourceServerID {
+		target := a.PlaybackLimiter.Reserve(lease.UserID, serverID, lease.DeviceID, itemID, "")
+		if !target.Allowed {
+			if sourceResult.Created {
+				a.PlaybackLimiter.RollbackReservation(lease.UserID, sourceServerID, lease.DeviceID, sourceResult.Revision)
+			}
+			return false
+		}
+		lease.ServerID = serverID
+		lease.Result = target
+	}
+
+	if playSessionID != "" {
+		committed := a.PlaybackLimiter.Reserve(lease.UserID, lease.ServerID, lease.DeviceID, itemID, playSessionID)
+		if !committed.Allowed {
+			if lease.Result.Created {
+				a.PlaybackLimiter.RollbackReservation(lease.UserID, lease.ServerID, lease.DeviceID, lease.Result.Revision)
+			}
+			if sourceServerID != lease.ServerID && sourceResult.Created {
+				a.PlaybackLimiter.RollbackReservation(lease.UserID, sourceServerID, lease.DeviceID, sourceResult.Revision)
+			}
+			return false
+		}
+		lease.Result = committed
+	}
+
+	if sourceServerID != lease.ServerID && sourceResult.Created {
+		a.PlaybackLimiter.RollbackReservation(lease.UserID, sourceServerID, lease.DeviceID, sourceResult.Revision)
+	}
+	return true
+}
+
 func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 	resolved := a.resolveRouteID(r.PathValue("itemId"))
 	if resolved == nil {
@@ -21,17 +72,22 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 	if !a.requireServerAccess(w, r, resolved) {
 		return
 	}
-	// Concurrent playback limit check for regular users
-	if limiterUserID, ok := a.playbackLimiterKey(reqCtx, r, resolved.ServerID); ok {
-		var maxConcurrent int
-		for _, u := range a.ConfigStore.Snapshot().Upstream {
-			if u.ID == resolved.ServerID {
-				maxConcurrent = u.MaxConcurrent
-				break
-			}
+	// Keep the complete provisional reservation context for the rest of this
+	// PlaybackInfo request. Device identity is consumed only from the centralized
+	// RequestContext boundary, and Result carries the revision needed by commit/rollback.
+	lease := playbackInfoLeaseReservation{ServerID: resolved.ServerID}
+	if limiterUserID, ok := a.playbackLimiterKey(reqCtx, resolved.ServerID); ok {
+		deviceID := playbackDeviceID(reqCtx)
+		if deviceID == "" {
+			writePlaybackDeviceIDRequired(w)
+			return
 		}
-		if !a.PlaybackLimiter.TryStart(limiterUserID, resolved.ServerID, r.PathValue("itemId"), maxConcurrent) {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{"message": "已达到最大同时播放数限制"})
+		lease.Applies = true
+		lease.UserID = limiterUserID
+		lease.DeviceID = deviceID
+		lease.Result = a.PlaybackLimiter.Reserve(lease.UserID, lease.ServerID, lease.DeviceID, r.PathValue("itemId"), "")
+		if !lease.Result.Allowed {
+			writePlaybackDeviceLimit(w)
 			return
 		}
 	}
@@ -61,7 +117,11 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 	query.Del("ApiKey")
 
 	var base map[string]any
+	baseServerID := ""
+	basePlaySessionID := ""
+	clientPlaySessionID := ""
 	allMediaSources := []map[string]any{}
+	routeOwner := playbackRouteOwner(reqCtx)
 	for _, inst := range instances {
 		// The client only ever holds EIO's virtual user ID, and Emby prefers a UserId in the
 		// query or body over the one the request was authenticated as. Forwarding the virtual
@@ -82,8 +142,16 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
+		instPlaySessionID, _ := data["PlaySessionId"].(string)
+		virtualPlaySessionID := instPlaySessionID
+		if instPlaySessionID != "" {
+			virtualPlaySessionID = a.IDStore.GetOrCreateVirtualID(instPlaySessionID, inst.ServerID)
+		}
 		if base == nil {
 			base = deepCloneMap(data)
+			baseServerID = inst.ServerID
+			basePlaySessionID = instPlaySessionID
+			clientPlaySessionID = virtualPlaySessionID
 		}
 		for _, raw := range asItems(map[string]any{"Items": data["MediaSources"]}) {
 			mediaSource := deepCloneMap(raw)
@@ -93,6 +161,7 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 				virtualMSID = a.IDStore.GetOrCreateVirtualID(originalMSID, inst.ServerID)
 				mediaSource["Id"] = virtualMSID
 			}
+			a.playbackRoutes.RememberMediaSource(routeOwner, virtualMSID, inst.ServerID, instPlaySessionID, clientPlaySessionID)
 			// MediaSource.ItemId refers to the item whose PlaybackInfo was requested. Keep it
 			// on the same virtual item identity exposed to the client; leaving the upstream
 			// ItemId here makes clients that construct external-subtitle URLs from this field
@@ -118,6 +187,9 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 				}
 				proxyURL := url.Values{}
 				proxyURL.Set("MediaSourceId", virtualMSID)
+				if virtualPlaySessionID != "" {
+					proxyURL.Set("PlaySessionId", virtualPlaySessionID)
+				}
 				proxyURL.Set("Static", "true")
 				if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyToken != "" {
 					proxyURL.Set("api_key", reqCtx.ProxyToken)
@@ -138,6 +210,9 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 					queryValues.Del("ApiKey")
 					if originalMSID != "" {
 						queryValues.Set("MediaSourceId", virtualMSID)
+					}
+					if virtualPlaySessionID != "" {
+						queryValues.Set("PlaySessionId", virtualPlaySessionID)
 					}
 					if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyToken != "" {
 						queryValues.Set("api_key", reqCtx.ProxyToken)
@@ -162,6 +237,9 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 								queryValues := parsed.Query()
 								queryValues.Del("api_key")
 								queryValues.Del("ApiKey")
+								if virtualPlaySessionID != "" {
+									queryValues.Set("PlaySessionId", virtualPlaySessionID)
+								}
 								if reqCtx != nil && reqCtx.ProxyToken != "" {
 									queryValues.Set("api_key", reqCtx.ProxyToken)
 								}
@@ -183,25 +261,32 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 			allMediaSources = append(allMediaSources, mediaSource)
 		}
 	}
-	// Record which server served this virtual item so Sessions/Playing routes back correctly
-	if len(allMediaSources) > 0 {
-		if virtualItemID := r.PathValue("itemId"); virtualItemID != "" {
-			a.IDStore.SetActiveStream(virtualItemID, resolved.ServerID)
-		}
-	}
 	if base == nil {
 		if a.Logger != nil {
 			a.Logger.Errorf("PlaybackInfo: all upstream requests failed for itemId=%s", r.PathValue("itemId"))
 		}
-		// Nothing will play, so release the slot TryStart reserved above. Clients retry
-		// PlaybackInfo on failure, and holding the slot kept the user counted against
-		// the server's capacity for the full heartbeat timeout while they could not
-		// actually start a stream.
-		if limiterUserID, ok := a.playbackLimiterKey(reqCtx, r, resolved.ServerID); ok {
-			a.PlaybackLimiter.Stop(limiterUserID, resolved.ServerID)
+		// Roll back only a provisional lease this PlaybackInfo request actually
+		// created, and only while its exact revision is still current. A failed
+		// same-device retry reuses an older committed lease (Created=false), while a
+		// later Reserve advances Revision and makes an older rollback harmless.
+		if lease.Applies && lease.Result.Created {
+			a.PlaybackLimiter.RollbackReservation(lease.UserID, lease.ServerID, lease.DeviceID, lease.Result.Revision)
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Failed to fetch playback info from upstream"})
 		return
+	}
+	if !a.commitPlaybackInfoLease(&lease, r.PathValue("itemId"), baseServerID, basePlaySessionID) {
+		writePlaybackDeviceLimit(w)
+		return
+	}
+	// The first successful PlaybackInfo response owns the top-level PlaySessionId.
+	// Track that server for later session routing instead of assuming the primary
+	// mapping server answered successfully.
+	if len(allMediaSources) > 0 {
+		if virtualItemID := r.PathValue("itemId"); virtualItemID != "" {
+			a.IDStore.SetActiveStream(virtualItemID, baseServerID)
+			a.playbackRoutes.Activate(routeOwner, virtualItemID, baseServerID, basePlaySessionID, clientPlaySessionID)
+		}
 	}
 	if a.Logger != nil {
 		a.Logger.Debugf("PlaybackInfo: returning %d MediaSources for itemId=%s", len(allMediaSources), r.PathValue("itemId"))
@@ -209,7 +294,7 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 	cfg := a.ConfigStore.Snapshot()
 	// Rewrite top-level fields (excluding MediaSources which were already virtualised per-server above)
 	delete(base, "MediaSources")
-	rewriteResponseIDs(base, resolved.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
+	rewriteResponseIDs(base, baseServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
 	base["MediaSources"] = make([]any, 0, len(allMediaSources))
 	for _, mediaSource := range allMediaSources {
 		base["MediaSources"] = append(base["MediaSources"].([]any), mediaSource)

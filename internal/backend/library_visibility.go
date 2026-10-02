@@ -27,7 +27,7 @@ type HiddenLibraryStore struct {
 	snapshot atomic.Pointer[hiddenLibrarySnapshot]
 	writeMu  sync.Mutex
 	db       *sqliteDB
-	logger    *Logger
+	logger   *Logger
 }
 
 func NewHiddenLibraryStore(db *sqliteDB, logger *Logger) (*HiddenLibraryStore, error) {
@@ -236,9 +236,9 @@ func (s *HiddenLibraryStore) RemoveUser(userID string) error {
 }
 
 // PruneUserServers drops every server for which keep returns false. Callers
-// must only invoke it with an explicit allow list: in this project's
-// permission model an empty AllowedServers means "all servers", and pruning
-// under such a list would wipe the user's whole config.
+// invoke it only when an explicit regular-user allow list was supplied. An
+// empty allow list therefore prunes every stored server for that user, matching
+// the permission model where empty means no upstream access.
 func (s *HiddenLibraryStore) PruneUserServers(userID string, keep func(serverID string) bool) error {
 	if userID == "" || keep == nil {
 		return nil

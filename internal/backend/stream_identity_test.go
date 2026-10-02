@@ -218,19 +218,19 @@ func TestOutboundIdentitySessionStatus(t *testing.T) {
 			// preparation status is actually decided.
 			rr := doJSONRequest(t, handler, http.MethodPost, "/Sessions/Playing/Progress",
 				map[string]any{"ItemId": virtualItem, "UserId": app.Auth.ProxyUserID(), "PositionTicks": 5}, token)
-			if rr.Code != http.StatusNoContent {
-				t.Fatalf("offline-upstream status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusServiceUnavailable || phase1GErrorCode(t, rr) != "UPSTREAM_SESSION_UNAVAILABLE" {
+				t.Fatalf("offline-upstream status = %d, want 503 UPSTREAM_SESSION_UNAVAILABLE (body=%s)", rr.Code, rr.Body.String())
 			}
 		})
 	})
 
-	t.Run("a network failure keeps the existing contract", func(t *testing.T) {
+	t.Run("upstream HTTP failure rejects progress but keeps stopped best effort", func(t *testing.T) {
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName" {
 				_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": streamUpstreamToken, "User": map[string]any{"Id": streamUpstreamUserID}})
 				return
 			}
-			// A 500 is an upstream error, not a preparation failure.
+			// A 500 is an upstream HTTP rejection, not a preparation failure.
 			w.WriteHeader(http.StatusInternalServerError)
 		}))
 		defer upstream.Close()
@@ -238,12 +238,17 @@ func TestOutboundIdentitySessionStatus(t *testing.T) {
 		withTempAppConfig(t, singleUpstreamConfig(upstream.URL), func(app *App, handler http.Handler) {
 			token := loginToken(t, handler, "secret")
 			virtualItem := app.IDStore.GetOrCreateVirtualID("orig-item", app.Upstream.Clients()[0].ID)
-			for _, path := range []string{"/Sessions/Playing/Progress", "/Sessions/Playing/Stopped"} {
-				rr := doJSONRequest(t, handler, http.MethodPost, path,
-					map[string]any{"ItemId": virtualItem, "PositionTicks": 5}, token)
-				if rr.Code != http.StatusNoContent {
-					t.Fatalf("%s status = %d, want 204 (body=%s)", path, rr.Code, rr.Body.String())
-				}
+
+			progress := doJSONRequest(t, handler, http.MethodPost, "/Sessions/Playing/Progress",
+				map[string]any{"ItemId": virtualItem, "PositionTicks": 5}, token)
+			if progress.Code != http.StatusBadGateway || phase1GErrorCode(t, progress) != "UPSTREAM_SESSION_REJECTED" {
+				t.Fatalf("progress status = %d, want 502 UPSTREAM_SESSION_REJECTED (body=%s)", progress.Code, progress.Body.String())
+			}
+
+			stopped := doJSONRequest(t, handler, http.MethodPost, "/Sessions/Playing/Stopped",
+				map[string]any{"ItemId": virtualItem, "PositionTicks": 5}, token)
+			if stopped.Code != http.StatusNoContent {
+				t.Fatalf("stopped status = %d, want 204 (body=%s)", stopped.Code, stopped.Body.String())
 			}
 		})
 	})
@@ -268,15 +273,15 @@ func TestOutboundIdentitySessionStatus(t *testing.T) {
 			if app.PlaybackLimiter == nil {
 				t.Skip("no playback limiter in this build")
 			}
-			app.PlaybackLimiter.TryStart(aliceID, app.Upstream.Clients()[0].ID, virtualItem, 5)
+			app.PlaybackLimiter.Reserve(aliceID, app.Upstream.Clients()[0].ID, "device-1", virtualItem, "")
 			rr := doJSONRequest(t, handler, http.MethodPost, "/Sessions/Playing/Stopped",
 				map[string]any{"ItemId": virtualItem, "PositionTicks": 5}, aliceToken)
 			if rr.Code != http.StatusNoContent {
 				t.Fatalf("stopped status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
 			}
-			// The slot must be free again: a failed report cannot strand a permit.
-			if !app.PlaybackLimiter.TryStart(aliceID, app.Upstream.Clients()[0].ID, virtualItem, 1) {
-				t.Fatalf("the playback slot was not released after a failed stop report")
+			// The lease must be free again: a failed report cannot strand local state.
+			if !app.PlaybackLimiter.Reserve(aliceID, app.Upstream.Clients()[0].ID, "device-1", virtualItem, "").Allowed {
+				t.Fatalf("the playback lease was not released after a failed stop report")
 			}
 		})
 	})

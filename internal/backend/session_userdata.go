@@ -46,56 +46,111 @@ func decodeOptionalJSON(r *http.Request) (any, error) {
 	return payload, nil
 }
 
-func (a *App) translateSessionBodyIDs(body map[string]any) (string, bool) {
-	// Resolve each ID independently to its OWN server's original value.
-	// This matches the Node.js reference implementation where each virtual ID
-	// is translated to its own server's original regardless of the target server.
-	//
-	// Target server priority: ItemId → MediaSourceId → PlaySessionId → ActiveStream.
-	// This ensures session events are routed to the server that owns the episode
-	// (ItemId), not the server that owns the media source. The upstream Emby
-	// associates resume/progress data with ItemId, so the ItemId must be valid
-	// on the target server.
-
-	type resolvedID struct {
-		OriginalID string
-		ServerID   string
+func resolvedOriginalIDForServer(resolved *ResolvedID, serverID string) string {
+	if resolved == nil {
+		return ""
 	}
-
-	resolutions := map[string]*resolvedID{} // key → resolved
-	for _, key := range []string{"ItemId", "MediaSourceId", "PlaySessionId"} {
-		text, _ := body[key].(string)
-		if text == "" {
-			continue
+	if resolved.ServerID == serverID || serverID == "" {
+		return resolved.OriginalID
+	}
+	for _, other := range resolved.OtherInstances {
+		if other.ServerID == serverID {
+			return other.OriginalID
 		}
-		resolved := a.IDStore.ResolveVirtualID(text)
+	}
+	return resolved.OriginalID
+}
+
+func (a *App) translateSessionBodyIDs(reqCtx *RequestContext, body map[string]any) (string, bool) {
+	rawItemID, _ := body["ItemId"].(string)
+	rawMediaSourceID, _ := body["MediaSourceId"].(string)
+	rawPlaySessionID, _ := body["PlaySessionId"].(string)
+
+	resolve := func(value string) *ResolvedID {
+		if value == "" {
+			return nil
+		}
+		resolved := a.IDStore.ResolveVirtualID(value)
 		if resolved == nil {
-			resolved = a.IDStore.ResolveByOriginalID(text)
+			resolved = a.IDStore.ResolveByOriginalID(value)
 		}
-		if resolved != nil {
-			resolutions[key] = &resolvedID{
-				OriginalID: resolved.OriginalID,
-				ServerID:   resolved.ServerID,
-			}
-			body[key] = resolved.OriginalID
-		}
+		return resolved
 	}
+	itemResolved := resolve(rawItemID)
+	mediaResolved := resolve(rawMediaSourceID)
+	playResolved := resolve(rawPlaySessionID)
 
-	// Determine target server: prefer ItemId's server (matches Node.js)
+	owner := playbackRouteOwner(reqCtx)
 	serverID := ""
-	for _, key := range []string{"ItemId", "MediaSourceId", "PlaySessionId"} {
-		if r, ok := resolutions[key]; ok {
-			serverID = r.ServerID
-			break
+	targetPlaySessionID := ""
+
+	// Item and MediaSource routes are overwritten by later PlaybackInfo calls.
+	// Only an explicit session match may translate a client session onto a route's
+	// upstream session; a delayed old event must never acquire the latest session.
+	routeMatchesSession := func(route playbackRouteEntry) bool {
+		if rawPlaySessionID == "" {
+			return true
+		}
+		if route.ClientPlaySessionID != "" {
+			if rawPlaySessionID == route.ClientPlaySessionID {
+				return true
+			}
+			if clientSession := resolve(route.ClientPlaySessionID); clientSession != nil && playResolved != nil &&
+				clientSession.ServerID == playResolved.ServerID && clientSession.OriginalID == playResolved.OriginalID {
+				return true
+			}
+		}
+		if playResolved != nil {
+			return playResolved.ServerID == route.ServerID && playResolved.OriginalID == route.PlaySessionID
+		}
+		return rawPlaySessionID == route.PlaySessionID
+	}
+
+	// A selected MediaSource is the strongest evidence of the server actually
+	// serving bytes. PlaybackInfo records that source's own upstream PlaySessionID.
+	if mediaResolved != nil {
+		serverID = mediaResolved.ServerID
+		if route, ok := a.playbackRoutes.MediaSource(owner, rawMediaSourceID); ok && route.ServerID == serverID && routeMatchesSession(route) {
+			targetPlaySessionID = route.PlaySessionID
+		}
+	}
+	// Some clients omit MediaSourceId from check-ins after opening the stream. Use
+	// the request-owner-scoped active route instead of the old process-global item route.
+	if serverID == "" && rawItemID != "" {
+		if route, ok := a.playbackRoutes.Active(owner, rawItemID); ok {
+			serverID = route.ServerID
+			if routeMatchesSession(route) {
+				targetPlaySessionID = route.PlaySessionID
+			}
+		}
+	}
+	if targetPlaySessionID == "" && playResolved != nil {
+		// Without a proven cross-upstream alias, the explicit session retains its
+		// own server namespace even when the latest item/media route has moved.
+		serverID = playResolved.ServerID
+		targetPlaySessionID = playResolved.OriginalID
+	}
+	if serverID == "" && itemResolved != nil {
+		serverID = itemResolved.ServerID
+	}
+	if serverID == "" && rawItemID != "" {
+		// Legacy last resort for callers that do not yet have request-scoped route state.
+		if active, ok := a.IDStore.GetActiveStream(rawItemID); ok {
+			serverID = active
 		}
 	}
 
-	if serverID == "" {
-		// Last resort: check which server last served a PlaybackInfo for ItemId
-		if itemID, _ := body["ItemId"].(string); itemID != "" {
-			if idx, ok := a.IDStore.GetActiveStream(itemID); ok {
-				serverID = idx
-			}
+	if itemResolved != nil {
+		body["ItemId"] = resolvedOriginalIDForServer(itemResolved, serverID)
+	}
+	if mediaResolved != nil {
+		body["MediaSourceId"] = mediaResolved.OriginalID
+	}
+	if rawPlaySessionID != "" {
+		if targetPlaySessionID != "" {
+			body["PlaySessionId"] = targetPlaySessionID
+		} else if playResolved != nil {
+			body["PlaySessionId"] = playResolved.OriginalID
 		}
 	}
 
@@ -248,10 +303,16 @@ func readUpstreamJSONOrNoContent(resp *http.Response) (int, any, error) {
 func (a *App) forwardNoContent(r *http.Request, client *UpstreamClient, method, path string, query url.Values, body any) error {
 	resp, err := a.performUpstream(r, client, method, path, query, body)
 	if err != nil {
-		return err
+		return classifySessionTransportError(err)
 	}
-	_, _, err = readUpstreamJSONOrNoContent(resp)
-	return err
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return newSessionUpstreamRejectedError(resp.StatusCode)
+	}
+	// Session/no-content calls use the HTTP status as the upstream confirmation.
+	// Some Emby-compatible servers return a small non-JSON body with 200; that is
+	// still a successful session update and must not be reclassified as a failure.
+	return nil
 }
 
 func (a *App) forwardJSONOrNoContent(r *http.Request, client *UpstreamClient, method, path string, query url.Values, body any) (int, any, error) {
@@ -270,6 +331,77 @@ func asBodyMap(payload any) (map[string]any, bool) {
 	return body, ok
 }
 
+func (a *App) heartbeatPlaybackLease(reqCtx *RequestContext, serverID string) bool {
+	limiterUserID, ok := a.playbackLimiterKey(reqCtx, serverID)
+	if !ok {
+		return false
+	}
+	deviceID := playbackDeviceID(reqCtx)
+	if deviceID == "" {
+		return false
+	}
+	return a.PlaybackLimiter.Heartbeat(limiterUserID, serverID, deviceID)
+}
+
+// stopPlaybackLease releases only the lease owned by the resolved lifecycle
+// device and the exact upstream PlaySessionID. Device identity comes from the
+// request context; callers pass the session after virtual-ID translation.
+func (a *App) stopPlaybackLease(reqCtx *RequestContext, serverID, playSessionID string) bool {
+	limiterUserID, ok := a.playbackLimiterKey(reqCtx, serverID)
+	if !ok {
+		return false
+	}
+	deviceID := playbackDeviceID(reqCtx)
+	if deviceID == "" {
+		return false
+	}
+	return a.PlaybackLimiter.Stop(limiterUserID, serverID, deviceID, playSessionID)
+}
+
+// sessionUpstreamClient centralizes the lifecycle availability gate. A missing
+// client and a configured-but-offline client are the same availability state to
+// Playing/Progress; Stopped consumes the same gate but applies its own local
+// finalization semantics.
+func (a *App) sessionUpstreamClient(serverID string) (*UpstreamClient, bool) {
+	if a == nil || a.Upstream == nil {
+		return nil, false
+	}
+	client := a.Upstream.ClientByID(serverID)
+	if client == nil {
+		return nil, false
+	}
+	// Missing UserID must reach outbound preparation so its original 503
+	// kind/field response and authentication recovery remain intact. IsOnline
+	// includes UserID readiness and would incorrectly classify that failure as
+	// offline, hiding it behind Stopped's best-effort 204 response.
+	client.mu.RLock()
+	available := client.Online && client.AccessToken != ""
+	client.mu.RUnlock()
+	return client, available
+}
+
+// finalizeStoppedPlayback applies the local half of a Stopped event exactly once.
+// It intentionally runs even when outbound request preparation failed: the client
+// has ended playback locally, so watch progress must be persisted and only the
+// matching device/session lease may be released.
+func (a *App) finalizeStoppedPlayback(r *http.Request, virtualItemID string, body map[string]any, serverID, playSessionID string) {
+	a.recordSessionToWatchStore(r, virtualItemID, body, serverID, true)
+	a.stopPlaybackLease(requestContextFrom(r.Context()), serverID, playSessionID)
+}
+
+// handleStoppedPreparationError preserves the preparation error response while
+// still finalizing the local Stopped lifecycle. Non-preparation errors are left to
+// the existing best-effort upstream-error path.
+func (a *App) handleStoppedPreparationError(w http.ResponseWriter, r *http.Request, virtualItemID string, body map[string]any, serverID, playSessionID string, err error) bool {
+	status, ok := preparationErrorStatus(err)
+	if !ok {
+		return false
+	}
+	a.finalizeStoppedPlayback(r, virtualItemID, body, serverID, playSessionID)
+	writeJSON(w, status, preparationErrorBody(err))
+	return true
+}
+
 func (a *App) handleSessionPlaying(w http.ResponseWriter, r *http.Request) {
 	payload, err := decodeOptionalJSON(r)
 	if err != nil {
@@ -282,7 +414,7 @@ func (a *App) handleSessionPlaying(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	virtualItemID, _ := body["ItemId"].(string) // capture before translation
-	serverID, found := a.translateSessionBodyIDs(body)
+	serverID, found := a.translateSessionBodyIDs(requestContextFrom(r.Context()), body)
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "Cannot determine target server"})
 		return
@@ -291,9 +423,13 @@ func (a *App) handleSessionPlaying(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
 		return
 	}
-	client := a.Upstream.ClientByID(serverID)
-	if client == nil || !client.IsOnline() {
-		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Server not found"})
+	if a.playbackDeviceIDRequired(requestContextFrom(r.Context()), serverID) {
+		writePlaybackDeviceIDRequired(w)
+		return
+	}
+	client, available := a.sessionUpstreamClient(serverID)
+	if !available {
+		writeSessionUpstreamUnavailable(w)
 		return
 	}
 	if err := a.forwardNoContent(r, client, http.MethodPost, "/Sessions/Playing", nil, body); err != nil {
@@ -305,15 +441,21 @@ func (a *App) handleSessionPlaying(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if a.Logger != nil {
-			a.Logger.Warnf("Sessions/Playing upstream error (server %s): %v", serverID, redactURLInError(err))
+			a.Logger.Warnf("Sessions/Playing upstream error (server %s): %v", serverID, err)
 		}
+		if !writeSessionUpstreamError(w, err) {
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"code":    upstreamSessionFailedCode,
+				"message": "Upstream session request failed",
+			})
+		}
+		return
 	}
+
+	// Local watch state and the lease heartbeat commit only after the upstream
+	// has confirmed the Playing event with a 2xx response.
 	a.recordSessionToWatchStore(r, virtualItemID, body, serverID, false)
-	if a.PlaybackLimiter != nil {
-		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
-			a.PlaybackLimiter.Heartbeat(reqCtx.ProxyUser.UserID, serverID)
-		}
-	}
+	a.heartbeatPlaybackLease(requestContextFrom(r.Context()), serverID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -329,7 +471,7 @@ func (a *App) handleSessionPlayingProgress(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	virtualItemID, _ := body["ItemId"].(string)
-	serverID, found := a.translateSessionBodyIDs(body)
+	serverID, found := a.translateSessionBodyIDs(requestContextFrom(r.Context()), body)
 	if !found {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -338,26 +480,36 @@ func (a *App) handleSessionPlayingProgress(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
 		return
 	}
-	client := a.Upstream.ClientByID(serverID)
-	if client == nil || !client.IsOnline() {
-		w.WriteHeader(http.StatusNoContent)
+	if a.playbackDeviceIDRequired(requestContextFrom(r.Context()), serverID) {
+		writePlaybackDeviceIDRequired(w)
+		return
+	}
+	client, available := a.sessionUpstreamClient(serverID)
+	if !available {
+		writeSessionUpstreamUnavailable(w)
 		return
 	}
 	if err := a.forwardNoContent(r, client, http.MethodPost, "/Sessions/Playing/Progress", nil, body); err != nil {
-		// Progress used to swallow every error as 204. A preparation failure is the
-		// client's or the configuration's, and reporting it is what makes the
-		// failure visible instead of looking like a successful report.
 		if status, ok := preparationErrorStatus(err); ok {
 			writeJSON(w, status, preparationErrorBody(err))
 			return
 		}
-	}
-	a.recordSessionToWatchStore(r, virtualItemID, body, serverID, false)
-	if a.PlaybackLimiter != nil {
-		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
-			a.PlaybackLimiter.Heartbeat(reqCtx.ProxyUser.UserID, serverID)
+		if a.Logger != nil {
+			a.Logger.Warnf("Sessions/Playing/Progress upstream error (server %s): %v", serverID, err)
 		}
+		if !writeSessionUpstreamError(w, err) {
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"code":    upstreamSessionFailedCode,
+				"message": "Upstream session request failed",
+			})
+		}
+		return
 	}
+
+	// Local watch state and the lease heartbeat commit only after the upstream
+	// has confirmed the Progress event with a 2xx response.
+	a.recordSessionToWatchStore(r, virtualItemID, body, serverID, false)
+	a.heartbeatPlaybackLease(requestContextFrom(r.Context()), serverID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -373,40 +525,42 @@ func (a *App) handleSessionPlayingStopped(w http.ResponseWriter, r *http.Request
 		return
 	}
 	virtualItemID, _ := body["ItemId"].(string)
-	serverID, found := a.translateSessionBodyIDs(body)
+	serverID, found := a.translateSessionBodyIDs(requestContextFrom(r.Context()), body)
 	if !found {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	playSessionID, _ := body["PlaySessionId"].(string)
 	if !a.isServerAllowed(requestContextFrom(r.Context()), serverID) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
 		return
 	}
-	client := a.Upstream.ClientByID(serverID)
-	if client == nil || !client.IsOnline() {
+	if a.playbackDeviceIDRequired(requestContextFrom(r.Context()), serverID) {
+		// A local Stopped event still updates per-user progress, but an unidentified
+		// request must never release a device-owned lease or be reported upstream as
+		// if its playback identity were authoritative.
+		a.recordSessionToWatchStore(r, virtualItemID, body, serverID, true)
+		writePlaybackDeviceIDRequired(w)
+		return
+	}
+	client, available := a.sessionUpstreamClient(serverID)
+	if !available {
+		// Stopped is a client-observed terminal event. Even when the upstream is
+		// unavailable, preserve the final local progress and release only the exact
+		// matching device/session lease instead of stranding it until stale timeout.
+		a.finalizeStoppedPlayback(r, virtualItemID, body, serverID, playSessionID)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if err := a.forwardNoContent(r, client, http.MethodPost, "/Sessions/Playing/Stopped", nil, body); err != nil {
-		if status, ok := preparationErrorStatus(err); ok {
-			// The stop still has to release the concurrency slot and record the local
-			// progress: leaving them behind would strand a playback permit.
-			a.recordSessionToWatchStore(r, virtualItemID, body, serverID, true)
-			if a.PlaybackLimiter != nil {
-				if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
-					a.PlaybackLimiter.Stop(reqCtx.ProxyUser.UserID, serverID)
-				}
-			}
-			writeJSON(w, status, preparationErrorBody(err))
+		if a.handleStoppedPreparationError(w, r, virtualItemID, body, serverID, playSessionID, err) {
 			return
 		}
-	}
-	a.recordSessionToWatchStore(r, virtualItemID, body, serverID, true)
-	if a.PlaybackLimiter != nil {
-		if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && reqCtx.ProxyUser.Role != "admin" {
-			a.PlaybackLimiter.Stop(reqCtx.ProxyUser.UserID, serverID)
+		if a.Logger != nil {
+			a.Logger.Warnf("Sessions/Playing/Stopped upstream error (server %s): %v", serverID, err)
 		}
 	}
+	a.finalizeStoppedPlayback(r, virtualItemID, body, serverID, playSessionID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

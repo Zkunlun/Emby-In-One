@@ -207,12 +207,11 @@ func (a *App) performUpstreamRequest(r *http.Request, client *UpstreamClient, me
 	return client.doRequest(r.Context(), reqCtx, method, path, query, body, client.requestHeaders(reqCtx, a.Identity), false)
 }
 
-// playbackLimiterKey reports the key the concurrent-playback limiter uses for this
-// request, or ok == false when no slot applies: admins are exempt, the limiter may be
-// disabled, and a request without a resolved proxy user or server cannot be counted.
-// TryStart and the failure paths that must undo it share this predicate so the two can
-// never drift apart and leave a slot taken that nothing releases.
-func (a *App) playbackLimiterKey(reqCtx *RequestContext, r *http.Request, serverID string) (userID string, ok bool) {
+// playbackLimiterKey reports whether the single-device playback lease applies to
+// this regular user/server pair. Admins are exempt, and unresolved users or
+// upstreams do not participate. Device identity is deliberately not derived here:
+// the HTTP boundary resolves DeviceID and passes that explicit value to the limiter.
+func (a *App) playbackLimiterKey(reqCtx *RequestContext, serverID string) (userID string, ok bool) {
 	if reqCtx == nil || reqCtx.ProxyUser == nil || reqCtx.ProxyUser.Role == "admin" {
 		return "", false
 	}

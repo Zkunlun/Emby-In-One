@@ -6,7 +6,9 @@ import (
 )
 
 func TestAdminUserPasswordWriteRevokesTokens(t *testing.T) {
-	withTempApp(t, func(app *App, handler http.Handler) {
+	upstream := phase1AUpstreamStub(t)
+	defer upstream.Close()
+	withTempAppConfig(t, phase1AAuthorizationSlotConfig(upstream.URL), func(app *App, handler http.Handler) {
 		adminToken := loginToken(t, handler, "secret")
 		user, err := app.UserStore.Create("token-user", "password123", nil)
 		if err != nil {
@@ -49,6 +51,22 @@ func TestAdminUserPasswordWriteRevokesTokens(t *testing.T) {
 			t.Fatalf("omitted password update status = %d, body=%s", rr.Code, rr.Body.String())
 		}
 		assertTokenState(token, true, "omitted password")
+
+		// Authorization changes must invalidate the token's cached AllowedServers
+		// snapshot so removed or newly assigned grants cannot leave stale access.
+		clients := app.Upstream.Clients()
+		if len(clients) != 1 {
+			t.Fatalf("authorization fixture has %d upstreams, want 1", len(clients))
+		}
+		serverID := clients[0].ID
+		rr = doJSONRequest(t, handler, http.MethodPut, "/admin/api/users/"+user.ID, map[string]any{
+			"allowedServers": []string{serverID},
+		}, adminToken)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("allowedServers update status = %d, body=%s", rr.Code, rr.Body.String())
+		}
+		assertTokenState(token, false, "authorization change")
+		token = issueToken()
 
 		// A rejected password write is not a successful write and must not revoke.
 		rr = doJSONRequest(t, handler, http.MethodPut, "/admin/api/users/"+user.ID, map[string]any{

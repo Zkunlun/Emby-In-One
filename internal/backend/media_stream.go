@@ -61,11 +61,13 @@ func (a *App) proxyStream(w http.ResponseWriter, r *http.Request, route streamRo
 	// /Videos/{itemId}/{mediaSourceId}/Subtitles/...  or  .../Attachments/...
 	rest = resolveMediaSourceInPath(rest, a.IDStore)
 
+	// Resolve the client-facing PlaySessionId before target selection so a
+	// cross-upstream MediaSource switch can replace it with that target's own session.
+	a.resolvePlaySessionID(query)
 	client, originalID, ok := a.resolveStreamTarget(w, r, resolved, virtualItemID, query)
 	if !ok {
 		return
 	}
-	a.resolvePlaySessionID(query)
 
 	upstreamPath := route.pathPrefix + "/" + originalID + "/" + rest
 	reqCtx := requestContextFrom(r.Context())
@@ -179,9 +181,9 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, client *Upst
 	_, _ = io.Copy(w, resp.Body)
 }
 
-// resolveStreamTarget returns the client and the original item id to stream from.
-// A MediaSourceId that lives on another upstream switches the target, subject to the
-// same server permission and concurrency rules as the primary instance.
+// resolveStreamTarget returns the client and original item id that will actually
+// serve the stream. A MediaSourceId on another upstream also selects that upstream's
+// PlaybackInfo session and moves the regular user's device-owned playback lease.
 func (a *App) resolveStreamTarget(w http.ResponseWriter, r *http.Request, resolved *routeResolution, virtualItemID string, query url.Values) (*UpstreamClient, string, bool) {
 	virtualMediaSourceID := query.Get("MediaSourceId")
 	if virtualMediaSourceID == "" {
@@ -194,8 +196,34 @@ func (a *App) resolveStreamTarget(w http.ResponseWriter, r *http.Request, resolv
 		}
 		return resolved.Client, resolved.OriginalID, true
 	}
+	reqCtx := requestContextFrom(r.Context())
+	routeOwner := playbackRouteOwner(reqCtx)
+	previousServerID := resolved.ServerID
+	previousPlaySessionID := query.Get("PlaySessionId")
+	if active, ok := a.playbackRoutes.Active(routeOwner, virtualItemID); ok {
+		previousServerID = active.ServerID
+		if active.PlaySessionID != "" {
+			previousPlaySessionID = active.PlaySessionID
+		}
+	}
+	targetPlaySessionID := ""
+	clientPlaySessionID := ""
+	if candidate, ok := a.playbackRoutes.MediaSource(routeOwner, virtualMediaSourceID); ok && candidate.ServerID == mediaSource.ServerID {
+		targetPlaySessionID = candidate.PlaySessionID
+		clientPlaySessionID = candidate.ClientPlaySessionID
+	}
 	query.Set("MediaSourceId", mediaSource.OriginalID)
+	if targetPlaySessionID != "" {
+		query.Set("PlaySessionId", targetPlaySessionID)
+	}
 	if mediaSource.ServerID == resolved.ServerID {
+		if previousServerID != mediaSource.ServerID {
+			if !a.switchPlaybackLease(w, r, mediaSource.ServerID, previousServerID, virtualItemID, targetPlaySessionID, previousPlaySessionID, clientPlaySessionID) {
+				return nil, "", false
+			}
+		} else {
+			a.playbackRoutes.Activate(routeOwner, virtualItemID, mediaSource.ServerID, targetPlaySessionID, clientPlaySessionID)
+		}
 		return resolved.Client, resolved.OriginalID, true
 	}
 
@@ -211,7 +239,7 @@ func (a *App) resolveStreamTarget(w http.ResponseWriter, r *http.Request, resolv
 	if a.Logger != nil {
 		a.Logger.Infof("Stream: switching to server [%s] for MediaSourceId %s", target.Name, virtualMediaSourceID)
 	}
-	if !a.switchPlaybackSlot(w, r, mediaSource.ServerID, resolved.ServerID, virtualItemID) {
+	if !a.switchPlaybackLease(w, r, mediaSource.ServerID, previousServerID, virtualItemID, targetPlaySessionID, previousPlaySessionID, clientPlaySessionID) {
 		return nil, "", false
 	}
 	// Prefer this server's own copy of the item when it has one.
@@ -223,32 +251,29 @@ func (a *App) resolveStreamTarget(w http.ResponseWriter, r *http.Request, resolv
 	return target, resolved.OriginalID, true
 }
 
-// switchPlaybackSlot enforces the concurrency limit on the server that will serve
-// the stream and releases the previously held slot. Writes 429 and returns false
-// when the target server is already at its limit.
-func (a *App) switchPlaybackSlot(w http.ResponseWriter, r *http.Request, targetID, previousID string, virtualItemID string) bool {
+// switchPlaybackLease moves the active route only after the target lease has been
+// accepted. The target keeps its own upstream PlaySessionID; the previous lease is
+// released only by the same resolved device and the previous exact session.
+func (a *App) switchPlaybackLease(w http.ResponseWriter, r *http.Request, targetID, previousID, virtualItemID, targetPlaySessionID, previousPlaySessionID, clientPlaySessionID string) bool {
 	reqCtx := requestContextFrom(r.Context())
-	if a.PlaybackLimiter == nil || reqCtx == nil || reqCtx.ProxyUser == nil || reqCtx.ProxyUser.Role == "admin" {
-		return true
-	}
-	cfg := a.ConfigStore.Snapshot()
-	var maxConcurrent int
-	found := false
-	for _, u := range cfg.Upstream {
-		if u.ID == targetID {
-			maxConcurrent = u.MaxConcurrent
-			found = true
-			break
+	routeOwner := playbackRouteOwner(reqCtx)
+	limiterUserID, applies := a.playbackLimiterKey(reqCtx, targetID)
+	if applies {
+		deviceID := playbackDeviceID(reqCtx)
+		if deviceID == "" {
+			writePlaybackDeviceIDRequired(w)
+			return false
+		}
+		if !a.PlaybackLimiter.Reserve(limiterUserID, targetID, deviceID, virtualItemID, targetPlaySessionID).Allowed {
+			writePlaybackDeviceLimit(w)
+			return false
+		}
+		if previousID != "" && previousID != targetID {
+			a.PlaybackLimiter.Stop(limiterUserID, previousID, deviceID, previousPlaySessionID)
 		}
 	}
-	if !found {
-		return true
-	}
-	if !a.PlaybackLimiter.TryStart(reqCtx.ProxyUser.UserID, targetID, virtualItemID, maxConcurrent) {
-		writeJSON(w, http.StatusTooManyRequests, map[string]any{"message": "已达到最大同时播放数限制"})
-		return false
-	}
-	a.PlaybackLimiter.Stop(reqCtx.ProxyUser.UserID, previousID)
+	a.playbackRoutes.Activate(routeOwner, virtualItemID, targetID, targetPlaySessionID, clientPlaySessionID)
+	a.IDStore.SetActiveStream(virtualItemID, targetID)
 	return true
 }
 

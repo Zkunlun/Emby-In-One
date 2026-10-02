@@ -1084,13 +1084,21 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 		// client that goes away takes the upstream call with it.
 		client = &http.Client{Transport: c.transport, Timeout: 0, CheckRedirect: redirectPolicy(c.Config.FollowRedirects)}
 	}
+	// Lifecycle diagnostics retain only the fixed route, never the upstream
+	// host, URL, query, or raw transport cause. Handler-level redaction alone
+	// cannot protect messages emitted here before the error is classified.
+	sessionLifecycle := isSessionLifecyclePath(path)
+	logTarget := path
+	if !sessionLifecycle {
+		logTarget = formatOutboundURLForLog(preparedURL.url.String())
+	}
 	if c.logger != nil {
 		changed := preparedURL.changed
 		if bodyOutcome.changed {
 			changed = append(changed, carrierBody)
 		}
 		c.logger.Debugf("[%s] -> %s %s (stream=%v, changed=%s, body=%s)",
-			c.Name, method, formatOutboundURLForLog(preparedURL.url.String()), stream,
+			c.Name, method, logTarget, stream,
 			outboundChangeSummary(changed), bodyOutcome.support)
 	}
 	// Reserve stream observation ordering only after all request preparation has
@@ -1110,8 +1118,13 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 			c.markStreamBaseFailedObservation(base, streamObservation)
 		}
 		if c.logger != nil {
-			c.logger.Errorf("[%s] Request failed: %s %s: %s", c.Name, method,
-				formatOutboundURLForLog(preparedURL.url.String()), redactURLInError(doErr))
+			var logError string
+			if sessionLifecycle {
+				logError = classifySessionTransportError(doErr).Error()
+			} else {
+				logError = redactURLInError(doErr)
+			}
+			c.logger.Errorf("[%s] Request failed: %s %s: %s", c.Name, method, logTarget, logError)
 		}
 		// net/http builds this error from the request URL, which for a stream
 		// request carries the upstream token. Handlers surface upstream errors to
@@ -1127,7 +1140,7 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 		}
 	}
 	if c.logger != nil {
-		c.logger.Debugf("[%s] <- %s %s %d", c.Name, method, formatOutboundURLForLog(preparedURL.url.String()), resp.StatusCode)
+		c.logger.Debugf("[%s] <- %s %s %d", c.Name, method, logTarget, resp.StatusCode)
 	}
 	if (resp.StatusCode == 401 || resp.StatusCode == 403) &&
 		!isUpstreamLoginPath(path) && c.onAuthError != nil {

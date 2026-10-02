@@ -54,9 +54,14 @@ createApp({
       if(t) h['X-Emby-Token'] = t;
       const r = await fetch(path, { ...opts, headers: h });
       if(r.status === 401) { this.logout(); throw new Error('Unauthorized'); }
-      if(r.status === 204 || r.headers.get('content-length') === '0') return { success: true };
-      const data = await r.json();
-      if(!r.ok) throw new Error(data.error || data.message || ('HTTP ' + r.status));
+      if(r.ok && (r.status === 204 || r.headers.get('content-length') === '0')) return { success: true };
+      let data;
+      try { data = await r.json(); } catch(e) { if(r.ok) throw e; data = {}; }
+      if(!r.ok) {
+        const error = new Error(data?.error || data?.message || ('HTTP ' + r.status));
+        Object.assign(error, { status:r.status, code:data?.code, serverId:data?.serverId, limit:data?.limit, assigned:data?.assigned });
+        throw error;
+      }
       return data;
     },
     async checkAuth() { try { const s = await this.api('/admin/api/status'); if(!s || s.error) { this.logout(); return; } this.isLoggedIn = true; this.refresh(); this.refreshClientInfo(); } catch(e) { this.logout(); } },
@@ -113,13 +118,36 @@ createApp({
     },
     async clearLogs() { if(!confirm('确认清空所有日志？')) return; try { await this.api('/admin/api/logs', { method:'DELETE' }); this.logs = []; } catch(e) { alert('清空失败：' + (e.message || '未知错误')); } },
     getProxyName(id) { const p = this.proxyList.find(x => x.id === id); return p ? p.name : '不使用'; },
+    capacityUsage(s) {
+      const assigned = Number.isInteger(s.assignedUsers) && s.assignedUsers >= 0 ? s.assignedUsers : '未知';
+      const limit = s.maxConcurrent === 0 ? '不限' : s.maxConcurrent;
+      return `${assigned} / ${limit}`;
+    },
+    serverAssignedUsers() {
+      const target = this.editID ?? this.editIndex;
+      if(target === null || target === undefined) return 0;
+      const server = this.upstreamList.find(s => (s.id || s.index) === target);
+      return server && Number.isInteger(server.assignedUsers) ? server.assignedUsers : '未知';
+    },
+    isCapacityConflict(e) { return e.status === 409 && ['UPSTREAM_CAPACITY_FULL','UPSTREAM_CAPACITY_BELOW_ASSIGNED'].includes(e.code); },
+    capacityErrorMessage(e) {
+      if(!this.isCapacityConflict(e)) return e.message || '未知错误';
+      const server = this.upstreamList.find(s => s.id === e.serverId);
+      const name = server?.name || e.serverId || '上游服务器';
+      if(!Number.isInteger(e.assigned) || !Number.isInteger(e.limit)) return e.message || '授权容量冲突，请刷新后重试';
+      if(e.code === 'UPSTREAM_CAPACITY_FULL') return `${name} 的授权容量已满（已授权 ${e.assigned} 人，上限 ${e.limit} 人）。请取消其他用户授权或提高同播数量限制。`;
+      return `${name} 的同播数量限制不能低于已授权用户数（已授权 ${e.assigned} 人，提交上限 ${e.limit} 人）。请先减少授权或提高限制。`;
+    },
+    async refreshCapacity() { try { this.upstreamList = await this.api('/admin/api/upstream'); } catch(e) {} },
     openAddServer() { this.editID = null; this.editIndex = null; this.serverForm = { name:'', url:'', streamingUrlsText:'', authType:'password', spoofClient:'none', followRedirects:true, proxyId:null, priorityMetadata:false, maxConcurrent:0, customUserAgent:'', customClient:'', customClientVersion:'', customDeviceName:'', customDeviceId:'' }; this.showModal = true; },
     editServer(s) { this.editID = s.id || s.index; this.editIndex = s.index; this.serverForm = { ...s, maxConcurrent: s.maxConcurrent || 0, streamingUrlsText: (s.streamingUrls && s.streamingUrls.length ? s.streamingUrls : (s.streamingUrl ? [s.streamingUrl] : [])).join('\n'), customUserAgent: s.customUserAgent || '', customClient: s.customClient || '', customClientVersion: s.customClientVersion || '', customDeviceName: s.customDeviceName || '', customDeviceId: s.customDeviceId || '' }; this.showModal = true; },
     async saveServer() {
+      if(!Number.isSafeInteger(this.serverForm.maxConcurrent) || this.serverForm.maxConcurrent < 0) { alert('同播数量限制必须为非负整数，0 表示不限'); return; }
       const target = this.editID !== null && this.editID !== undefined ? this.editID : this.editIndex;
       const m = target === null || target === undefined ? 'POST' : 'PUT';
       const payload = { ...this.serverForm, streamingUrls: (this.serverForm.streamingUrlsText || '').split(/[\n,]/).map(x => x.trim()).filter(x => x !== '') };
       delete payload.streamingUrlsText;
+      delete payload.assignedUsers;
       try {
         const res = await this.api('/admin/api/upstream' + (target===null||target===undefined?'':'/'+target), { method:m, body:JSON.stringify(payload) });
         if (res.warning) { alert('提示：' + res.warning); }
@@ -127,7 +155,8 @@ createApp({
         await this.refreshServers();
         await this.refreshDashboard();
       } catch (e) {
-        alert('保存失败：' + (e.message || '未知错误'));
+        if(this.isCapacityConflict(e)) await this.refreshCapacity();
+        alert('保存失败：' + this.capacityErrorMessage(e));
       }
     },
     async deleteServer(id) { if(!confirm('删除服务器？')) return; try { await this.api('/admin/api/upstream/'+id, { method:'DELETE' }); await this.refreshServers(); } catch(e) { alert('删除失败：' + (e.message || '未知错误')); } },
@@ -173,25 +202,33 @@ createApp({
     async saveProxy() { try { await this.api('/admin/api/proxies', { method:'POST', body:JSON.stringify(this.proxyForm) }); this.showProxyModal = false; await this.refreshProxies(); } catch(e) { alert('添加失败：' + (e.message || '未知错误')); } },
     async deleteProxy(id) { if(!confirm('删除代理？')) return; try { await this.api('/admin/api/proxies/'+id, { method:'DELETE' }); await this.refreshProxies(); } catch(e) { alert('删除失败：' + (e.message || '未知错误')); } },
     async refreshUsers() { try { this.userList = await this.api('/admin/api/users'); } catch(e) { this.userList = []; } try { this.upstreamList = await this.api('/admin/api/upstream'); } catch(e) {} this.$nextTick(()=>lucide.createIcons()); },
-    openAddUser() { this.editUserId = null; this.userForm = { username:'', password:'', enabled:true, allowedServers:[] }; this.userLibraryGroups = []; this.showUserModal = true; this.$nextTick(()=>lucide.createIcons()); },
+    openAddUser() { this._userLibraryRequest = (this._userLibraryRequest || 0) + 1; this._userHiddenLibraries = {}; this.editUserId = null; this.userForm = { username:'', password:'', enabled:true, allowedServers:[] }; this.userLibraryGroups = []; this.libraryGroupsLoading = false; this.showUserModal = true; this.$nextTick(()=>lucide.createIcons()); },
     async editUser(u) {
       this.editUserId = u.id;
       this.userForm = { username:u.username, password:u.password, enabled:u.enabled, allowedServers: u.allowedServers ? [...u.allowedServers] : [] };
       this.showUserModal = true;
       this.userLibraryGroups = [];
+      this._userHiddenLibraries = { ...(u.hiddenLibraries || {}) };
+      await this.refreshUserLibraryGroups();
+    },
+    async refreshUserLibraryGroups() {
+      if(!this.editUserId || !this.showUserModal) return;
+      const request = this._userLibraryRequest = (this._userLibraryRequest || 0) + 1;
+      const userId = this.editUserId;
+      this._userHiddenLibraries ||= {};
+      for(const g of this.userLibraryGroups) this._userHiddenLibraries[g.serverId] = g.hiddenIds.slice();
+      const scope = this.upstreamList.filter(s => this.userForm.allowedServers.includes(s.id));
       this.libraryGroupsLoading = true;
       try {
-        // 只列出该用户有权访问的服务器；未限制（全部）时列出全部。
-        const scope = this.userForm.allowedServers.length > 0
-          ? this.upstreamList.filter(s => this.userForm.allowedServers.includes(s.id))
-          : this.upstreamList;
-        this.userLibraryGroups = await this.loadLibraryGroups(scope, u.hiddenLibraries);
+        const groups = await this.loadLibraryGroups(scope, this._userHiddenLibraries);
+        if(request === this._userLibraryRequest && userId === this.editUserId && this.showUserModal) this.userLibraryGroups = groups;
       } finally {
-        this.libraryGroupsLoading = false;
+        if(request === this._userLibraryRequest) this.libraryGroupsLoading = false;
         this.$nextTick(()=>lucide.createIcons());
       }
     },
     async saveUser() {
+      if(this.editUserId && this.libraryGroupsLoading) { alert('媒体库列表正在加载，请稍后保存'); return; }
       try {
         if (this.editUserId) {
           const body = {};
@@ -199,18 +236,21 @@ createApp({
           if (this.userForm.password !== '' && (this.userForm.password.length < 8 || this.userForm.password.length > 128)) { alert('密码长度必须介于 8 和 128 之间'); return; }
           body.password = this.userForm.password;
           body.enabled = this.userForm.enabled;
-          body.allowedServers = this.userForm.allowedServers.length > 0 ? this.userForm.allowedServers : null;
+          body.allowedServers = [...this.userForm.allowedServers];
           // 离线服务器不提交 key（后端保持原配置），在线服务器提交勾选结果（含空数组 = 全部显示）。
-          body.hiddenLibraries = this.groupHiddenPayload(this.userLibraryGroups);
+          body.hiddenLibraries = this.groupHiddenPayload(this.userLibraryGroups.filter(g => this.userForm.allowedServers.includes(g.serverId)));
           await this.api('/admin/api/users/' + this.editUserId, { method:'PUT', body:JSON.stringify(body) });
         } else {
           if (!this.userForm.username) { alert('用户名不能为空'); return; }
           if (this.userForm.password !== '' && (this.userForm.password.length < 8 || this.userForm.password.length > 128)) { alert('密码长度必须介于 8 和 128 之间'); return; }
-          const body = { username:this.userForm.username, password:this.userForm.password, allowedServers: this.userForm.allowedServers.length > 0 ? this.userForm.allowedServers : null };
+          const body = { username:this.userForm.username, password:this.userForm.password, allowedServers: [...this.userForm.allowedServers] };
           await this.api('/admin/api/users', { method:'POST', body:JSON.stringify(body) });
         }
         this.showUserModal = false; await this.refreshUsers();
-      } catch(e) { alert('保存失败：' + (e.message || '未知错误')); }
+      } catch(e) {
+        if(this.isCapacityConflict(e)) await this.refreshCapacity();
+        alert('保存失败：' + this.capacityErrorMessage(e));
+      }
     },
     async loadLibraryGroups(servers, hidden) {
       hidden = hidden || {};

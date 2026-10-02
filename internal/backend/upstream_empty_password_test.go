@@ -312,7 +312,7 @@ func TestEmptyPasswordPersistsAcrossConfigReloadAndRelogin(t *testing.T) {
 		loginBodies <- body
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"AccessToken": "reloaded-empty-token",
-			"User": map[string]any{"Id": "reloaded-empty-user"},
+			"User":        map[string]any{"Id": "reloaded-empty-user"},
 		})
 	}))
 	defer upstream.Close()

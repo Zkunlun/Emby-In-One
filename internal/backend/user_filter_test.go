@@ -155,11 +155,36 @@ func filterStubUserData(favorite, played bool, position int) map[string]any {
 
 // --- response helpers ---
 
+func testAllUpstreamIDs(t *testing.T, handler http.Handler, adminToken string) []string {
+	t.Helper()
+	rr := doJSONRequest(t, handler, http.MethodGet, "/admin/api/upstream", nil, adminToken)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list upstreams for test user: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var upstreams []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &upstreams); err != nil {
+		t.Fatalf("decode upstream list for test user: %v", err)
+	}
+	ids := make([]string, 0, len(upstreams))
+	for _, upstream := range upstreams {
+		if upstream.ID != "" {
+			ids = append(ids, upstream.ID)
+		}
+	}
+	return ids
+}
+
 func createRegularUser(t *testing.T, handler http.Handler) string {
 	t.Helper()
 	adminToken := loginTokenAs(t, handler, "admin", "secret")
 	rr := doJSONRequest(t, handler, http.MethodPost, "/admin/api/users",
-		map[string]any{"username": "child", "password": "child123"}, adminToken)
+		map[string]any{
+			"username":       "child",
+			"password":       "child123",
+			"allowedServers": testAllUpstreamIDs(t, handler, adminToken),
+		}, adminToken)
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("create user: status=%d body=%s", rr.Code, rr.Body.String())
 	}

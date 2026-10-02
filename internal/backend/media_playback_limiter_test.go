@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// playbackLimiterConfig is singleUpstreamConfig with a per-server concurrency limit.
-// maxConcurrent only applies to non-admin users, so these tests always authenticate
-// as a regular account.
+// playbackLimiterConfig gives the upstream one regular-user authorization slot.
+// Playback-device leases are independent from maxConcurrent; these tests authenticate
+// as the one authorized regular account.
 func playbackLimiterConfig(url string) string {
 	return `server:
   port: 8096
@@ -37,12 +37,10 @@ upstream:
 `
 }
 
-// FIX-10: TryStart runs before any upstream request, and the "all instances failed"
-// branch answered 502 without ever releasing the slot it had just taken. The client
-// retries PlaybackInfo on failure, so each failed attempt burned one more slot on a
-// server that had already accepted the user, keeping them locked out for the full
-// three-minute heartbeat timeout.
-func TestPlaybackInfoFailureReleasesConcurrencySlot(t *testing.T) {
+// A PlaybackInfo request reserves a local playback lease before any upstream request.
+// If every upstream attempt fails, that newly-created provisional lease must not be
+// stranded for the three-minute heartbeat timeout.
+func TestPlaybackInfoFailureReleasesPlaybackLease(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
@@ -64,23 +62,22 @@ func TestPlaybackInfoFailureReleasesConcurrencySlot(t *testing.T) {
 			t.Fatalf("playback info status = %d, want 502 (body=%s)", rr.Code, rr.Body.String())
 		}
 		if got := app.PlaybackLimiter.CountForServer(serverID); got != 0 {
-			t.Fatalf("concurrency slot leaked: CountForServer = %d, want 0 after a failed PlaybackInfo", got)
+			t.Fatalf("playback lease leaked: CountForServer = %d, want 0 after a failed PlaybackInfo", got)
 		}
 
-		// A retry must behave identically rather than accumulating slots.
+		// A retry must behave identically rather than accumulating provisional leases.
 		rr = doAuthJSON(t, handler, http.MethodGet, "/Items/"+virtualItem+"/PlaybackInfo", nil, userToken)
 		if rr.Code != http.StatusBadGateway {
 			t.Fatalf("retry status = %d, want 502", rr.Code)
 		}
 		if got := app.PlaybackLimiter.CountForServer(serverID); got != 0 {
-			t.Fatalf("concurrency slot leaked on retry: CountForServer = %d, want 0", got)
+			t.Fatalf("playback lease leaked on retry: CountForServer = %d, want 0", got)
 		}
 	})
 }
 
-// The success path must still hold the slot: releasing it unconditionally would turn
-// the concurrency limit into a no-op.
-func TestPlaybackInfoSuccessKeepsConcurrencySlot(t *testing.T) {
+// The success path must keep the playback lease until lifecycle events release it.
+func TestPlaybackInfoSuccessKeepsPlaybackLease(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":

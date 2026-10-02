@@ -87,6 +87,20 @@ func TestLoadConfigStoreRejectsOutOfRangeTimeout(t *testing.T) {
 	}
 }
 
+func TestLoadConfigStoreRejectsNegativeMaxConcurrent(t *testing.T) {
+	config := parityConfigWithUpstreams("  - name: \"A\"\n    url: \"http://127.0.0.1:8097\"\n    username: \"u1\"\n    password: \"p1\"\n    maxConcurrent: -1\n")
+	dir := prepareTempWorkspace(t, config, nil)
+	chdirForTest(t, dir)
+
+	_, err := LoadConfigStore()
+	if err == nil {
+		t.Fatal("expected negative maxConcurrent to be rejected at startup")
+	}
+	if !strings.Contains(err.Error(), "maxConcurrent") {
+		t.Fatalf("error should name maxConcurrent: %v", err)
+	}
+}
+
 // TestParseStringValueKeepsUnbalancedQuotes documents the choice to leave input
 // that is not a quoted scalar alone instead of stripping a stray quote.
 func TestParseStringValueKeepsUnbalancedQuotes(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -24,8 +25,13 @@ type App struct {
 	HiddenLibraries *HiddenLibraryStore
 	libraryCache    *upstreamLibraryCache
 	PlaybackLimiter *PlaybackLimiter
+	playbackRoutes  *playbackRouteStore
 	loginLimiter    loginRateLimiter
 	noticeThrottle  noticeThrottle
+	// grantCapacityMu serializes full-config admin writes with authorization-grant
+	// mutations so a stale Config snapshot cannot restore an old maxConcurrent or
+	// recreate a grant for an upstream that was just deleted.
+	grantCapacityMu sync.Mutex
 }
 
 func NewApp() (*App, error) {
@@ -88,6 +94,7 @@ func NewApp() (*App, error) {
 		HiddenLibraries: hiddenLibraries,
 		libraryCache:    newUpstreamLibraryCache(),
 		PlaybackLimiter: NewPlaybackLimiter(),
+		playbackRoutes:  newPlaybackRouteStore(),
 	}, nil
 }
 

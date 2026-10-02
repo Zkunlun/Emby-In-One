@@ -90,7 +90,10 @@ func (a *App) resolveRouteID(id string) *routeResolution {
 // dropped here so no handler forwards a request to them.
 func (a *App) collectAllowedInstances(reqCtx *RequestContext, resolved *routeResolution) []seriesInstance {
 	instances := buildSeriesInstances(resolved, a.Upstream)
-	if reqCtx == nil || reqCtx.ProxyUser == nil || reqCtx.ProxyUser.AllowedServers == nil {
+	if reqCtx == nil || reqCtx.ProxyUser == nil {
+		return nil
+	}
+	if reqCtx.ProxyUser.Role == "admin" {
 		return instances
 	}
 	allowed := instances[:0]

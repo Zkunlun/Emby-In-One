@@ -192,8 +192,8 @@ func TestHiddenLibraryStorePruneUserServers(t *testing.T) {
 		t.Fatalf("srv-b must be pruned")
 	}
 
-	// A keep-all predicate must be a no-op, mirroring the guard callers apply
-	// for an empty AllowedServers ("all servers").
+	// A keep-all predicate remains a no-op as a store-level operation. Permission
+	// callers now pass a keep-none predicate for an explicit empty AllowedServers list.
 	if err := store.SetServerHidden("user-1", "srv-b", []string{"lib-2"}); err != nil {
 		t.Fatalf("SetServerHidden: %v", err)
 	}

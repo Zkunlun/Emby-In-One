@@ -68,7 +68,11 @@ func TestSeriesRoutesOverlayLocalUserState(t *testing.T) {
 	withTempAppConfig(t, singleUpstreamConfig(upstream.URL), func(app *App, handler http.Handler) {
 		adminToken := loginToken(t, handler, "secret")
 		rr := doJSONRequest(t, handler, http.MethodPost, "/admin/api/users",
-			map[string]any{"username": "bob", "password": "bob12345"}, adminToken)
+			map[string]any{
+				"username":       "bob",
+				"password":       "bob12345",
+				"allowedServers": testAllUpstreamIDs(t, handler, adminToken),
+			}, adminToken)
 		if rr.Code != http.StatusCreated {
 			t.Fatalf("create user: status=%d body=%s", rr.Code, rr.Body.String())
 		}

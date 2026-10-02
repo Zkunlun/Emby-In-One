@@ -1,6 +1,6 @@
 # Emby-In-One
 
-> **Version: V1.4.6**
+> **Version: V1.5.1**
 
 [![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -19,7 +19,7 @@ Emby-In-One 是一个面向标准 Emby 客户端的多上游聚合代理，将�
 
 当前仓库在原项目基础上继续进行兼容性修复、稳定性优化、功能完善与版本发布，后续维护、Bug 修复和 Release 以本仓库为准。
 
-当前稳定版为 **V1.4.6**。现行主线以 Go 实现为主；原项目的 Node.js V1.2.1 实现保留在 [`legacy/`](legacy/) 中用于历史参考，不参与现行版本的构建与安装。
+当前稳定版为 **V1.5.1**。现行主线以 Go 实现为主；原项目的 Node.js V1.2.1 实现保留在 [`legacy/`](legacy/) 中用于历史参考，不参与现行版本的构建与安装。
 
 ## 目录
 
@@ -56,7 +56,7 @@ Emby-In-One 是一个面向标准 Emby 客户端的多上游聚合代理，将�
 | **播放代理与直连** | 支持 `proxy` 与 `redirect` 两种播放模式及有序多推流线路。Proxy 可在 transport error 或 502/503/504 时自动切换备用线路；Redirect 会避开已知故障线路，并在全部线路不可用时执行有界恢复探测。 |
 | **上游认证与客户端身份** | 上游支持用户名/密码或 API Key 认证；客户端身份支持 `none`、`passthrough`、`infuse`、`custom` 模式，可透传或自定义 Emby 客户端身份头，并支持上游会话失效后的自动重新登录。 |
 | **网络代理与健康检查** | Proxy 播放模式可为不同上游单独绑定 HTTP/HTTPS 网络代理并测试连通性；Redirect 直连模式禁止绑定服务端 HTTP 代理。后台并行执行上游 API 健康检查与多推流线路存活探测，并记录状态变化。 |
-| **并发播放控制** | 每台上游可单独设置普通用户最大并发播放数 `maxConcurrent`，超限返回 `429 Too Many Requests`，并通过播放心跳自动释放失效占用。 |
+| **授权容量与单设备播放** | `maxConcurrent` 控制每台上游可授权的普通用户数；独立播放 lease 按用户与上游限制活跃设备，支持心跳过期、精确停止及旧会话保护。 |
 | **Web 管理与 SSH CLI** | 提供 Web 管理面板、REST 管理 API 和 SSH 管理菜单，可管理上游、用户、网络代理、系统设置、日志、更新及服务生命周期。 |
 | **日志与安全机制** | 提供持久化分级日志、自动轮转、登录失败限速、scrypt 密码存储、配置与 Token 文件权限保护、请求体限制、SSRF 防护及管理面板 CSP。 |
 | **多种部署方式** | 支持 GitHub Release 预编译二进制 + systemd、Docker / Docker Compose 和 Go 源码运行；Release 提供 amd64、arm64、arm、mips、mipsle、riscv64 多架构构建与 SHA256 校验。 |
@@ -227,7 +227,7 @@ upstream:
     followRedirects: true                      # 是否跟随上游的 301/302/303/307/308（默认 true；false 时按上游错误处理，不把重定向地址转发给客户端）
     proxyId: null                              # 关联代理池中的代理 ID
     priorityMetadata: false                    # 合并时优先使用此服务器的元数据
-    maxConcurrent: 3                           # 最大并发播放数，0表示不限制（仅影响普通用户）
+    maxConcurrent: 3                           # 同播数量限制：普通用户授权容量，0不限；管理员不占名额
 
   - name: "服务器C（custom 伪装示例）"
     url: "https://emby-c.example.com"
@@ -327,8 +327,8 @@ V1.4 新增多用户支持，允许管理员创建多个普通用户，每个用
 
 **工作原理：**
 
-- 播放事件（开始、进度、停止）会同时写入上游服务器和本地数据库（双写）
-- 播放完成（进度 ≥ 90%）自动标记为"已看"
+- Playing/Progress 先上报上游，收到 2xx 确认后再写入普通用户本地进度；失败保留原本地状态
+- Stopped 即使上游不可用仍保存客户端终态；达到已知有效总时长的 90% 时自动标记为"已看"
 - 标记已播放 / 收藏等用户操作同样双写
 - 删除用户时，其本地观看数据自动清除
 - 首次播放某项目时，系统自动从上游获取元数据（剧名、季数、集数）以支持 NextUp 计算
@@ -343,17 +343,37 @@ V1.4 新增多用户支持，允许管理员创建多个普通用户，每个用
 
 ### 配置可访问服务器
 
-每个普通用户可通过稳定的服务器 `serverId` 列表限制可访问的上游。指定一个或多个 `serverId` 后，用户只能看到和播放这些服务器上的内容；`allowedServers` 未设置、为 `null` 或为空列表时表示**不限制服务器范围（可访问全部上游）**。
+普通用户只能访问 `allowedServers` 中显式授权的稳定 `serverId`。面板不勾选任何服务器表示**无上游访问权限**。创建用户时省略、`null` 或 `[]` 均不授予服务器；更新用户时省略或 `null` 保留原授权，显式 `[]` 清空授权。要授权全部现有服务器，需要明确列出全部 ID；之后新增服务器仍需单独授权。管理员始终可访问全部上游。
 
-### 并发播放数限制
+### 同播数量限制与授权容量
 
-每台上游服务器可独立配置 `maxConcurrent`（最大并发播放数）：
+管理面板中的“同播数量限制”对应配置字段 `maxConcurrent`，按每台上游已授权的普通用户数量计数：
 
-- `0`（默认）：不限制
-- 正整数：限制该服务器上同时播放的普通用户数量
-- 管理员不受此限制
-- 超出限制时返回 `429 Too Many Requests`
-- 基于 3 分钟心跳超时自动释放占用
+- `0`（默认）：授权容量不限；正整数：普通用户授权数量上限；负数非法。
+- `assignedUsers` 是该上游当前已授权的普通用户数。管理员可访问全部上游，不占授权名额。
+- 名额由显式授权占用；用户停播、服务器离线或禁用用户不会自动撤销授权。取消授权或删除用户才释放相应名额。
+- 新增授权超出容量：`409 UPSTREAM_CAPACITY_FULL`。
+- 下调容量低于已授权用户数：`409 UPSTREAM_CAPACITY_BELOW_ASSIGNED`。
+- 容量冲突响应包含 `code`、`message`、`serverId`、`limit`、`assigned`。面板保留未保存表单并刷新容量显示，后端负责最终容量校验。
+
+### 普通用户单设备播放
+
+播放 lease 按 `(UserID, ServerID)` 隔离。同一普通用户在同一上游由一个活跃 DeviceID 持有 lease；同一用户可在不同上游同时播放，管理员豁免。同设备切换条目或会话可续用 lease；另一设备在 lease 有效时被拒绝，返回 `429 PLAYBACK_DEVICE_LIMIT`。
+
+DeviceID 来源依次为 `X-Emby-Device-Id`、`X-Emby-Authorization` 中的 DeviceId、`Authorization` 中的 DeviceId、当前已验证 Token 保存的 DeviceID。普通用户播放生命周期缺有效 DeviceID 时返回 `400 PLAYBACK_DEVICE_ID_REQUIRED`。lease 心跳达到 3 分钟未更新时可被清理或接管；Stopped 仅释放匹配设备和精确 PlaySessionID 的 lease，旧 Stopped 不会释放后续新会话。
+
+### 播放事件确认与错误响应
+
+Playing/Progress 收到上游任意 200—299 后才写入本地进度并刷新对应设备的 lease 心跳，成功返回空 204；响应 body 无需为 JSON。失败不更新本地播放状态：
+
+| 上游结果 | Playing / Progress 响应 |
+|---|---|
+| missing / offline client | 503 `UPSTREAM_SESSION_UNAVAILABLE` |
+| transport / DNS / TCP / TLS / 可观测 cancel | 502 `UPSTREAM_SESSION_FAILED` |
+| deadline / net timeout | 504 `UPSTREAM_SESSION_TIMEOUT` |
+| HTTP non-2xx（含上游 401/403） | 502 `UPSTREAM_SESSION_REJECTED` |
+
+Stopped 保留客户端终态：成功、普通上游失败、离线或 missing client 时仍保存本地进度并尝试精确释放，返回 204。请求准备错误保留原 400/503 响应，同时完成本地终态；缺 DeviceID 时保存进度、返回 400，不上报上游也不释放 lease。达到已知有效总时长的 90% 时可自动标记已看。公开错误及生命周期日志省略上游 body、URL 与凭据。
 
 ---
 
@@ -551,7 +571,7 @@ environment:
 | 页面 | 功能 |
 |------|------|
 | **系统概览** | 在线服务器数、ID 映射数、存储引擎（SQLite） |
-| **上游节点** | 添加/编辑/删除/重连服务器，拖拽排序；支持配置最大并发数 `maxConcurrent` |
+| **上游节点** | 添加/编辑/删除/重连服务器，拖拽排序；显示已授权普通用户数并配置“同播数量限制” `maxConcurrent` |
 | **用户管理** | 创建、编辑、启用/禁用、删除普通用户，可视化配置可访问服务器 |
 | **网络代理** | HTTP/HTTPS 代理池管理，支持一键连通性测试 |
 | **全局设置** | 系统名称、默认播放模式、管理员账户、超时与宽恕期配置 |
@@ -737,13 +757,13 @@ Emby-In-One/
 │   ├── media_items.go              # 媒体条目查询（多上游扇出合并）
 │   ├── media_resume.go             # "继续观看"接口代理与多上游合并
 │   ├── media_nextup.go             # "接下来观看"接口代理与多上游合并
-│   ├── media_playback.go           # PlaybackInfo 查询与并发播放限制检查
+│   ├── media_playback.go           # PlaybackInfo 与用户/上游单设备 lease 预留
 │   ├── media_stream.go             # 视频/音频流代理（虚拟 ID 路由解析）
 │   ├── library_image.go            # 图片代理（缓存头）
 │   ├── series_userdata.go          # 系列级观看历史隔离（Resume/NextUp）
 │   ├── session_userdata.go         # Sessions/Playing 进度上报
 │   ├── watch_store.go              # 每用户观看进度存储与持久化
-│   ├── playback_limiter.go         # 并发播放数限制（心跳超时自动释放）
+│   ├── playback_limiter.go         # 用户/上游单设备 lease（revision、心跳、exact Stop）
 │   ├── login_limiter.go            # 登录失败限流（按 IP；容量满时逐出最旧记录）
 │   ├── streamproxy.go              # HTTP 流代理（背压、HLS 相对路径重写）
 │   ├── fallback_proxy.go           # 兜底路由：扫描 URL/Query 中的虚拟 ID

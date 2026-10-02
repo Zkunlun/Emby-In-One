@@ -234,7 +234,11 @@ func TestResumeEndpointOfflineFallback(t *testing.T) {
 		// Setup: create regular user
 		adminToken := loginTokenAs(t, handler, "admin", "secret")
 		rr := doAuthJSON(t, handler, http.MethodPost, "/admin/api/users",
-			map[string]any{"username": "child", "password": "child123"}, adminToken)
+			map[string]any{
+				"username":       "child",
+				"password":       "child123",
+				"allowedServers": testAllUpstreamIDs(t, handler, adminToken),
+			}, adminToken)
 		if rr.Code != http.StatusCreated {
 			t.Fatalf("create user: status=%d body=%s", rr.Code, rr.Body.String())
 		}

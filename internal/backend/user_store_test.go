@@ -153,8 +153,12 @@ func TestUserStoreRemoveServerGrants(t *testing.T) {
 	}
 
 	// Delete server "srv-1" → should become ["srv-0", "srv-2"]
-	if err := store.RemoveServerGrants("srv-1"); err != nil {
+	affectedUserIDs, err := store.RemoveServerGrants("srv-1")
+	if err != nil {
 		t.Fatalf("RemoveServerGrants: %v", err)
+	}
+	if len(affectedUserIDs) != 1 || affectedUserIDs[0] != user.ID {
+		t.Fatalf("affected users = %v, want [%s]", affectedUserIDs, user.ID)
 	}
 
 	got := store.Get(user.ID)
@@ -183,7 +187,7 @@ func TestUserStoreServerIDStable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	unrestricted, err := store.Create("dave", "pass", nil)
+	unassigned, err := store.Create("dave", "pass", nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -192,8 +196,8 @@ func TestUserStoreServerIDStable(t *testing.T) {
 	if len(got.AllowedServers) != 2 || got.AllowedServers[0] != "srv-0" || got.AllowedServers[1] != "srv-2" {
 		t.Fatalf("AllowedServers = %v, want [srv-0 srv-2]", got.AllowedServers)
 	}
-	if dave := store.Get(unrestricted.ID); dave.AllowedServers != nil {
-		t.Fatalf("a user with no restrictions gained %v", dave.AllowedServers)
+	if dave := store.Get(unassigned.ID); dave.AllowedServers == nil || len(dave.AllowedServers) != 0 {
+		t.Fatalf("an unassigned user must have an explicit empty AllowedServers slice, got %#v", dave.AllowedServers)
 	}
 
 	_ = closeSQLite(db)

@@ -12,6 +12,10 @@ type RequestContext struct {
 	Headers    http.Header
 	ProxyToken string
 	ProxyUser  *tokenInfo
+	// PlaybackDeviceID is the already-resolved playback-device identity consumed by
+	// lifecycle handlers. withContext resolves it once from live headers and the
+	// validated token-scoped fallback.
+	PlaybackDeviceID string
 	// LegacyProxyUserID is the single global virtual user ID that older responses
 	// handed to every client. It is kept only so requests that still carry it are
 	// recognised as the current user; the identity of the request itself always
@@ -29,10 +33,15 @@ func (a *App) withContext(next http.HandlerFunc) http.HandlerFunc {
 		if token != "" {
 			proxyUser = a.Auth.ValidateToken(token)
 		}
+		tokenDeviceID := ""
+		if proxyUser != nil {
+			tokenDeviceID = proxyUser.DeviceID
+		}
 		ctx := context.WithValue(r.Context(), requestContextKey{}, &RequestContext{
 			Headers:           r.Header.Clone(),
 			ProxyToken:        token,
 			ProxyUser:         proxyUser,
+			PlaybackDeviceID:  resolvePlaybackDeviceID(r.Header, tokenDeviceID),
 			LegacyProxyUserID: a.Auth.ProxyUserID(),
 			Identifiers:       a.newRequestIdentifierLookup(),
 		})
@@ -70,6 +79,16 @@ func requestContextFrom(ctx context.Context) *RequestContext {
 	return reqCtx
 }
 
+// playbackDeviceID is the single lifecycle read boundary for an already-resolved
+// device identity. HTTP/token extraction stays at withContext; limiter call sites
+// consume only RequestContext.PlaybackDeviceID.
+func playbackDeviceID(reqCtx *RequestContext) string {
+	if reqCtx == nil {
+		return ""
+	}
+	return reqCtx.PlaybackDeviceID
+}
+
 // allowedClients returns only the online upstream clients that the
 // current user is permitted to access. Admin users see all online servers.
 func (a *App) allowedClients(reqCtx *RequestContext) []*UpstreamClient {
@@ -77,7 +96,7 @@ func (a *App) allowedClients(reqCtx *RequestContext) []*UpstreamClient {
 	if reqCtx == nil || reqCtx.ProxyUser == nil {
 		return nil
 	}
-	if reqCtx.ProxyUser.AllowedServers == nil {
+	if reqCtx.ProxyUser.Role == "admin" {
 		return all
 	}
 	allowed := make(map[string]bool, len(reqCtx.ProxyUser.AllowedServers))
@@ -94,12 +113,13 @@ func (a *App) allowedClients(reqCtx *RequestContext) []*UpstreamClient {
 }
 
 // isServerAllowed checks whether the current user is allowed to access the
-// upstream server with the given ID. Returns true for admin users (nil AllowedServers).
+// upstream server with the given ID. Admin users may access every server;
+// regular users may access only servers explicitly listed in AllowedServers.
 func (a *App) isServerAllowed(reqCtx *RequestContext, serverID string) bool {
 	if reqCtx == nil || reqCtx.ProxyUser == nil {
 		return false
 	}
-	if reqCtx.ProxyUser.AllowedServers == nil {
+	if reqCtx.ProxyUser.Role == "admin" {
 		return true
 	}
 	for _, id := range reqCtx.ProxyUser.AllowedServers {
@@ -142,6 +162,17 @@ func extractToken(r *http.Request) string {
 }
 
 func extractTokenFromAuthHeader(header string) string {
+	if parsed, ok := parseAuthorizationIdentityStrict(header); ok {
+		// An absent or ambiguous compound Token cannot regain credentials through
+		// the permissive legacy substring fallback.
+		return authorizationIdentityParameter(parsed, "Token")
+	}
+	// Compatibility fallback for legacy/non-standard clients whose authorization
+	// string is not a valid compound header but historically still exposed Token=.
+	return extractTokenFromAuthHeaderLegacy(header)
+}
+
+func extractTokenFromAuthHeaderLegacy(header string) string {
 	for _, marker := range []string{"Token=\"", "Token="} {
 		idx := strings.Index(header, marker)
 		if idx < 0 {

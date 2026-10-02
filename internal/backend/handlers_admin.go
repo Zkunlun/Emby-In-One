@@ -88,6 +88,10 @@ func (a *App) handleAdminUpstreamList(w http.ResponseWriter, r *http.Request) {
 	for _, client := range clients {
 		onlineByIndex[client.ServerIndex] = client.Online
 	}
+	assignedUsers := map[string]int{}
+	if a.UserStore != nil {
+		assignedUsers = a.UserStore.AssignedUserCounts()
+	}
 	out := make([]map[string]any, 0, len(cfg.Upstream))
 	for index, upstream := range cfg.Upstream {
 		authType := "password"
@@ -122,6 +126,7 @@ func (a *App) handleAdminUpstreamList(w http.ResponseWriter, r *http.Request) {
 			"customDeviceName":    upstream.CustomDeviceName,
 			"customDeviceId":      upstream.CustomDeviceId,
 			"maxConcurrent":       upstream.MaxConcurrent,
+			"assignedUsers":       assignedUsers[upstream.ID],
 			"streamingUrl":        upstream.StreamingURL,
 			"streamingUrls":       streamingURLs,
 		})
@@ -130,6 +135,9 @@ func (a *App) handleAdminUpstreamList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminUpstreamCreate(w http.ResponseWriter, r *http.Request) {
+	a.grantCapacityMu.Lock()
+	defer a.grantCapacityMu.Unlock()
+
 	var body adminUpstreamInput
 	if err := decodeJSONBody(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request body"})
@@ -186,7 +194,21 @@ func parsePathUpstream(r *http.Request, cfg *Config) (int, *UpstreamConfig, bool
 	return -1, nil, false
 }
 
+func (a *App) validateUpstreamAssignedCapacity(upstream UpstreamConfig, maxConcurrentSubmitted bool) error {
+	if !maxConcurrentSubmitted || a.UserStore == nil || upstream.ID == "" || upstream.MaxConcurrent <= 0 {
+		return nil
+	}
+	assigned := a.UserStore.CountUsersForServer(upstream.ID)
+	if assigned > upstream.MaxConcurrent {
+		return newUpstreamCapacityBelowAssignedError(upstream.ID, upstream.MaxConcurrent, assigned)
+	}
+	return nil
+}
+
 func (a *App) handleAdminUpstreamUpdate(w http.ResponseWriter, r *http.Request) {
+	a.grantCapacityMu.Lock()
+	defer a.grantCapacityMu.Unlock()
+
 	cfg := a.ConfigStore.Snapshot()
 	index, existing, ok := parsePathUpstream(r, &cfg)
 	if !ok {
@@ -206,6 +228,13 @@ func (a *App) handleAdminUpstreamUpdate(w http.ResponseWriter, r *http.Request) 
 	normalizeUpstream(&draft, index, &cfg)
 	if err := validateUpstreamDraft(draft); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := a.validateUpstreamAssignedCapacity(draft, body.MaxConcurrent != nil); err != nil {
+		if writeAdminUpstreamCapacityError(w, cfg, err) {
+			return
+		}
+		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}
 	validation, err := a.validateUpstreamConnectivity(cfg, draft, index, requestContextFrom(r.Context()))
@@ -236,6 +265,9 @@ func (a *App) handleAdminUpstreamUpdate(w http.ResponseWriter, r *http.Request) 
 }
 
 func (a *App) handleAdminUpstreamReorder(w http.ResponseWriter, r *http.Request) {
+	a.grantCapacityMu.Lock()
+	defer a.grantCapacityMu.Unlock()
+
 	var body struct {
 		FromIndex int `json:"fromIndex"`
 		ToIndex   int `json:"toIndex"`
@@ -265,6 +297,9 @@ func (a *App) handleAdminUpstreamReorder(w http.ResponseWriter, r *http.Request)
 }
 
 func (a *App) handleAdminUpstreamDelete(w http.ResponseWriter, r *http.Request) {
+	a.grantCapacityMu.Lock()
+	defer a.grantCapacityMu.Unlock()
+
 	cfg := a.ConfigStore.Snapshot()
 	index, existing, ok := parsePathUpstream(r, &cfg)
 	if !ok {
@@ -283,6 +318,30 @@ func (a *App) handleAdminUpstreamDelete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	var affectedUserIDs []string
+	if a.UserStore != nil && serverID != "" {
+		var err error
+		affectedUserIDs, err = a.UserStore.RemoveServerGrants(serverID)
+		if err != nil {
+			rollbackErr := a.commitConfig(cfg)
+			if a.Logger != nil {
+				a.Logger.Errorf("delete upstream %s: remove user server grants: %v", serverID, err)
+				if rollbackErr != nil {
+					a.Logger.Errorf("delete upstream %s: rollback config after grant cleanup failure: %v", serverID, rollbackErr)
+				}
+			}
+			if rollbackErr != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "删除上游后清理用户授权失败，且配置回滚失败"})
+			} else {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "删除上游后清理用户授权失败，配置已回滚"})
+			}
+			return
+		}
+	}
+	for _, userID := range affectedUserIDs {
+		a.Auth.RevokeTokensByUserID(userID)
+	}
+
 	// Clean up database records for this server. A virtual item survives when it
 	// has another upstream instance; only true orphans lose per-user watch state.
 	var removedVirtualIDs []string
@@ -294,11 +353,6 @@ func (a *App) handleAdminUpstreamDelete(w http.ResponseWriter, r *http.Request) 
 			}
 		} else {
 			removedVirtualIDs = result.RemovedVirtualIDs
-		}
-	}
-	if a.UserStore != nil && serverID != "" {
-		if err := a.UserStore.RemoveServerGrants(serverID); err != nil && a.Logger != nil {
-			a.Logger.Errorf("delete upstream %s: remove user server grants: %v", serverID, err)
 		}
 	}
 	if a.WatchStore != nil && len(removedVirtualIDs) > 0 {
@@ -351,6 +405,9 @@ func (a *App) handleAdminProxiesList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminProxiesCreate(w http.ResponseWriter, r *http.Request) {
+	a.grantCapacityMu.Lock()
+	defer a.grantCapacityMu.Unlock()
+
 	var body adminProxyInput
 	if err := decodeJSONBody(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request body"})
@@ -375,6 +432,9 @@ func (a *App) handleAdminProxiesCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminProxiesDelete(w http.ResponseWriter, r *http.Request) {
+	a.grantCapacityMu.Lock()
+	defer a.grantCapacityMu.Unlock()
+
 	id := r.PathValue("id")
 	cfg := a.ConfigStore.Snapshot()
 	next := make([]ProxyConfig, 0, len(cfg.Proxies))
@@ -478,6 +538,9 @@ func (a *App) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAdminSettingsUpdate(w http.ResponseWriter, r *http.Request) {
+	a.grantCapacityMu.Lock()
+	defer a.grantCapacityMu.Unlock()
+
 	var body adminSettingsInput
 	if err := decodeJSONBody(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request body"})
@@ -641,6 +704,68 @@ func (a *App) handleAdminUsersList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+func adminUserGrantContext(cfg Config, requested []string) ([]string, ServerGrantLimits, string) {
+	limits := make(ServerGrantLimits, len(cfg.Upstream))
+	known := make(map[string]struct{}, len(cfg.Upstream))
+	for _, upstream := range cfg.Upstream {
+		if upstream.ID == "" {
+			continue
+		}
+		known[upstream.ID] = struct{}{}
+		limits[upstream.ID] = upstream.MaxConcurrent
+	}
+
+	normalized := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	for _, serverID := range requested {
+		if _, ok := known[serverID]; !ok {
+			return nil, nil, serverID
+		}
+		if _, duplicate := seen[serverID]; duplicate {
+			continue
+		}
+		seen[serverID] = struct{}{}
+		normalized = append(normalized, serverID)
+	}
+	return normalized, limits, ""
+}
+
+func upstreamDisplayName(cfg Config, serverID string) string {
+	for _, upstream := range cfg.Upstream {
+		if upstream.ID == serverID {
+			if strings.TrimSpace(upstream.Name) != "" {
+				return upstream.Name
+			}
+			break
+		}
+	}
+	return serverID
+}
+
+func writeAdminUpstreamCapacityError(w http.ResponseWriter, cfg Config, err error) bool {
+	capacityErr, ok := asUpstreamCapacityError(err)
+	if !ok {
+		return false
+	}
+
+	name := upstreamDisplayName(cfg, capacityErr.ServerID)
+	message := capacityErr.Error()
+	switch capacityErr.Code {
+	case UpstreamCapacityFull:
+		message = name + " 已达到授权上限（" + strconv.Itoa(capacityErr.Assigned) + "/" + strconv.Itoa(capacityErr.Limit) + "）"
+	case UpstreamCapacityBelowAssigned:
+		message = name + " 的最大允许数量不能低于当前已授权用户数（" + strconv.Itoa(capacityErr.Assigned) + "/" + strconv.Itoa(capacityErr.Limit) + "）"
+	}
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"code":     string(capacityErr.Code),
+		"message":  message,
+		"serverId": capacityErr.ServerID,
+		"limit":    capacityErr.Limit,
+		"assigned": capacityErr.Assigned,
+	})
+	return true
+}
+
 func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 	if a.UserStore == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "multi-user disabled"})
@@ -665,13 +790,28 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	a.grantCapacityMu.Lock()
+	defer a.grantCapacityMu.Unlock()
+
 	cfg := a.ConfigStore.Snapshot()
 	if strings.EqualFold(input.Username, cfg.Admin.Username) {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "用户名与管理员冲突"})
 		return
 	}
-	user, err := a.UserStore.Create(input.Username, input.Password, input.AllowedServers)
+	normalizedAllowed, limits, unknownServerID := adminUserGrantContext(cfg, input.AllowedServers)
+	if unknownServerID != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"code":     "UNKNOWN_UPSTREAM",
+			"message":  "未知的上游服务器",
+			"serverId": unknownServerID,
+		})
+		return
+	}
+	user, err := a.UserStore.CreateWithServerLimits(input.Username, input.Password, normalizedAllowed, limits)
 	if err != nil {
+		if writeAdminUpstreamCapacityError(w, cfg, err) {
+			return
+		}
 		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "already exists") {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": "用户名已存在"})
 			return
@@ -699,8 +839,11 @@ func (a *App) handleAdminUsersUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid request body"})
 		return
 	}
+	a.grantCapacityMu.Lock()
+	defer a.grantCapacityMu.Unlock()
+
+	cfg := a.ConfigStore.Snapshot()
 	if input.Username != nil {
-		cfg := a.ConfigStore.Snapshot()
 		if strings.EqualFold(*input.Username, cfg.Admin.Username) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": "用户名与管理员冲突"})
 			return
@@ -712,11 +855,32 @@ func (a *App) handleAdminUsersUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := a.UserStore.Update(id, input.Username, input.Password, input.Enabled, input.AllowedServers); err != nil {
+	var normalizedAllowed *[]string
+	limits := ServerGrantLimits(nil)
+	if input.AllowedServers != nil {
+		normalized, currentLimits, unknownServerID := adminUserGrantContext(cfg, *input.AllowedServers)
+		if unknownServerID != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"code":     "UNKNOWN_UPSTREAM",
+				"message":  "未知的上游服务器",
+				"serverId": unknownServerID,
+			})
+			return
+		}
+		normalizedAllowed = &normalized
+		limits = currentLimits
+	}
+	if err := a.UserStore.UpdateWithServerLimits(id, input.Username, input.Password, input.Enabled, normalizedAllowed, limits); err != nil {
+		if writeAdminUpstreamCapacityError(w, cfg, err) {
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	if input.Password != nil || (input.Enabled != nil && !*input.Enabled) {
+	// Password, disable, and authorization changes invalidate existing user
+	// tokens. Regular-user tokens cache AllowedServers, so keeping them alive
+	// after a grant change could preserve stale upstream access until re-login.
+	if input.Password != nil || normalizedAllowed != nil || (input.Enabled != nil && !*input.Enabled) {
 		a.Auth.RevokeTokensByUserID(id)
 	}
 	if a.HiddenLibraries != nil {
@@ -726,12 +890,13 @@ func (a *App) handleAdminUsersUpdate(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		// Prune only under an explicit non-empty server list: an empty
-		// AllowedServers means "all servers" in this project's permission
-		// model, and pruning under it would wipe the user's whole config.
-		if input.AllowedServers != nil && len(*input.AllowedServers) > 0 {
-			allowed := make(map[string]bool, len(*input.AllowedServers))
-			for _, serverID := range *input.AllowedServers {
+		// An explicitly supplied allow list is authoritative. Empty means the
+		// regular user has no upstream access, so every stored hidden-library
+		// record for that user must be pruned. Omitting allowedServers leaves the
+		// existing authorization (and hidden-library records) unchanged.
+		if normalizedAllowed != nil {
+			allowed := make(map[string]bool, len(*normalizedAllowed))
+			for _, serverID := range *normalizedAllowed {
 				allowed[serverID] = true
 			}
 			if err := a.HiddenLibraries.PruneUserServers(id, func(serverID string) bool { return allowed[serverID] }); err != nil && a.Logger != nil {

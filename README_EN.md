@@ -1,6 +1,6 @@
 # Emby-In-One
 
-> **Version: V1.4.6**
+> **Version: V1.5.1**
 
 [![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -19,7 +19,7 @@ This repository is actively developed and maintained on top of [ArizeSky/Emby-In
 
 The current repository continues that work with compatibility fixes, stability improvements, feature development, and ongoing releases. Future maintenance, bug fixes, and releases are tracked here.
 
-The current stable release is **V1.4.6**. The active codebase is primarily implemented in Go; the original Node.js V1.2.1 implementation is retained under [`legacy/`](legacy/) for historical reference and is not part of current builds or installations.
+The current stable release is **V1.5.1**. The active codebase is primarily implemented in Go; the original Node.js V1.2.1 implementation is retained under [`legacy/`](legacy/) for historical reference and is not part of current builds or installations.
 
 ## Table of Contents
 
@@ -56,7 +56,7 @@ The current stable release is **V1.4.6**. The active codebase is primarily imple
 | **Proxy & Direct Playback** | Supports `proxy` and `redirect` playback modes plus ordered multi-line streaming. Proxy can fail over on transport errors or 502/503/504 responses; Redirect skips known-dead lines and performs bounded recovery probing when every line is unavailable. |
 | **Upstream Authentication & Client Identity** | Upstreams can authenticate with username/password or API Key. Client identity supports `none`, `passthrough`, `infuse`, and `custom` modes, including passthrough/custom Emby identity headers and automatic upstream re-login after session failure. |
 | **Network Proxies & Health Checks** | Upstreams in Proxy playback mode can use per-upstream HTTP/HTTPS proxies with connectivity testing; Redirect direct playback cannot use a server-side HTTP proxy. Background checks cover both upstream API reachability and multi-line stream liveness. |
-| **Concurrent Playback Control** | Each upstream can define a regular-user concurrency limit with `maxConcurrent`. Excess playback requests return `429 Too Many Requests`, and stale occupancy is released through playback heartbeat expiry. |
+| **Authorization Capacity & Single-Device Playback** | `maxConcurrent` caps regular-user grants per upstream. Separate per-user/per-upstream playback leases enforce active-device ownership, heartbeat expiry, exact Stop, and old-session protection. |
 | **Web Admin & SSH CLI** | Includes a Web admin panel, REST management API, and SSH management menu for upstreams, users, network proxies, global settings, logs, updates, and service lifecycle operations. |
 | **Logging & Security** | Includes persistent leveled logs with rotation, login-failure rate limiting, scrypt password storage, protected config/token file permissions, request-body limits, SSRF protections, and a CSP for the admin panel. |
 | **Multiple Deployment Options** | Supports GitHub Release binaries with systemd, Docker / Docker Compose, and running from Go source. Releases provide static builds for amd64, arm64, arm, mips, mipsle, and riscv64 with SHA256 checksums. |
@@ -227,7 +227,7 @@ upstream:
     followRedirects: true                      # Follow upstream 301/302/303/307/308 (default true; when false the redirect is reported as an upstream error instead of being forwarded to the client)
     proxyId: null                              # Associate with proxy ID from proxy pool
     priorityMetadata: false                    # Prefer using this server's metadata when merging
-    maxConcurrent: 3                           # Max concurrent playbacks, 0 means unlimited (affects regular users only)
+    maxConcurrent: 3                           # Regular-user authorization capacity; 0 unlimited; admins use no slots
 
   - name: "Server C (custom spoof example)"
     url: "https://emby-c.example.com"
@@ -327,8 +327,8 @@ Because all distributed users share the same upstream Emby account, watch progre
 
 **Working Principle:**
 
-- Playback events (start, progress, stop) simultaneously write to the upstream server and the local database (dual write)
-- Playback completion (progress ≥ 90%) is automatically marked as "played"
+- Playing/Progress report upstream first and write regular-user local progress only after 2xx confirmation; failure keeps the previous local state
+- Stopped saves the client-observed terminal state even when upstream is unavailable; reaching 90% of a known positive runtime marks the item played
 - Mark played / favorite and other user operations are also dual written
 - When a user is deleted, their local watch data is automatically cleared
 - Upon first playback of an item, the system automatically fetches metadata from upstream (series name, seasons, episodes) to support NextUp calculations
@@ -343,17 +343,37 @@ Admins can create and manage regular users through the following ways:
 
 ### Configuring Accessible Servers
 
-Each regular user can restrict upstream access through a list of stable server `serverId` values. When one or more `serverId` values are specified, the user can only browse and play content from those servers. If `allowedServers` is omitted, `null`, or an empty list, the server scope is **unrestricted (all upstreams are accessible)**.
+Regular users can access only stable `serverId` values explicitly granted in `allowedServers`. Selecting no servers in the panel means **no upstream access**. For user creation, omitted, `null`, or `[]` grants no servers. For updates, omitted or `null` preserves existing grants, while explicit `[]` revokes all grants. To grant every current server, list every ID explicitly; future servers require a separate grant. Admins always have access to all upstreams.
 
-### Concurrent Playback Limits
+### Playback Limit Setting and Authorization Capacity
 
-Each upstream server can independently configure `maxConcurrent` (maximum concurrent playback number):
+The admin-panel field “同播数量限制” maps to `maxConcurrent`, which counts regular users explicitly authorized for each upstream:
 
-- `0` (default): No limit
-- Positive integer: Limits the number of regular users playing simultaneously on that server
-- Admins are not subject to this limit
-- Returning `429 Too Many Requests` when limit exceeded
-- Based on 3-minute heartbeat timeout for auto-release of occupation
+- `0` (default): unlimited authorization capacity; a positive integer caps assigned regular users; negative values are invalid.
+- `assignedUsers` is the current number of regular-user grants for that upstream. Admins can access every upstream and do not consume slots.
+- Slots belong to explicit grants. Stopping playback, an offline upstream, or disabling a user does not revoke a grant. Removing a grant or deleting the user releases its slot.
+- Adding grants beyond capacity: `409 UPSTREAM_CAPACITY_FULL`.
+- Lowering capacity below the assigned count: `409 UPSTREAM_CAPACITY_BELOW_ASSIGNED`.
+- Conflict responses include `code`, `message`, `serverId`, `limit`, and `assigned`. The panel retains the unsaved form and refreshes capacity data; the backend performs the final capacity check.
+
+### Single-Device Playback for Regular Users
+
+Playback leases are isolated by `(UserID, ServerID)`. One active DeviceID holds the lease for a regular user on an upstream. The same user may play on different upstreams simultaneously; admins are exempt. The owning device can switch items or sessions. A different device is rejected while the lease is live with `429 PLAYBACK_DEVICE_LIMIT`.
+
+DeviceID precedence is `X-Emby-Device-Id`, DeviceId in `X-Emby-Authorization`, DeviceId in `Authorization`, then the current validated token's persisted DeviceID. A regular-user lifecycle request without a valid DeviceID returns `400 PLAYBACK_DEVICE_ID_REQUIRED`. A lease with no heartbeat for at least three minutes can be cleaned up or taken over. Stopped releases only the matching device and exact PlaySessionID; an old Stopped event cannot release a newer session.
+
+### Playback Confirmation and Error Responses
+
+Playing/Progress write local progress and refresh the owning device's lease only after an upstream 200—299 confirmation, then return an empty 204. The upstream body need not be JSON. Failure leaves local playback state unchanged:
+
+| Upstream result | Playing / Progress response |
+|---|---|
+| Missing / offline client | 503 `UPSTREAM_SESSION_UNAVAILABLE` |
+| Transport / DNS / TCP / TLS / observable cancellation | 502 `UPSTREAM_SESSION_FAILED` |
+| Deadline / network timeout | 504 `UPSTREAM_SESSION_TIMEOUT` |
+| HTTP non-2xx, including upstream 401/403 | 502 `UPSTREAM_SESSION_REJECTED` |
+
+Stopped preserves the client-observed terminal state: success, ordinary upstream failure, offline, and missing-client outcomes still save local progress and attempt exact lease release, returning 204. Preparation errors retain their original 400/503 response while finalizing locally. Missing DeviceID saves progress and returns 400 without forwarding upstream or releasing a lease. Reaching 90% of a known positive runtime can mark the item played. Public errors and lifecycle diagnostics omit upstream bodies, URLs, and credentials.
 
 ---
 
@@ -551,7 +571,7 @@ Access `http://your-ip:8096/admin`, logging in with the admin credentials from t
 | Page | Functions |
 |------|-----------|
 | **System Overview** | Online server count, ID mapping count, storage engine (SQLite) |
-| **Upstream Nodes** | Add / edit / delete / reconnect servers, drag-and-drop ordering; Supports configuring maximum concurrent playback (`maxConcurrent`) |
+| **Upstream Nodes** | Add / edit / delete / reconnect servers, drag-and-drop ordering; Shows assigned regular users and configures authorization capacity (`maxConcurrent`, labeled “同播数量限制”) |
 | **User Mgmt** | Create, edit, enable/disable, delete regular users; Visually configure accessible servers |
 | **Network Proxies** | HTTP/HTTPS proxy pool management, supports one-click connectivity testing |
 | **Global Settings** | System name, default playback mode, admin account, timeout & grace period configuration |
@@ -737,13 +757,13 @@ Emby-In-One/
 │   ├── media_items.go              # Media item queries (multi-upstream fan-out merge)
 │   ├── media_resume.go             # Resume Items proxy & multi-upstream merge
 │   ├── media_nextup.go             # Next Up proxy & multi-upstream merge
-│   ├── media_playback.go           # PlaybackInfo query & concurrent playback limit check
+│   ├── media_playback.go           # PlaybackInfo & per-user/per-upstream single-device lease reservation
 │   ├── media_stream.go             # Video/audio stream proxy (virtual ID route resolution)
 │   ├── library_image.go            # Image proxy (cache headers)
 │   ├── series_userdata.go          # Series-level watch history isolation (Resume/NextUp)
 │   ├── session_userdata.go         # Sessions/Playing progress reporting
 │   ├── watch_store.go              # Per-user watch progress storage & persistence
-│   ├── playback_limiter.go         # Concurrent playback limiter (heartbeat timeout auto-release)
+│   ├── playback_limiter.go         # Per-user/per-upstream single-device lease (revision, heartbeat, exact Stop)
 │   ├── login_limiter.go            # Per-IP login failure limiter (evicts instead of blocking)
 │   ├── streamproxy.go              # HTTP stream proxy (backpressure, HLS relative path rewriting)
 │   ├── fallback_proxy.go           # Fallback route: scan URL/Query for virtual IDs

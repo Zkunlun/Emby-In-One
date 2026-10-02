@@ -303,7 +303,7 @@ func mergePassthroughHeaders(source http.Header) http.Header {
 				if headers.Get(field.header) != "" && headers.Get(field.header) != "Infuse" && headers.Get(field.header) != "infuse-spoof-id" {
 					continue
 				}
-				if value := parsed[field.param]; value != "" {
+				if value := authorizationIdentityParameter(parsed, field.param); value != "" {
 					headers.Set(field.header, value)
 				}
 			}
@@ -321,6 +321,7 @@ func mergePassthroughHeaders(source http.Header) http.Header {
 // smuggle an extra parameter into a rebuilt header.
 func parseAuthorizationIdentityStrict(header string) (map[string]string, bool) {
 	result := map[string]string{}
+	conflictingKeys := map[string]bool{}
 	trimmed := strings.TrimSpace(header)
 	if trimmed == "" {
 		return result, true
@@ -383,10 +384,26 @@ func parseAuthorizationIdentityStrict(header string) (map[string]string, bool) {
 			}
 			value = strings.TrimSpace(trimmed[valueStart:index])
 		}
-		if key == "" {
+		if key == "" || strings.IndexAny(key, " \t\r\n\"") >= 0 {
 			return nil, false
 		}
-		result[key] = value
+		// A quoted value must end at a comma or the end of the header.
+		for index < len(trimmed) && (trimmed[index] == ' ' || trimmed[index] == '\t') {
+			index++
+		}
+		if index < len(trimmed) && trimmed[index] != ',' {
+			return nil, false
+		}
+		// Keep conflicting exact duplicates ambiguous even after another repeat.
+		// Case variants remain separate for the logical parameter reader.
+		if previous, exists := result[key]; exists && strings.TrimSpace(previous) != strings.TrimSpace(value) {
+			conflictingKeys[key] = true
+		}
+		if conflictingKeys[key] {
+			result[key] = ""
+		} else {
+			result[key] = value
+		}
 	}
 	return result, true
 }
@@ -399,6 +416,43 @@ func parseAuthorizationIdentity(header string) map[string]string {
 		return map[string]string{}
 	}
 	return parsed
+}
+
+// authorizationIdentityParameter reads one compound-authorization parameter
+// case-insensitively without changing the strict parser's existing key-preserving
+// contract. Emby clients are not consistent about DeviceId/Token parameter casing.
+func authorizationIdentityParameter(parsed map[string]string, name string) string {
+	value := ""
+	found := false
+	if exact, ok := parsed[name]; ok {
+		value = strings.TrimSpace(exact)
+		found = true
+	}
+	for key, candidate := range parsed {
+		if key == name || !strings.EqualFold(strings.TrimSpace(key), name) {
+			continue
+		}
+		candidate = strings.TrimSpace(candidate)
+		if found && candidate != value {
+			// Conflicting case variants are ambiguous identity input. Fail closed
+			// instead of depending on randomized Go map iteration order.
+			return ""
+		}
+		value = candidate
+		found = true
+	}
+	return value
+}
+
+// deviceIDFromAuthorizationHeader extracts a DeviceId only from a syntactically
+// valid Emby/MediaBrowser compound authorization header. Malformed headers fail
+// closed rather than falling back to substring matching.
+func deviceIDFromAuthorizationHeader(header string) string {
+	parsed, ok := parseAuthorizationIdentityStrict(header)
+	if !ok {
+		return ""
+	}
+	return authorizationIdentityParameter(parsed, "DeviceId")
 }
 
 // capturedHeaderKeys are the only fields persisted for a captured client
@@ -430,10 +484,10 @@ func normalizeCapturedHeaders(headers http.Header) http.Header {
 				break
 			}
 			mapping := map[string]string{
-				"X-Emby-Client":         parsed["Client"],
-				"X-Emby-Client-Version": parsed["Version"],
-				"X-Emby-Device-Name":    parsed["Device"],
-				"X-Emby-Device-Id":      parsed["DeviceId"],
+				"X-Emby-Client":         authorizationIdentityParameter(parsed, "Client"),
+				"X-Emby-Client-Version": authorizationIdentityParameter(parsed, "Version"),
+				"X-Emby-Device-Name":    authorizationIdentityParameter(parsed, "Device"),
+				"X-Emby-Device-Id":      authorizationIdentityParameter(parsed, "DeviceId"),
 			}
 			for hdr, val := range mapping {
 				if copied.Get(hdr) == "" && val != "" {

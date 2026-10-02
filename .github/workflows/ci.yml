@@ -4,6 +4,12 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      full_race:
+        description: 'Run the full race suite (manual opt-in)'
+        type: boolean
+        default: false
 
 jobs:
   go:
@@ -21,10 +27,12 @@ jobs:
         run: go build ./...
       - name: Vet
         run: go vet ./...
-      # -race is not optional here: the ID store, the watch store and the playback limiter
-      # are all shared across request goroutines, and several fixes in this tree are about
-      # that sharing.
+      # Full race was cancelled for V1.5.1; ordinary full regression remains automatic.
+      # Keep race available as an explicit manual opt-in without running it on push.
       - name: Test
+        run: go test -timeout 20m ./...
+      - name: Full race (manual opt-in)
+        if: github.event_name == 'workflow_dispatch' && inputs.full_race
         run: go test -race -timeout 20m ./...
 
   panel:
@@ -35,6 +43,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - name: Admin panel contract tests
+        run: node phase8-admin-ui-contract.test.cjs
       # public/vendor/tailwind.css is committed so a source install needs no Node at all.
       # That only works while it matches the markup it was generated from, so regenerate it
       # and fail when the committed copy is stale.

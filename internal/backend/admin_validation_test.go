@@ -135,6 +135,49 @@ func TestValidateUpstreamDraftPlaybackProxyMatrix(t *testing.T) {
 	}
 }
 
+func TestMaxConcurrentRejectsNegativeAdminInput(t *testing.T) {
+	negative := -1
+	base := UpstreamConfig{
+		Name:          "test-upstream",
+		URL:           "https://emby.example",
+		Username:      "user",
+		Password:      "pass",
+		SpoofClient:   "none",
+		PlaybackMode:  "proxy",
+		MaxConcurrent: 3,
+	}
+
+	for _, tc := range []struct {
+		name     string
+		isCreate bool
+	}{
+		{name: "create", isCreate: true},
+		{name: "update", isCreate: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			draft := base
+			if tc.isCreate {
+				draft = UpstreamConfig{
+					Name:            base.Name,
+					URL:             base.URL,
+					Username:        base.Username,
+					Password:        base.Password,
+					SpoofClient:     base.SpoofClient,
+					PlaybackMode:    base.PlaybackMode,
+					FollowRedirects: true,
+				}
+			}
+			applyAdminUpstreamInput(&draft, adminUpstreamInput{MaxConcurrent: &negative}, tc.isCreate)
+			if draft.MaxConcurrent != -1 {
+				t.Fatalf("maxConcurrent = %d after %s input, want -1 preserved for validation", draft.MaxConcurrent, tc.name)
+			}
+			if err := validateUpstreamDraft(draft); err == nil {
+				t.Fatalf("negative maxConcurrent unexpectedly accepted on %s", tc.name)
+			}
+		})
+	}
+}
+
 func TestValidateUpstreamDraftAuthMatrix(t *testing.T) {
 	base := UpstreamConfig{
 		Name:         "test-upstream",

@@ -63,8 +63,8 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # -race 的完整门禁在 ci.yml（push 到 main 时跑）；发布构建只做无插桩的
-      # 快速回归，避免每次发布都多等一遍竞态检测的时间。
+      # 发布与默认 CI 执行普通全量回归；完整 race 仅保留手动可选项。
+      # V1.5.1 本轮按用户决定不运行全量 race，不宣称完整 race 通过。
       - name: Test
         run: go test -timeout 15m ./...
 

@@ -24,6 +24,10 @@ func (a *App) handleAuthenticateByName(w http.ResponseWriter, r *http.Request) {
 	if password == "" {
 		password = body.Password
 	}
+	// Authentication has no proxy token yet, so only the live request's first
+	// three DeviceID sources participate. The issued token persists this value for
+	// later fourth-priority playback fallback.
+	loginDeviceID := resolvePlaybackDeviceID(r.Header, "")
 	if a.Logger != nil {
 		a.Logger.Infof("Login attempt: user=%q client=%q device=%q ip=%s",
 			body.Username, r.Header.Get("X-Emby-Client"), r.Header.Get("X-Emby-Device-Name"), r.RemoteAddr)
@@ -32,7 +36,7 @@ func (a *App) handleAuthenticateByName(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. Try admin match
-	result, ok, err := a.Auth.Authenticate(body.Username, password)
+	result, ok, err := a.Auth.Authenticate(body.Username, password, loginDeviceID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
 		return
@@ -60,10 +64,13 @@ func (a *App) handleAuthenticateByName(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "failed to read user password state"})
 				return
 			}
-			response, _, authErr := a.Auth.AuthenticateUser(user, hasPassword)
+			response, token, authErr := a.Auth.AuthenticateUser(user, hasPassword, loginDeviceID)
 			if authErr != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": authErr.Error()})
 				return
+			}
+			if token != "" && hasPassthroughIdentity(r.Header) {
+				a.Identity.SetCaptured(token, r.Header)
 			}
 			a.loginLimiter.recordSuccess(ip)
 			if a.Logger != nil {

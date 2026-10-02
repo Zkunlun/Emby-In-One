@@ -130,6 +130,9 @@ func validateUpstreamDraft(draft UpstreamConfig) error {
 	if err := validateSpoofClient(draft.SpoofClient); err != nil {
 		return err
 	}
+	if draft.MaxConcurrent < 0 {
+		return &httpError{message: "maxConcurrent 不能小于 0"}
+	}
 	if draft.PlaybackMode == "redirect" && strings.TrimSpace(draft.ProxyID) != "" {
 		return &httpError{message: "直连播放模式不能使用 HTTP 网络代理；请先取消网络代理，或改用代理播放模式"}
 	}
@@ -450,9 +453,7 @@ func applyAdminUpstreamInput(dst *UpstreamConfig, body adminUpstreamInput, isCre
 			dst.CustomDeviceId = strings.TrimSpace(*body.CustomDeviceId)
 		}
 		if body.MaxConcurrent != nil {
-			if *body.MaxConcurrent >= 0 {
-				dst.MaxConcurrent = *body.MaxConcurrent
-			}
+			dst.MaxConcurrent = *body.MaxConcurrent
 		}
 		applyDeclaredAuthType(dst, body)
 		return
@@ -505,9 +506,7 @@ func applyAdminUpstreamInput(dst *UpstreamConfig, body adminUpstreamInput, isCre
 		dst.CustomDeviceId = strings.TrimSpace(*body.CustomDeviceId)
 	}
 	if body.MaxConcurrent != nil {
-		if *body.MaxConcurrent >= 0 {
-			dst.MaxConcurrent = *body.MaxConcurrent
-		}
+		dst.MaxConcurrent = *body.MaxConcurrent
 	}
 	applyDeclaredAuthType(dst, body)
 }

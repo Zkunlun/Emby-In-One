@@ -162,6 +162,9 @@ func LoadConfigStore() (*ConfigStore, error) {
 			u.ID = ""
 		}
 		normalizeUpstream(u, i, cfg)
+		if u.MaxConcurrent < 0 {
+			return nil, fmt.Errorf("config: upstream[%d].maxConcurrent cannot be negative", i)
+		}
 		seenIDs[u.ID] = true
 	}
 	if cfg.DataDir == "" {

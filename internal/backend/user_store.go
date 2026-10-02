@@ -28,6 +28,12 @@ type UserStore struct {
 	logger  *Logger
 }
 
+// ServerGrantLimits maps an upstream server ID to the maximum number of regular
+// users that may hold an explicit grant. A missing entry or a value <= 0 means
+// unlimited. Callers are responsible for validating that requested server IDs
+// exist in the current configuration.
+type ServerGrantLimits map[string]int
+
 func NewUserStore(db *sqliteDB, logger *Logger) (*UserStore, error) {
 	if db == nil {
 		return nil, fmt.Errorf("user_store: SQLite database handle is nil")
@@ -98,6 +104,7 @@ func (s *UserStore) loadAll() error {
 			PasswordHash:   stmt.columnText(2),
 			PasswordSecret: stmt.columnText(3),
 			Enabled:        stmt.columnInt(4) != 0,
+			AllowedServers: []string{},
 			CreatedAt:      stmt.columnInt64(5),
 		}
 		if _, err := s.passwordPlaintext(user); err != nil {
@@ -130,11 +137,24 @@ func (s *UserStore) loadAll() error {
 }
 
 func (s *UserStore) Create(username, password string, allowedServers []string) (*User, error) {
+	return s.CreateWithServerLimits(username, password, allowedServers, nil)
+}
+
+// CreateWithServerLimits creates a user and all of its explicit upstream grants
+// atomically with respect to authorization capacity. The store write lock covers
+// both the capacity check and the SQLite transaction, so concurrent creators
+// cannot both observe the same final free slot and over-allocate it.
+func (s *UserStore) CreateWithServerLimits(username, password string, allowedServers []string, limits ServerGrantLimits) (*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	allowedServers = uniqueServerIDs(allowedServers)
+
 	if _, exists := s.byName[strings.ToLower(username)]; exists {
 		return nil, fmt.Errorf("username already exists")
+	}
+	if err := s.validateCreateCapacityLocked(allowedServers, limits); err != nil {
+		return nil, err
 	}
 
 	hashed, err := HashPassword(password)
@@ -167,12 +187,38 @@ func (s *UserStore) Create(username, password string, allowedServers []string) (
 		PasswordHash:   hashed,
 		PasswordSecret: secret,
 		Enabled:        true,
-		AllowedServers: append([]string(nil), allowedServers...),
+		AllowedServers: append([]string{}, allowedServers...),
 		CreatedAt:      now,
 	}
 	s.users[id] = user
 	s.byName[strings.ToLower(username)] = user
 	return user, nil
+}
+
+// validateCreateCapacityLocked checks every distinct requested grant against the
+// current in-memory assignment count. The caller must hold s.mu for writing and
+// must keep it held until the create transaction and in-memory insert complete.
+func (s *UserStore) validateCreateCapacityLocked(allowedServers []string, limits ServerGrantLimits) error {
+	seen := make(map[string]struct{}, len(allowedServers))
+	for _, serverID := range allowedServers {
+		if serverID == "" {
+			continue
+		}
+		if _, duplicate := seen[serverID]; duplicate {
+			continue
+		}
+		seen[serverID] = struct{}{}
+
+		limit, limited := limits[serverID]
+		if !limited || limit <= 0 {
+			continue
+		}
+		assigned := s.countUsersForServerLocked(serverID)
+		if assigned >= limit {
+			return newUpstreamCapacityFullError(serverID, limit, assigned)
+		}
+	}
+	return nil
 }
 
 func (s *UserStore) Authenticate(username, password string) *User {
@@ -238,7 +284,65 @@ func (s *UserStore) List() []*User {
 	return result
 }
 
+// countUsersForServerLocked returns how many regular proxy users are explicitly
+// assigned to serverID. The caller must hold s.mu for either reading or writing.
+// Enabled state is intentionally ignored: a disabled user still owns its grant.
+func (s *UserStore) countUsersForServerLocked(serverID string) int {
+	if serverID == "" {
+		return 0
+	}
+	count := 0
+	for _, user := range s.users {
+		for _, assignedServerID := range user.AllowedServers {
+			if assignedServerID == serverID {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
+// CountUsersForServer returns the number of regular proxy users explicitly
+// assigned to serverID. Disabled users are included because authorization slots
+// are released only when the grant or the user itself is removed.
+func (s *UserStore) CountUsersForServer(serverID string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.countUsersForServerLocked(serverID)
+}
+
+// AssignedUserCounts returns a snapshot of explicit regular-user assignments by
+// server ID. Servers with no assigned users are omitted from the result.
+func (s *UserStore) AssignedUserCounts() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	counts := make(map[string]int)
+	for _, user := range s.users {
+		seen := make(map[string]struct{}, len(user.AllowedServers))
+		for _, serverID := range user.AllowedServers {
+			if serverID == "" {
+				continue
+			}
+			if _, duplicate := seen[serverID]; duplicate {
+				continue
+			}
+			seen[serverID] = struct{}{}
+			counts[serverID]++
+		}
+	}
+	return counts
+}
+
 func (s *UserStore) Update(id string, username *string, password *string, enabled *bool, allowedServers *[]string) error {
+	return s.UpdateWithServerLimits(id, username, password, enabled, allowedServers, nil)
+}
+
+// UpdateWithServerLimits updates a user and any explicit upstream grant changes
+// atomically with respect to authorization capacity. Only newly added grants are
+// capacity-checked; grants the user already owns do not consume another slot.
+func (s *UserStore) UpdateWithServerLimits(id string, username *string, password *string, enabled *bool, allowedServers *[]string, limits ServerGrantLimits) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -250,6 +354,41 @@ func (s *UserStore) Update(id string, username *string, password *string, enable
 	if username != nil && strings.ToLower(*username) != strings.ToLower(user.Username) {
 		if _, exists := s.byName[strings.ToLower(*username)]; exists {
 			return fmt.Errorf("username already exists")
+		}
+	}
+
+	var normalizedAllowed []string
+	var addedServers []string
+	var removedServers []string
+	if allowedServers != nil {
+		normalizedAllowed = uniqueServerIDs(*allowedServers)
+		oldAllowed := uniqueServerIDs(user.AllowedServers)
+		oldSet := make(map[string]struct{}, len(oldAllowed))
+		for _, serverID := range oldAllowed {
+			oldSet[serverID] = struct{}{}
+		}
+		newSet := make(map[string]struct{}, len(normalizedAllowed))
+		for _, serverID := range normalizedAllowed {
+			newSet[serverID] = struct{}{}
+			if _, alreadyOwned := oldSet[serverID]; !alreadyOwned {
+				addedServers = append(addedServers, serverID)
+			}
+		}
+		for _, serverID := range oldAllowed {
+			if _, kept := newSet[serverID]; !kept {
+				removedServers = append(removedServers, serverID)
+			}
+		}
+
+		for _, serverID := range addedServers {
+			limit, limited := limits[serverID]
+			if !limited || limit <= 0 {
+				continue
+			}
+			assigned := s.countUsersForServerLocked(serverID)
+			if assigned >= limit {
+				return newUpstreamCapacityFullError(serverID, limit, assigned)
+			}
 		}
 	}
 
@@ -285,7 +424,16 @@ func (s *UserStore) Update(id string, username *string, password *string, enable
 			}
 		}
 		if allowedServers != nil {
-			return s.replaceAllowedServersParams(id, *allowedServers)
+			for _, serverID := range removedServers {
+				if err := s.db.execParams(`DELETE FROM user_servers WHERE user_id = ? AND server_id = ?`, id, serverID); err != nil {
+					return err
+				}
+			}
+			for _, serverID := range addedServers {
+				if err := s.db.execParams(`INSERT INTO user_servers (user_id, server_id) VALUES (?, ?)`, id, serverID); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	}); err != nil {
@@ -307,10 +455,29 @@ func (s *UserStore) Update(id string, username *string, password *string, enable
 		user.Enabled = *enabled
 	}
 	if allowedServers != nil {
-		user.AllowedServers = append([]string(nil), *allowedServers...)
+		user.AllowedServers = append([]string{}, normalizedAllowed...)
 	}
 
 	return nil
+}
+
+func uniqueServerIDs(serverIDs []string) []string {
+	if len(serverIDs) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(serverIDs))
+	unique := make([]string, 0, len(serverIDs))
+	for _, serverID := range serverIDs {
+		if serverID == "" {
+			continue
+		}
+		if _, duplicate := seen[serverID]; duplicate {
+			continue
+		}
+		seen[serverID] = struct{}{}
+		unique = append(unique, serverID)
+	}
+	return unique
 }
 
 func (s *UserStore) Delete(id string) error {
@@ -338,30 +505,41 @@ func (s *UserStore) Delete(id string) error {
 	return nil
 }
 
-// RemoveServerGrants removes all access grants for the deleted upstream server.
-func (s *UserStore) RemoveServerGrants(serverID string) error {
+// RemoveServerGrants removes all access grants for the deleted upstream server
+// and returns the users whose authorization changed. The database delete and
+// in-memory update are serialized under the store write lock so callers can
+// revoke exactly the tokens affected by this authorization change.
+func (s *UserStore) RemoveServerGrants(serverID string) ([]string, error) {
 	if serverID == "" {
-		return nil
+		return []string{}, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.db != nil {
 		if err := s.db.execParams(`DELETE FROM user_servers WHERE server_id = ?`, serverID); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
+	affectedUserIDs := make([]string, 0)
 	for _, user := range s.users {
 		kept := make([]string, 0, len(user.AllowedServers))
+		removed := false
 		for _, id := range user.AllowedServers {
-			if id != serverID {
-				kept = append(kept, id)
+			if id == serverID {
+				removed = true
+				continue
 			}
+			kept = append(kept, id)
+		}
+		if removed {
+			affectedUserIDs = append(affectedUserIDs, user.ID)
 		}
 		user.AllowedServers = kept
 	}
-	return nil
+	sort.Strings(affectedUserIDs)
+	return affectedUserIDs, nil
 }
 
 // replaceAllowedServersParams replaces a user's stored server list using the caller's
@@ -422,7 +600,7 @@ func (s *UserStore) copyUser(user *User) *User {
 		PasswordHash:   user.PasswordHash,
 		PasswordSecret: user.PasswordSecret,
 		Enabled:        user.Enabled,
-		AllowedServers: append([]string(nil), user.AllowedServers...),
+		AllowedServers: append([]string{}, user.AllowedServers...),
 		CreatedAt:      user.CreatedAt,
 	}
 }

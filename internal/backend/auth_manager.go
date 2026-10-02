@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,8 +16,16 @@ type tokenInfo struct {
 	UserID         string   `json:"userId"`
 	Username       string   `json:"username"`
 	Role           string   `json:"role"`
-	AllowedServers []string `json:"allowedServers,omitempty"`
+	AllowedServers []string `json:"allowedServers"`
+	DeviceID       string   `json:"deviceId,omitempty"`
 	CreatedAt      int64    `json:"createdAt"`
+}
+
+func normalizeTokenAllowedServers(role string, allowedServers []string) []string {
+	if role == "admin" {
+		return nil
+	}
+	return append([]string{}, allowedServers...)
 }
 
 func (t *tokenInfo) UnmarshalJSON(data []byte) error {
@@ -25,6 +34,7 @@ func (t *tokenInfo) UnmarshalJSON(data []byte) error {
 		Username       string          `json:"username"`
 		Role           string          `json:"role"`
 		AllowedServers json.RawMessage `json:"allowedServers,omitempty"`
+		DeviceID       string          `json:"deviceId,omitempty"`
 		CreatedAt      int64           `json:"createdAt"`
 	}
 	var raw rawTokenInfo
@@ -34,6 +44,7 @@ func (t *tokenInfo) UnmarshalJSON(data []byte) error {
 	t.UserID = raw.UserID
 	t.Username = raw.Username
 	t.Role = raw.Role
+	t.DeviceID = strings.TrimSpace(raw.DeviceID)
 	t.CreatedAt = raw.CreatedAt
 
 	if len(raw.AllowedServers) > 0 && string(raw.AllowedServers) != "null" {
@@ -50,6 +61,7 @@ func (t *tokenInfo) UnmarshalJSON(data []byte) error {
 			}
 		}
 	}
+	t.AllowedServers = normalizeTokenAllowedServers(t.Role, t.AllowedServers)
 	return nil
 }
 
@@ -140,6 +152,7 @@ func (m *AuthManager) load() error {
 			if info.Role == "" && info.UserID == m.proxyUserID {
 				info.Role = "admin"
 			}
+			info.AllowedServers = normalizeTokenAllowedServers(info.Role, info.AllowedServers)
 			for i, s := range info.AllowedServers {
 				var oldIdx int
 				if n, _ := fmt.Sscanf(s, "server-%d", &oldIdx); n == 1 {
@@ -172,7 +185,14 @@ func (m *AuthManager) save() error {
 	return WriteFileAtomic(m.tokenFile, encoded, PrivateFileMode())
 }
 
-func (m *AuthManager) Authenticate(username, password string) (map[string]any, bool, error) {
+func optionalTokenDeviceID(deviceIDs []string) string {
+	if len(deviceIDs) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(deviceIDs[0])
+}
+
+func (m *AuthManager) Authenticate(username, password string, deviceID ...string) (map[string]any, bool, error) {
 	cfg := m.configStore.Snapshot()
 	if username != cfg.Admin.Username {
 		// Spend the same scrypt time a real check would, so the response does not confirm
@@ -185,7 +205,7 @@ func (m *AuthManager) Authenticate(username, password string) (map[string]any, b
 	}
 	token := randomHex(16)
 	m.mu.Lock()
-	m.tokens[token] = tokenInfo{UserID: m.proxyUserID, Username: username, Role: "admin", CreatedAt: time.Now().UnixMilli()}
+	m.tokens[token] = tokenInfo{UserID: m.proxyUserID, Username: username, Role: "admin", DeviceID: optionalTokenDeviceID(deviceID), CreatedAt: time.Now().UnixMilli()}
 	m.mu.Unlock()
 	if err := m.save(); err != nil {
 		return nil, false, err
@@ -292,14 +312,15 @@ func (m *AuthManager) RevokeAllTokens() {
 }
 
 // AuthenticateUser generates a token for an already-verified user from UserStore.
-func (m *AuthManager) AuthenticateUser(user *User, hasPassword bool) (map[string]any, string, error) {
+func (m *AuthManager) AuthenticateUser(user *User, hasPassword bool, deviceID ...string) (map[string]any, string, error) {
 	token := randomHex(16)
 	m.mu.Lock()
 	m.tokens[token] = tokenInfo{
 		UserID:         user.ID,
 		Username:       user.Username,
 		Role:           "user",
-		AllowedServers: append([]string(nil), user.AllowedServers...),
+		AllowedServers: normalizeTokenAllowedServers("user", user.AllowedServers),
+		DeviceID:       optionalTokenDeviceID(deviceID),
 		CreatedAt:      time.Now().UnixMilli(),
 	}
 	m.mu.Unlock()

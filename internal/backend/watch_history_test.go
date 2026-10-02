@@ -77,7 +77,11 @@ func TestWatchHistoryIsolationForRegularUsers(t *testing.T) {
 		adminToken := loginTokenAs(t, handler, "admin", "secret")
 
 		rr := doAuthJSON(t, handler, http.MethodPost, "/admin/api/users",
-			map[string]any{"username": "child", "password": "child123"}, adminToken)
+			map[string]any{
+				"username":       "child",
+				"password":       "child123",
+				"allowedServers": testAllUpstreamIDs(t, handler, adminToken),
+			}, adminToken)
 		if rr.Code != http.StatusCreated {
 			t.Fatalf("create user: status=%d body=%s", rr.Code, rr.Body.String())
 		}
@@ -262,7 +266,11 @@ func TestWatchHistoryOverlayOnItemDetail(t *testing.T) {
 
 		// Create a regular user
 		rr := doAuthJSON(t, handler, http.MethodPost, "/admin/api/users",
-			map[string]any{"username": "child", "password": "child123"}, adminToken)
+			map[string]any{
+				"username":       "child",
+				"password":       "child123",
+				"allowedServers": testAllUpstreamIDs(t, handler, adminToken),
+			}, adminToken)
 		if rr.Code != http.StatusCreated {
 			t.Fatalf("create user: status=%d", rr.Code)
 		}
@@ -347,7 +355,11 @@ func TestUserDataPlayedIsNotRecordedLocallyWhenUpstreamFails(t *testing.T) {
 	config := parityConfigWithUpstreams(fmt.Sprintf("  - name: \"A\"\n    url: %q\n    username: \"u1\"\n    password: \"p1\"\n", upstream.URL))
 	withTempAppPrepared(t, config, nil, func(app *App, handler http.Handler, dir string) {
 		adminToken := loginTokenAs(t, handler, "admin", "secret")
-		rr := doAuthJSON(t, handler, http.MethodPost, "/admin/api/users", map[string]any{"username": "child", "password": "child123"}, adminToken)
+		rr := doAuthJSON(t, handler, http.MethodPost, "/admin/api/users", map[string]any{
+			"username":       "child",
+			"password":       "child123",
+			"allowedServers": testAllUpstreamIDs(t, handler, adminToken),
+		}, adminToken)
 		if rr.Code != http.StatusCreated {
 			t.Fatalf("create user: status=%d body=%s", rr.Code, rr.Body.String())
 		}
@@ -407,7 +419,11 @@ func TestWatchHistoryNoLeakFromUpstreamAdmin(t *testing.T) {
 		adminToken := loginTokenAs(t, handler, "admin", "secret")
 
 		rr := doAuthJSON(t, handler, http.MethodPost, "/admin/api/users",
-			map[string]any{"username": "child", "password": "child123"}, adminToken)
+			map[string]any{
+				"username":       "child",
+				"password":       "child123",
+				"allowedServers": testAllUpstreamIDs(t, handler, adminToken),
+			}, adminToken)
 		if rr.Code != http.StatusCreated {
 			t.Fatalf("create user: status=%d", rr.Code)
 		}
