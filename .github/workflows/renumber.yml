@@ -14,170 +14,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build release assets
-    if: github.repository == 'Zkunlun/Emby-In-One'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - tag: V1.4.7
-            old_sha: 9c22aead2eb701f4fb6d7e5d0df907c4a3eefa59
-            source: ae7de4a53be5163cfb2b68638c4c3b8f458d2e1a
-          - tag: V1.4.8
-            old_sha: 6e6d3eb42988ce697141ec95578b880219ea9851
-            source: 4c3d8aa7a5508ffd86453e1d0465effa12ebab94
-          - tag: V1.4.9
-            old_sha: 0627ad96c4b04e8cce1ad51fb37f9daf2b8a9251
-            source: ${{ github.sha }}
-    env:
-      RELEASE_TAG: ${{ matrix.tag }}
-    runs-on: ubuntu-latest
-    # 与 Dockerfile 的 builder 阶段同一基础镜像：发布二进制与 Docker 自建产物
-    # 出自同一套 Go / 工具链。SQLite 是 vendored cgo，交叉编译依赖各目标的
-    # C 交叉编译器（Debian bookworm 全部提供）。
-    container: golang:1.23-bookworm
-    # 容器 job 的默认 shell 是 sh（dash），不支持 set -o pipefail 与 [[ ]]；
-    # 下面的构建脚本全部按 bash 编写，必须显式指定 bash。
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ matrix.source }}
-          fetch-depth: 0
-
-      - name: Verify unchanged Go source and script syntax
-        env:
-          OLD_SHA: ${{ matrix.old_sha }}
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git diff --exit-code "$OLD_SHA" HEAD -- '*.go'
-          bash -n install.sh emby-in-one-cli.sh release-install.sh
-
-      - name: Install cross toolchains
-        run: |
-          apt-get update
-          # libc6-dev-*-cross 必须显式列出：交叉 gcc 元包对它们只是 Recommends，
-          # --no-install-recommends 会跳过。缺了它们，交叉编译回退读到宿主机的
-          # /usr/include/stdlib.h，随后 bits/ 多架构头找不到，runtime/cgo 编译失败。
-          apt-get install -y --no-install-recommends \
-            build-essential \
-            file \
-            gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
-            gcc-arm-linux-gnueabihf libc6-dev-armhf-cross \
-            gcc-mips-linux-gnu libc6-dev-mips-cross \
-            gcc-mipsel-linux-gnu libc6-dev-mipsel-cross \
-            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
-
-      - name: Vet
-        run: go vet ./...
-
-      # 发布与默认 CI 执行普通全量回归；完整 race 仅保留手动可选项。
-      # V1.5.1 本轮按用户决定不运行全量 race，不宣称完整 race 通过。
-      - name: Test
-        run: go test -timeout 45m ./...
-
-      - name: Build static binaries for all supported architectures
-        env:
-          TAG: ${{ env.RELEASE_TAG }}
-        run: |
-          set -euo pipefail
-          VERSION="v${TAG#V}"
-          mkdir -p dist
-          # arm 为 armv7 硬浮点（Debian armhf 基线，覆盖树莓派 2 及以上）；
-          # armv6（树莓派一代 / Zero）不在预编译范围内。
-          # netgo + osusergo + -extldflags -static：纯静态、自带 DNS/用户解析，
-          # 不依赖目标机器的 glibc 版本与 NSS 动态库。
-          build() {
-            local goarch="$1" cc="$2" goarm="${3:-}"
-            echo "==> Building linux/${goarch} (GOARM=${goarm:-none}) with CC=${cc}..."
-            # -buildvcs=false: 容器 job 的工作区属主与运行用户不一致，go 的
-            # VCS 戳记调 git 会以 128 拒绝；版本号已由 -X 注入，无需戳记。
-            CGO_ENABLED=1 CC="$cc" GOARM="$goarm" GOOS=linux GOARCH="$goarch" \
-              go build -trimpath -buildvcs=false -tags "netgo osusergo" \
-              -ldflags "-s -w -X main.Version=${VERSION} -extldflags -static" \
-              -o "dist/Emby-In-One-linux-${goarch}-${VERSION}" ./cmd/emby-in-one
-          }
-          build amd64   gcc
-          build arm64   aarch64-linux-gnu-gcc
-          build arm     arm-linux-gnueabihf-gcc 7
-          build mips    mips-linux-gnu-gcc
-          build mipsle  mipsel-linux-gnu-gcc
-          build riscv64 riscv64-linux-gnu-gcc
-
-      - name: Smoke test and verify static linking
-        env:
-          TAG: ${{ env.RELEASE_TAG }}
-        run: |
-          set -euo pipefail
-          VERSION="v${TAG#V}"
-          # 容器本身是 linux/amd64，可以直接执行一次 --version 验证产物
-          "./dist/Emby-In-One-linux-amd64-${VERSION}" --version
-          for f in dist/Emby-In-One-linux-*; do
-            if ! file "$f" | grep -q "statically linked"; then
-              echo "::error::${f} 不是静态链接" >&2
-              file "$f" >&2
-              exit 1
-            fi
-          done
-
-      - name: Stage panel and script assets
-        run: |
-          cp public/admin.html public/admin.js dist/
-          cp emby-in-one-cli.sh release-install.sh dist/
-
-      - name: Build Docker source archive
-        env:
-          TAG: ${{ env.RELEASE_TAG }}
-        run: |
-          set -euo pipefail
-          VERSION="v${TAG#V}"
-          # 容器 job 的工作区属主与运行用户不一致，git archive 前先声明信任
-          # （go build 的 VCS 戳记就是栽在这个属主差异上，见上一步注释）。
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-          # emby-in-one-cli.sh 的 Docker 模式在线更新按此清单解包部署
-          # （cmd / internal / third_party / public / go.mod + Dockerfile 等）。
-          # git archive 只含已提交文件，并按 .gitattributes 统一为 LF 行尾。
-          PATHS=(cmd internal third_party public go.mod Dockerfile .dockerignore docker-compose.yml emby-in-one-cli.sh README.md README_EN.md Update.md LICENSE)
-          if [[ -d docs ]]; then PATHS+=(docs); fi
-          git archive --format=tar.gz --prefix="emby-in-one/" -o "dist/Emby-In-One-docker-${VERSION}.tar.gz" HEAD "${PATHS[@]}"
-
-      - name: Generate .sha256 for every asset
-        run: |
-          set -euo pipefail
-          cd dist
-          # 校验和文件里记录的是裸文件名（sha256sum 的第二列），
-          # 与 release-install.sh verify_sha256 按 URL 末段匹配的解析方式一致。
-          for f in *; do
-            [[ "$f" == *.sha256 ]] && continue
-            sha256sum "$f" > "${f}.sha256"
-          done
-          ls -l
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: renumber-${{ matrix.tag }}
-          path: dist/
-          if-no-files-found: error
-          retention-days: 7
-
   publish:
     if: github.repository == 'Zkunlun/Emby-In-One'
-    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/download-artifact@v4
         with:
           pattern: renumber-V1.4.*
           path: staging
+          run-id: 37414665598
+          github-token: ${{ github.token }}
       - name: Preserve release history and apply new numbering
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_MAIN: ${{ github.sha }}
+          EXPECTED_MAIN: c6af33eea8b8ec46435707fd1b11335978662d04
           RENUMBER_MAPPING: '[{"old":"V1.5.0","new":"V1.4.7","parent":"9c22aead2eb701f4fb6d7e5d0df907c4a3eefa59","tree":"bda00d859733d46607f7383b9c0a638aa0059eae","sha":"ae7de4a53be5163cfb2b68638c4c3b8f458d2e1a","release_id":398487357},{"old":"V1.5.1","new":"V1.4.8","parent":"6e6d3eb42988ce697141ec95578b880219ea9851","tree":"d1c718ce0201b8141cafd77ccc132773e8f70f03","sha":"4c3d8aa7a5508ffd86453e1d0465effa12ebab94","release_id":401882256},{"old":"V1.6.0","new":"V1.4.9","parent":"0627ad96c4b04e8cce1ad51fb37f9daf2b8a9251","tree":"924693963cf10c8e9857ba4568cbef38d602da1d","sha":"CURRENT","release_id":404258913}]'
         run: |
           mkdir -p staging/renumber-V1.4.7/dist staging/renumber-V1.4.8/dist staging/renumber-V1.4.9/dist
@@ -252,7 +105,7 @@ jobs:
               for f in sorted(d.iterdir()):
                   if f.name in ("admin.html","admin.html.sha256","admin.js","admin.js.sha256","emby-in-one-cli.sh","emby-in-one-cli.sh.sha256","release-install.sh","release-install.sh.sha256"):
                       continue
-                  current=req("/releases/"+str(m["release_id"])+"/assets")
+                  current=req("/releases/"+str(m["release_id"])+"/assets?per_page=100")
                   same=next((a for a in current if a["name"]==f.name),None)
                   if same and same.get("digest")=="sha256:"+hashlib.sha256(f.read_bytes()).hexdigest():continue
                   if same:req("/releases/assets/"+str(same["id"]),"DELETE")
@@ -268,14 +121,14 @@ jobs:
               for name in generic:
                   for fname in (name,name+".sha256"):
                       f=d/fname
-                      current=req("/releases/"+str(m["release_id"])+"/assets")
+                      current=req("/releases/"+str(m["release_id"])+"/assets?per_page=100")
                       same=next((a for a in current if a["name"]==fname),None)
                       digest="sha256:"+hashlib.sha256(f.read_bytes()).hexdigest()
                       if same and same.get("digest")==digest:continue
                       if same:req("/releases/assets/"+str(same["id"]),"DELETE")
                       req(upload+"?name="+urllib.parse.quote(fname),"POST",raw=f.read_bytes())
               wanted={f.name for f in d.iterdir()}
-              for a in req("/releases/"+str(m["release_id"])+"/assets"):
+              for a in req("/releases/"+str(m["release_id"])+"/assets?per_page=100"):
                   if a["name"] not in wanted:
                       assert m["old"].lower() in a["name"],"unexpected asset would be removed"
                       req("/releases/assets/"+str(a["id"]),"DELETE")
