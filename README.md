@@ -1,6 +1,6 @@
 # Emby-In-One
 
-> **Version: V1.6.0**
+> **Version: V1.4.9**
 
 [![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -19,9 +19,9 @@ Emby-In-One 是一个面向标准 Emby 客户端的多上游聚合代理，将�
 
 当前仓库在原项目基础上继续进行兼容性修复、稳定性优化、功能完善与版本发布，后续维护、Bug 修复和 Release 以本仓库为准。
 
-当前稳定版为 **V1.6.0**。现行主线以 Go 实现为主；原项目的 Node.js V1.2.1 实现保留在 [`legacy/`](legacy/) 中用于历史参考，不参与现行版本的构建与安装。
+当前稳定版为 **V1.4.9**。现行主线以 Go 实现为主；原项目的 Node.js V1.2.1 实现保留在 [`legacy/`](legacy/) 中用于历史参考，不参与现行版本的构建与安装。
 
-> **V1.6.0** 新增媒体库统计、完善上游客户端身份与观看状态管理，并改进电影和单集合并及多版本保留。业务源码已完成部署和用户验收；更新内容见[更新日志](Update.md)，规则与验证范围见[发布验证说明](docs/release-v1.6.0-validation.md)。
+> **V1.4.9** 新增媒体库统计、完善上游客户端身份与观看状态管理，并改进电影和单集合并及多版本保留。业务源码已完成部署和用户验收；更新内容见[更新日志](Update.md)，规则与验证范围见[发布验证说明](docs/release-v1.4.9-validation.md)。
 
 ## 目录
 
@@ -554,7 +554,7 @@ Passthrough 的请求级客户端身份解析采用五级 fallback。需要注�
 
 已保存关系不会因元数据变化主动拆开。请求遇到并证明归属后，旧拆分组可归并；旧 Virtual ID 保留为别名，历史证明及观看行保留。同一普通用户的同组成员共享已观看、收藏和原始续播位置；不同身份和不同用户隔离。列表、详情及 PlaybackInfo 按当前授权和实际返回来源汇总版本，明确选择始终路由到所选真实版本。
 
-保留既有请求范围、5000 候选上限及不新增三源间接冲突审计的边界。`ParentId` 路径仍按上游原始 item 的 `StartIndex/Limit/TotalRecordCount` 分页，原始计数不等于全局合并后的去重总数，本次没有扩展分页或统计功能。规则详见[媒体合并说明](docs/media-merge.md)，验证范围见[发布验证说明](docs/release-v1.6.0-validation.md)。
+保留既有请求范围、5000 候选上限及不新增三源间接冲突审计的边界。`ParentId` 路径仍按上游原始 item 的 `StartIndex/Limit/TotalRecordCount` 分页，原始计数不等于全局合并后的去重总数，本次没有扩展分页或统计功能。规则详见[媒体合并说明](docs/media-merge.md)，验证范围见[发布验证说明](docs/release-v1.4.9-validation.md)。
 
 ### ID 虚拟化
 
@@ -569,7 +569,7 @@ Passthrough 的请求级客户端身份解析采用五级 fallback。需要注�
 
 ## 媒体库资源数统计
 
-> V1.6.0 提供以下统计接口；Hills 携带语言参数的请求已完成兼容修复及用户验收。
+> V1.4.9 提供以下统计接口；Hills 携带语言参数的请求已完成兼容修复及用户验收。
 
 客户端通过已认证的 `GET /Items/Counts`（兼容 `/emby/Items/Counts`）读取统计。
 成功只返回三个非负整数：`MovieCount`、`SeriesCount`、`EpisodeCount`。
@@ -608,7 +608,7 @@ Counts 普通失败后，后台先用同一上游 API/身份入口检查在线�
 `HEAD` 执行相同校验并返回对应状态/JSON 长度，响应体为空；其他方法（含 OPTIONS）认证后返回 405，
 `Allow: GET, HEAD`。所有统计结果使用 `Cache-Control: private, no-store`，不发送 ETag/Last-Modified，不返回条件 304。
 本地结果不暴露上游凭据、服务器列表、原始错误正文或部分总数。
-详见[媒体库统计接口说明](docs/media-counts.md)与[发布验证说明](docs/release-v1.6.0-validation.md)。
+详见[媒体库统计接口说明](docs/media-counts.md)与[发布验证说明](docs/release-v1.4.9-validation.md)。
 
 ## 健康检查
 

@@ -1,6 +1,6 @@
 # 媒体库统计接口 / Media library counts API
 
-适用版本：V1.6.0。需登录后读取 `GET /Items/Counts` 或 `GET /emby/Items/Counts`。成功响应示例：
+适用版本：V1.4.9。需登录后读取 `GET /Items/Counts` 或 `GET /emby/Items/Counts`。成功响应示例：
 
 ```json
 {"MovieCount":120,"SeriesCount":30,"EpisodeCount":450}

@@ -1,0 +1,307 @@
+name: Renumber releases to 1.4.x
+
+# One-time migration authorized by the repository owner on 2026-10-06.
+# All three unchanged business sources must build and pass ordinary tests first.
+on:
+  push:
+    branches: ['maintenance/renumber-1.4-20261006']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renumber-1.4-20261006
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build release assets
+    if: github.repository == 'Zkunlun/Emby-In-One'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: V1.4.7
+            old_sha: 9c22aead2eb701f4fb6d7e5d0df907c4a3eefa59
+            source: 026079aefe5d7ad47998927c1368debb68d25279
+          - tag: V1.4.8
+            old_sha: 6e6d3eb42988ce697141ec95578b880219ea9851
+            source: 2bf126a454fd654e2a7d6bbc15c7606de9a88977
+          - tag: V1.4.9
+            old_sha: 0627ad96c4b04e8cce1ad51fb37f9daf2b8a9251
+            source: ${{ github.sha }}
+    env:
+      RELEASE_TAG: ${{ matrix.tag }}
+    runs-on: ubuntu-latest
+    # 与 Dockerfile 的 builder 阶段同一基础镜像：发布二进制与 Docker 自建产物
+    # 出自同一套 Go / 工具链。SQLite 是 vendored cgo，交叉编译依赖各目标的
+    # C 交叉编译器（Debian bookworm 全部提供）。
+    container: golang:1.23-bookworm
+    # 容器 job 的默认 shell 是 sh（dash），不支持 set -o pipefail 与 [[ ]]；
+    # 下面的构建脚本全部按 bash 编写，必须显式指定 bash。
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.source }}
+          fetch-depth: 0
+
+      - name: Verify unchanged Go source and script syntax
+        env:
+          OLD_SHA: ${{ matrix.old_sha }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git diff --exit-code "$OLD_SHA" HEAD -- '*.go'
+          bash -n install.sh emby-in-one-cli.sh release-install.sh
+
+      - name: Install cross toolchains
+        run: |
+          apt-get update
+          # libc6-dev-*-cross 必须显式列出：交叉 gcc 元包对它们只是 Recommends，
+          # --no-install-recommends 会跳过。缺了它们，交叉编译回退读到宿主机的
+          # /usr/include/stdlib.h，随后 bits/ 多架构头找不到，runtime/cgo 编译失败。
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            file \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+            gcc-arm-linux-gnueabihf libc6-dev-armhf-cross \
+            gcc-mips-linux-gnu libc6-dev-mips-cross \
+            gcc-mipsel-linux-gnu libc6-dev-mipsel-cross \
+            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+
+      - name: Vet
+        run: go vet ./...
+
+      # 发布与默认 CI 执行普通全量回归；完整 race 仅保留手动可选项。
+      # V1.5.1 本轮按用户决定不运行全量 race，不宣称完整 race 通过。
+      - name: Test
+        run: go test -timeout 45m ./...
+
+      - name: Build static binaries for all supported architectures
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          VERSION="v${TAG#V}"
+          mkdir -p dist
+          # arm 为 armv7 硬浮点（Debian armhf 基线，覆盖树莓派 2 及以上）；
+          # armv6（树莓派一代 / Zero）不在预编译范围内。
+          # netgo + osusergo + -extldflags -static：纯静态、自带 DNS/用户解析，
+          # 不依赖目标机器的 glibc 版本与 NSS 动态库。
+          build() {
+            local goarch="$1" cc="$2" goarm="${3:-}"
+            echo "==> Building linux/${goarch} (GOARM=${goarm:-none}) with CC=${cc}..."
+            # -buildvcs=false: 容器 job 的工作区属主与运行用户不一致，go 的
+            # VCS 戳记调 git 会以 128 拒绝；版本号已由 -X 注入，无需戳记。
+            CGO_ENABLED=1 CC="$cc" GOARM="$goarm" GOOS=linux GOARCH="$goarch" \
+              go build -trimpath -buildvcs=false -tags "netgo osusergo" \
+              -ldflags "-s -w -X main.Version=${VERSION} -extldflags -static" \
+              -o "dist/Emby-In-One-linux-${goarch}-${VERSION}" ./cmd/emby-in-one
+          }
+          build amd64   gcc
+          build arm64   aarch64-linux-gnu-gcc
+          build arm     arm-linux-gnueabihf-gcc 7
+          build mips    mips-linux-gnu-gcc
+          build mipsle  mipsel-linux-gnu-gcc
+          build riscv64 riscv64-linux-gnu-gcc
+
+      - name: Smoke test and verify static linking
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          VERSION="v${TAG#V}"
+          # 容器本身是 linux/amd64，可以直接执行一次 --version 验证产物
+          "./dist/Emby-In-One-linux-amd64-${VERSION}" --version
+          for f in dist/Emby-In-One-linux-*; do
+            if ! file "$f" | grep -q "statically linked"; then
+              echo "::error::${f} 不是静态链接" >&2
+              file "$f" >&2
+              exit 1
+            fi
+          done
+
+      - name: Stage panel and script assets
+        run: |
+          cp public/admin.html public/admin.js dist/
+          cp emby-in-one-cli.sh release-install.sh dist/
+
+      - name: Build Docker source archive
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          VERSION="v${TAG#V}"
+          # 容器 job 的工作区属主与运行用户不一致，git archive 前先声明信任
+          # （go build 的 VCS 戳记就是栽在这个属主差异上，见上一步注释）。
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          # emby-in-one-cli.sh 的 Docker 模式在线更新按此清单解包部署
+          # （cmd / internal / third_party / public / go.mod + Dockerfile 等）。
+          # git archive 只含已提交文件，并按 .gitattributes 统一为 LF 行尾。
+          PATHS=(cmd internal third_party public go.mod Dockerfile .dockerignore docker-compose.yml emby-in-one-cli.sh README.md README_EN.md Update.md LICENSE)
+          if [[ -d docs ]]; then PATHS+=(docs); fi
+          git archive --format=tar.gz --prefix="emby-in-one/" -o "dist/Emby-In-One-docker-${VERSION}.tar.gz" HEAD "${PATHS[@]}"
+
+      - name: Generate .sha256 for every asset
+        run: |
+          set -euo pipefail
+          cd dist
+          # 校验和文件里记录的是裸文件名（sha256sum 的第二列），
+          # 与 release-install.sh verify_sha256 按 URL 末段匹配的解析方式一致。
+          for f in *; do
+            [[ "$f" == *.sha256 ]] && continue
+            sha256sum "$f" > "${f}.sha256"
+          done
+          ls -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: renumber-${{ matrix.tag }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: github.repository == 'Zkunlun/Emby-In-One'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: renumber-V1.4.*
+          path: staging
+      - name: Preserve release history and apply new numbering
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_MAIN: ${{ github.sha }}
+          RENUMBER_MAPPING: '[{"old":"V1.5.0","new":"V1.4.7","parent":"9c22aead2eb701f4fb6d7e5d0df907c4a3eefa59","tree":"bda00d859733d46607f7383b9c0a638aa0059eae","sha":"026079aefe5d7ad47998927c1368debb68d25279","release_id":398487357},{"old":"V1.5.1","new":"V1.4.8","parent":"6e6d3eb42988ce697141ec95578b880219ea9851","tree":"d1c718ce0201b8141cafd77ccc132773e8f70f03","sha":"2bf126a454fd654e2a7d6bbc15c7606de9a88977","release_id":401882256},{"old":"V1.6.0","new":"V1.4.9","parent":"0627ad96c4b04e8cce1ad51fb37f9daf2b8a9251","tree":"924693963cf10c8e9857ba4568cbef38d602da1d","sha":"CURRENT","release_id":404258913}]'
+        run: |
+          mkdir -p staging/renumber-V1.4.7/dist staging/renumber-V1.4.8/dist staging/renumber-V1.4.9/dist
+          for tag in V1.4.7 V1.4.8 V1.4.9; do
+            find "staging/renumber-$tag" -maxdepth 1 -type f -exec mv {} "staging/renumber-$tag/dist/" \;
+          done
+          python3 - <<'PY'
+          import os,json,pathlib,urllib.request,urllib.error,hashlib,subprocess,time
+          repo=os.environ["GITHUB_REPOSITORY"]
+          assert repo=="Zkunlun/Emby-In-One"
+          token=os.environ["GH_TOKEN"]
+          api="https://api.github.com/repos/"+repo
+          mapping=json.loads(os.environ["RENUMBER_MAPPING"])
+          root=pathlib.Path("staging")
+          def req(path,method="GET",data=None,raw=None):
+              url=path if path.startswith("https://") else api+path
+              headers={"Authorization":"Bearer "+token,"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}
+              body=json.dumps(data).encode() if data is not None else raw
+              if data is not None: headers["Content-Type"]="application/json"
+              if raw is not None: headers["Content-Type"]="application/octet-stream"
+              with urllib.request.urlopen(urllib.request.Request(url,data=body,headers=headers,method=method),timeout=180) as r:
+                  b=r.read();return json.loads(b) if b else None
+          def optional(path):
+              try:return req(path)
+              except urllib.error.HTTPError as e:
+                  if e.code==404:return None
+                  raise
+          def resolved(ref):
+              r=optional("/git/ref/"+ref)
+              if not r:return None
+              o=r["object"]
+              while o["type"]=="tag":o=req("/git/tags/"+o["sha"])["object"]
+              assert o["type"]=="commit"
+              return o["sha"]
+          expected_main=os.environ["EXPECTED_MAIN"]
+          assert resolved("heads/main")==expected_main,"main changed before migration"
+          proof=[]
+          for m in mapping:
+              if m["sha"]=="CURRENT":m["sha"]=expected_main
+              d=root/("renumber-"+m["new"])/"dist"
+              assert d.is_dir(),d
+              files=list(d.iterdir())
+              version=m["new"].lower()
+              payloads={"admin.html","admin.js","emby-in-one-cli.sh","release-install.sh","Emby-In-One-docker-"+version+".tar.gz"}
+              payloads|={"Emby-In-One-linux-"+a+"-"+version for a in ("amd64","arm64","arm","mips","mipsle","riscv64")}
+              wanted=payloads|{p+".sha256" for p in payloads}
+              assert {f.name for f in files}==wanted,"asset inventory mismatch"
+              hashes={}
+              for name in payloads:
+                  p=d/name;assert p.stat().st_size>0
+                  digest=hashlib.sha256(p.read_bytes()).hexdigest()
+                  text=(d/(name+".sha256")).read_text().strip().split()
+                  assert text==[digest,name],name
+                  hashes[name]=digest
+              binpath=d/("Emby-In-One-linux-amd64-"+version);binpath.chmod(0o755)
+              assert subprocess.check_output([str(binpath.resolve()),"--version"],text=True).strip()==version
+              old=resolved("tags/"+m["old"])
+              assert old in (m["parent"],None),"old tag moved"
+              new=resolved("tags/"+m["new"])
+              assert new in (None,m["sha"]),"new tag collision"
+              release=req("/releases/"+str(m["release_id"]))
+              assert release["tag_name"] in (m["old"],m["new"]),"release mismatch"
+              assert not release["immutable"]
+              m["dist"]=str(d);m["hashes"]=hashes;m["original"]=release
+          for m in mapping:
+              if not resolved("tags/"+m["new"]):
+                  req("/git/refs","POST",{"ref":"refs/tags/"+m["new"],"sha":m["sha"]})
+              rel=req("/releases/"+str(m["release_id"]))
+              upload=rel["upload_url"].split("{")[0]
+              d=pathlib.Path(m["dist"])
+              # Keep original numbered assets until all replacements have uploaded.
+              for f in sorted(d.iterdir()):
+                  if f.name in ("admin.html","admin.html.sha256","admin.js","admin.js.sha256","emby-in-one-cli.sh","emby-in-one-cli.sh.sha256","release-install.sh","release-install.sh.sha256"):
+                      continue
+                  current=req("/releases/"+str(m["release_id"])+"/assets")
+                  same=next((a for a in current if a["name"]==f.name),None)
+                  if same and same.get("digest")=="sha256:"+hashlib.sha256(f.read_bytes()).hexdigest():continue
+                  if same:req("/releases/assets/"+str(same["id"]),"DELETE")
+                  req(upload+"?name="+urllib.parse.quote(f.name),"POST",raw=f.read_bytes())
+              body=m["original"]["body"]
+              for old,new in (("1.5.0","1.4.7"),("1.5.1","1.4.8"),("1.6.0","1.4.9")):body=body.replace(old,new)
+              # Also rename the versioned validation document link.
+              note="\n\n---\n\n版本编号于2026-10-06统一调整为"+m["new"]+"（原"+m["old"]+"），功能与原发布日期保留；二进制版本信息、Docker源码包、CLI与校验和同步刷新。[编号调整说明](https://github.com/"+repo+"/blob/main/docs/version-numbering.md)。\n"
+              if "版本编号于2026-10-06统一调整" not in body:body+=note
+              req("/releases/"+str(m["release_id"]),"PATCH",{"tag_name":m["new"],"target_commitish":m["sha"],"name":m["new"],"body":body,"make_latest":"true" if m["new"]=="V1.4.9" else "false"})
+              generic=("admin.html","admin.js","emby-in-one-cli.sh","release-install.sh")
+              for name in generic:
+                  for fname in (name,name+".sha256"):
+                      f=d/fname
+                      current=req("/releases/"+str(m["release_id"])+"/assets")
+                      same=next((a for a in current if a["name"]==fname),None)
+                      digest="sha256:"+hashlib.sha256(f.read_bytes()).hexdigest()
+                      if same and same.get("digest")==digest:continue
+                      if same:req("/releases/assets/"+str(same["id"]),"DELETE")
+                      req(upload+"?name="+urllib.parse.quote(fname),"POST",raw=f.read_bytes())
+              wanted={f.name for f in d.iterdir()}
+              for a in req("/releases/"+str(m["release_id"])+"/assets"):
+                  if a["name"] not in wanted:
+                      assert m["old"].lower() in a["name"],"unexpected asset would be removed"
+                      req("/releases/assets/"+str(a["id"]),"DELETE")
+              final=req("/releases/"+str(m["release_id"]))
+              assert final["tag_name"]==final["name"]==m["new"]
+              assert final["published_at"]==m["original"]["published_at"]
+              assert len(final["assets"])==22
+              assert {a["name"] for a in final["assets"]}==wanted
+              for a in final["assets"]:
+                  expected="sha256:"+hashlib.sha256((d/a["name"]).read_bytes()).hexdigest()
+                  assert a.get("digest")==expected,a["name"]
+              if resolved("tags/"+m["old"]):
+                  assert resolved("tags/"+m["old"])==m["parent"]
+                  req("/git/refs/tags/"+m["old"],"DELETE")
+              proof.append({"old":m["old"],"new":m["new"],"source":m["sha"],"release_id":m["release_id"],"published_at":final["published_at"],"assets":22,"payload_sha256":m["hashes"]})
+              print(m["new"]+" release verified: 22 assets; original published_at retained",flush=True)
+          assert req("/releases/latest")["tag_name"]=="V1.4.9"
+          # Remove the superseded release entry branch only at its frozen accepted head.
+          oldbranch=resolved("heads/release/V1.6.0")
+          if oldbranch:
+              assert oldbranch=="0627ad96c4b04e8cce1ad51fb37f9daf2b8a9251"
+              req("/git/refs/heads/release/V1.6.0","DELETE")
+          pathlib.Path("renumber-proof.json").write_text(json.dumps(proof,ensure_ascii=False,indent=2))
+          print("Latest=V1.4.9; historical numbered tags removed; production untouched.")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: renumber-proof
+          path: renumber-proof.json
+          retention-days: 30

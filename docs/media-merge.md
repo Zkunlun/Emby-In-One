@@ -1,6 +1,6 @@
 # 媒体合并规则 / Media merge rules
 
-适用版本：V1.6.0。合并在浏览、搜索、季集列表和详情等请求遇到候选时进行；启动或创建用户不扫描所有上游的全库。
+适用版本：V1.4.9。合并在浏览、搜索、季集列表和详情等请求遇到候选时进行；启动或创建用户不扫描所有上游的全库。
 
 | 对象 | 判定依据 |
 | --- | --- |
@@ -31,7 +31,7 @@
 
 ## English summary
 
-V1.6.0 merges on demand. Movies and series compare valid TMDB, IMDb or TVDB identifiers in the same namespace; any shared-provider conflict blocks a new merge. If no valid identifier can be directly compared, complete name and year are required, with ASCII case folding only. Seasons and episodes require a proven shared parent series and valid matching numbers.
+V1.4.9 merges on demand. Movies and series compare valid TMDB, IMDb or TVDB identifiers in the same namespace; any shared-provider conflict blocks a new merge. If no valid identifier can be directly compared, complete name and year are required, with ASCII case folding only. Seasons and episodes require a proven shared parent series and valid matching numbers.
 
 Runtime never gates identity. All distinct server/item/source locators are retained, including multiple versions from one upstream. Partial responses add rather than prune known members. Old virtual IDs remain aliases when proven groups coalesce. One regular user's merged group shares played state, favorites and the raw resume position.
 

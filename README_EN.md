@@ -1,6 +1,6 @@
 # Emby-In-One
 
-> **Version: V1.6.0**
+> **Version: V1.4.9**
 
 [![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -19,9 +19,9 @@ This repository is actively developed and maintained on top of [ArizeSky/Emby-In
 
 The current repository continues that work with compatibility fixes, stability improvements, feature development, and ongoing releases. Future maintenance, bug fixes, and releases are tracked here.
 
-The current stable release is **V1.6.0**. The active codebase is primarily implemented in Go; the original Node.js V1.2.1 implementation is retained under [`legacy/`](legacy/) for historical reference and is not part of current builds or installations.
+The current stable release is **V1.4.9**. The active codebase is primarily implemented in Go; the original Node.js V1.2.1 implementation is retained under [`legacy/`](legacy/) for historical reference and is not part of current builds or installations.
 
-> **V1.6.0** adds media library counts, improves upstream client identity and watch-state handling, and keeps movie and episode versions together under the revised merge rules. The business source has been deployed and accepted by the user. See the [changelog](Update.md) and [release validation notes](docs/release-v1.6.0-validation.md) for scope and evidence.
+> **V1.4.9** adds media library counts, improves upstream client identity and watch-state handling, and keeps movie and episode versions together under the revised merge rules. The business source has been deployed and accepted by the user. See the [changelog](Update.md) and [release validation notes](docs/release-v1.4.9-validation.md) for scope and evidence.
 
 ## Table of Contents
 
@@ -554,7 +554,7 @@ A version is identified by server, original ItemID and MediaSourceID together. D
 
 Saved relationships do not automatically split when metadata changes. Encountered old version groups can coalesce when their membership is proven; old Virtual IDs remain aliases, with historical evidence and watch rows preserved. One regular user's group members share played state, favorites and the raw resume position. Different identities and users remain isolated. Lists, details and PlaybackInfo aggregate currently authorized, actually returned sources; explicit selection always routes to the selected real version.
 
-Existing query scope, the 5000-candidate cap and the absence of a three-source indirect-conflict audit remain. `ParentId` paths retain upstream raw-item `StartIndex/Limit/TotalRecordCount` paging. Raw counts are not globally deduplicated work totals; this revision does not expand pagination or statistics. See the [media merge rules](docs/media-merge.md) and [release validation notes](docs/release-v1.6.0-validation.md).
+Existing query scope, the 5000-candidate cap and the absence of a three-source indirect-conflict audit remain. `ParentId` paths retain upstream raw-item `StartIndex/Limit/TotalRecordCount` paging. Raw counts are not globally deduplicated work totals; this revision does not expand pagination or statistics. See the [media merge rules](docs/media-merge.md) and [release validation notes](docs/release-v1.4.9-validation.md).
 
 ### ID Virtualization
 
@@ -569,7 +569,7 @@ Each upstream Item ID is mapped globally to a lone virtual ID — 16 random byte
 
 ## Media Library Counts
 
-> V1.6.0 provides this counts endpoint, including the accepted Hills language-parameter compatibility fix.
+> V1.4.9 provides this counts endpoint, including the accepted Hills language-parameter compatibility fix.
 
 Authenticated clients read `GET /Items/Counts`, also available under `/emby/Items/Counts`.
 A successful response contains only three nonnegative integers: `MovieCount`, `SeriesCount`, and `EpisodeCount`.
@@ -610,7 +610,7 @@ Unsupported filters are never silently replaced with whole-library totals. Allow
 Other methods, including OPTIONS, return authenticated 405 with `Allow: GET, HEAD`.
 All counts responses use `Cache-Control: private, no-store`, omit ETag/Last-Modified, and do not return conditional 304.
 Responses expose no upstream credentials, server lists, raw error bodies, or partial totals.
-See the [media library counts API](docs/media-counts.md) and [release validation notes](docs/release-v1.6.0-validation.md).
+See the [media library counts API](docs/media-counts.md) and [release validation notes](docs/release-v1.4.9-validation.md).
 
 ## Health Check
 
