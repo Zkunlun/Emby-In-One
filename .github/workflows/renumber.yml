@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: renumber-1.4-20261006
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -23,10 +23,10 @@ jobs:
         include:
           - tag: V1.4.7
             old_sha: 9c22aead2eb701f4fb6d7e5d0df907c4a3eefa59
-            source: 026079aefe5d7ad47998927c1368debb68d25279
+            source: ae7de4a53be5163cfb2b68638c4c3b8f458d2e1a
           - tag: V1.4.8
             old_sha: 6e6d3eb42988ce697141ec95578b880219ea9851
-            source: 2bf126a454fd654e2a7d6bbc15c7606de9a88977
+            source: 4c3d8aa7a5508ffd86453e1d0465effa12ebab94
           - tag: V1.4.9
             old_sha: 0627ad96c4b04e8cce1ad51fb37f9daf2b8a9251
             source: ${{ github.sha }}
@@ -178,7 +178,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_MAIN: ${{ github.sha }}
-          RENUMBER_MAPPING: '[{"old":"V1.5.0","new":"V1.4.7","parent":"9c22aead2eb701f4fb6d7e5d0df907c4a3eefa59","tree":"bda00d859733d46607f7383b9c0a638aa0059eae","sha":"026079aefe5d7ad47998927c1368debb68d25279","release_id":398487357},{"old":"V1.5.1","new":"V1.4.8","parent":"6e6d3eb42988ce697141ec95578b880219ea9851","tree":"d1c718ce0201b8141cafd77ccc132773e8f70f03","sha":"2bf126a454fd654e2a7d6bbc15c7606de9a88977","release_id":401882256},{"old":"V1.6.0","new":"V1.4.9","parent":"0627ad96c4b04e8cce1ad51fb37f9daf2b8a9251","tree":"924693963cf10c8e9857ba4568cbef38d602da1d","sha":"CURRENT","release_id":404258913}]'
+          RENUMBER_MAPPING: '[{"old":"V1.5.0","new":"V1.4.7","parent":"9c22aead2eb701f4fb6d7e5d0df907c4a3eefa59","tree":"bda00d859733d46607f7383b9c0a638aa0059eae","sha":"ae7de4a53be5163cfb2b68638c4c3b8f458d2e1a","release_id":398487357},{"old":"V1.5.1","new":"V1.4.8","parent":"6e6d3eb42988ce697141ec95578b880219ea9851","tree":"d1c718ce0201b8141cafd77ccc132773e8f70f03","sha":"4c3d8aa7a5508ffd86453e1d0465effa12ebab94","release_id":401882256},{"old":"V1.6.0","new":"V1.4.9","parent":"0627ad96c4b04e8cce1ad51fb37f9daf2b8a9251","tree":"924693963cf10c8e9857ba4568cbef38d602da1d","sha":"CURRENT","release_id":404258913}]'
         run: |
           mkdir -p staging/renumber-V1.4.7/dist staging/renumber-V1.4.8/dist staging/renumber-V1.4.9/dist
           for tag in V1.4.7 V1.4.8 V1.4.9; do
@@ -259,6 +259,7 @@ jobs:
                   req(upload+"?name="+urllib.parse.quote(f.name),"POST",raw=f.read_bytes())
               body=m["original"]["body"]
               for old,new in (("1.5.0","1.4.7"),("1.5.1","1.4.8"),("1.6.0","1.4.9")):body=body.replace(old,new)
+              body=body.replace("V1.4.x 及更早版本","V1.4.6 及更早版本").replace("V1.5 技术债","后续技术债")
               # Also rename the versioned validation document link.
               note="\n\n---\n\n版本编号于2026-10-06统一调整为"+m["new"]+"（原"+m["old"]+"），功能与原发布日期保留；二进制版本信息、Docker源码包、CLI与校验和同步刷新。[编号调整说明](https://github.com/"+repo+"/blob/main/docs/version-numbering.md)。\n"
               if "版本编号于2026-10-06统一调整" not in body:body+=note
