@@ -30,7 +30,7 @@
 
 ### 升级注意事项
 
-- **本版不提供旧 `users` schema 自动迁移**。V1.4.x 及更早版本的普通用户表只保存不可逆密码 hash，无法无损生成本版要求的 `password_secret`。
+- **本版不提供旧 `users` schema 自动迁移**。V1.4.6 及更早版本的普通用户表只保存不可逆密码 hash，无法无损生成本版要求的 `password_secret`。
 - 如果现有 `data/mappings.db` 中已经创建过 EIO 普通用户，**不要直接覆盖二进制后启动**；请先备份数据，并采用干净数据目录升级后重新创建普通用户。全新安装不受影响。
 - 上游服务器配置中的空密码不需要特殊占位符，管理面板直接留空即可。
 
@@ -70,7 +70,7 @@
 ### 兼容性与验证
 
 - 旧单值 `streamingUrl` 配置继续有效，无需迁移；已有多值 `streamingUrls` 的顺序语义保持不变。
-- Redirect 模式 302 URL 携带上游 AccessToken 的既有安全取舍未在本版改变；相关长期改进仍保留在 V1.5 技术债中。
+- Redirect 模式 302 URL 携带上游 AccessToken 的既有安全取舍未在本版改变；相关长期改进仍保留在 后续技术债中。
 - 发布前已完成定向测试以及完整 `internal/backend` 回归，`go vet ./internal/backend`、`go build ./internal/backend`、`git diff --check` 均通过；仓库级 `go vet ./...` 与 `go test -timeout 15m ./...` 继续由正式 Tag 触发的 GitHub Release workflow 作为最终发布门禁。
 - 当前工作区版本已在 Skyline 测试实例启动验证，并升级到 zouter-HK 现网实例；升级后 5/5 上游登录成功、8096 正常监听、管理入口 HTTP 200。
 
