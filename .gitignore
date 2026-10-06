@@ -40,3 +40,8 @@ coverage.out
 
 # ---- Local smoke-test helpers (contain server credentials) ----
 .smoke/
+
+# ---- Local development reports (operational evidence remains private) ----
+/docs/task*.md
+/docs/hills-counts-repair.md
+/docs/github-release-plan-*.md

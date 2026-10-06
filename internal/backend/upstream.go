@@ -54,6 +54,20 @@ var spoofProfiles = map[string]map[string]string{
 		"X-Emby-Device-Name":    "iPhone",
 		"X-Emby-Device-Id":      "infuse-spoof-id",
 	},
+	"hills": {
+		"User-Agent":            "Hills/1.9.1 (android; 16)",
+		"X-Emby-Client":         "Hills",
+		"X-Emby-Client-Version": "1.9.1",
+		"X-Emby-Device-Name":    "fuxi",
+		"X-Emby-Device-Id":      "hills-spoof-id",
+	},
+	"capyplayer": {
+		"User-Agent":            "CapyPlayer/1.1.6",
+		"X-Emby-Client":         "CapyPlayer",
+		"X-Emby-Client-Version": "1.1.6",
+		"X-Emby-Device-Name":    "2211133C",
+		"X-Emby-Device-Id":      "capyplayer-spoof-id",
+	},
 }
 
 const recoveryDebounce = 30 * time.Second
@@ -111,6 +125,10 @@ type UpstreamClient struct {
 	LastError      string
 	Config         UpstreamConfig
 	serverKey      string
+	retired        bool
+	apiObservation uint64 // Protected by mu; statistics API/login ordering fence.
+	apiLoginAttempts uint64 // Protected by mu; overlapping existing login attempts.
+	countsLoginConfig countsLoginBinding // Credentials/config of the authenticated session; memory only.
 	httpClient     *http.Client
 	transport      http.RoundTripper // per-client transport (shared or proxy-specific)
 	logger         *Logger
@@ -118,6 +136,7 @@ type UpstreamClient struct {
 	recoveryMu     sync.Mutex
 	lastRecovery   time.Time
 	onAuthError    func(c *UpstreamClient)
+	onCountsState func() // Lock-free notification after client state locks release.
 	// streamHealth stores explicit per-stream-base liveness. Configured bases start
 	// unknown; a dead base stays dead until a successful request/probe marks it alive.
 	// lastFailure only throttles when a dead base may be probed again.
@@ -130,6 +149,7 @@ type UpstreamPool struct {
 	logger   *Logger
 	identity *ClientIdentityService
 	health   *healthCheckRunner
+	onCountsState func()
 }
 
 func NewUpstreamPool(cfg Config, logger *Logger) *UpstreamPool {
@@ -175,13 +195,14 @@ func (p *UpstreamPool) LoginAll() {
 
 func (p *UpstreamPool) Reload(cfg Config) {
 	p.mu.RLock()
+	countsListener := p.onCountsState
 	oldClients := append([]*UpstreamClient(nil), p.clients...)
 	p.mu.RUnlock()
 
 	oldByKey := make(map[string]*UpstreamClient, len(oldClients))
 	for _, c := range oldClients {
 		if c != nil {
-			oldByKey[c.serverKey] = c
+			oldByKey[StableUpstreamKey(c.Config)+"|"+legacyUpstreamKey(c.Config)] = c
 		}
 	}
 
@@ -189,10 +210,12 @@ func (p *UpstreamPool) Reload(cfg Config) {
 	for i, upstream := range cfg.Upstream {
 		newClient := newUpstreamClient(cfg, upstream, i, p.logger)
 		newClient.onAuthError = p.handleUpstreamAuthError
-		if old, ok := oldByKey[newClient.serverKey]; ok {
+		newClient.onCountsState = countsListener
+		if old, ok := oldByKey[StableUpstreamKey(newClient.Config)+"|"+legacyUpstreamKey(newClient.Config)]; ok {
 			old.mu.RLock()
 			newClient.AccessToken = old.AccessToken
 			newClient.UserID = old.UserID
+			newClient.countsLoginConfig = old.countsLoginConfig
 			newClient.Online = old.Online
 			newClient.LastError = old.LastError
 			// Preserve explicit liveness only for stream bases that still exist in
@@ -213,6 +236,14 @@ func (p *UpstreamPool) Reload(cfg Config) {
 	}
 	p.clients = clients
 	p.mu.Unlock()
+
+	for _, old := range oldClients {
+		if old == nil { continue }
+		old.mu.Lock()
+		old.retired = true
+		old.AccessToken, old.UserID, old.Online = "", "", false
+		old.mu.Unlock()
+	}
 
 	// Every reload builds fresh per-proxy transports, and once its client is replaced
 	// nothing else holds a reference to the old one: its pooled connections stayed open
@@ -237,6 +268,7 @@ func (p *UpstreamPool) Reload(cfg Config) {
 	// their stream lines immediately so a config/settings reload cannot leave
 	// redirect selection on stale liveness data until the next ticker.
 	p.triggerStreamProbe()
+	if countsListener != nil { countsListener() }
 }
 
 func (p *UpstreamPool) handleUpstreamAuthError(c *UpstreamClient) {
@@ -634,10 +666,14 @@ func (p *UpstreamPool) handleCapturedIdentity(token string, headers http.Header)
 }
 
 func (p *UpstreamPool) retryOfflinePassthrough(token string, headers http.Header) {
-	_ = token
 	identity := p.identityService()
 	if identity == nil {
 		return
+	}
+	var reqCtx *RequestContext
+	if identity.captureRequest != nil {
+		reqCtx = identity.captureRequest(token, headers)
+		if reqCtx == nil { return }
 	}
 	p.mu.RLock()
 	clients := append([]*UpstreamClient(nil), p.clients...)
@@ -646,7 +682,8 @@ func (p *UpstreamPool) retryOfflinePassthrough(token string, headers http.Header
 		if client == nil || client.Config.SpoofClient != "passthrough" || client.IsOnline() {
 			continue
 		}
-		client.loginWithHeaders(context.Background(), nil, identity, cloneHeader(headers))
+		if reqCtx != nil && reqCtx.ProxyUser.Role != "admin" && !containsString(reqCtx.ProxyUser.AllowedServers, client.ID) { continue }
+		client.loginWithHeaders(context.Background(), reqCtx, identity, cloneHeader(headers))
 	}
 }
 
@@ -684,6 +721,9 @@ func (c *UpstreamClient) Login(ctx context.Context, reqCtx *RequestContext, iden
 }
 
 func (c *UpstreamClient) loginWithHeaders(ctx context.Context, reqCtx *RequestContext, identity *ClientIdentityService, override http.Header) {
+	if !c.beginAPIStateObservation() { return }
+	defer c.endAPIStateObservation()
+	identityEpoch := identity.captureEpoch()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -699,6 +739,7 @@ func (c *UpstreamClient) loginWithHeaders(ctx context.Context, reqCtx *RequestCo
 			c.logger.Infof("[%s] Authenticating with API key", c.Name)
 		}
 		c.mu.Lock()
+		if c.retired { c.mu.Unlock(); return }
 		c.AccessToken = strings.TrimSpace(c.Config.APIKey)
 		c.mu.Unlock()
 		c.validateAPIKey(ctx, reqCtx, identity)
@@ -769,7 +810,7 @@ func (c *UpstreamClient) loginWithHeaders(ctx context.Context, reqCtx *RequestCo
 		c.logger.Infof("[%s] Login success, userId=%s", c.Name, userID)
 	}
 	c.setOnline(accessToken, userID)
-	c.recordSuccessfulIdentity(identity, resolvedSource, headers)
+	c.recordSuccessfulIdentity(identity, resolvedSource, headers, identityEpoch, reqCtx)
 }
 
 // validateAPIKey confirms an API key by reading the upstream user object. Only
@@ -815,17 +856,24 @@ func (c *UpstreamClient) validateAPIKey(ctx context.Context, reqCtx *RequestCont
 }
 
 func (c *UpstreamClient) setOnline(token, userID string) {
+	defer c.notifyCountsState()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.retired { return }
+	c.apiObservation++
 	c.AccessToken = token
 	c.UserID = userID
 	c.Online = true
+	c.countsLoginConfig = c.configuredCountsLoginBinding()
 	c.LastError = ""
 }
 
 func (c *UpstreamClient) setOffline(message string) {
+	defer c.notifyCountsState()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.retired { return }
+	c.apiObservation++
 	c.Online = false
 	c.LastError = message
 }
@@ -956,6 +1004,7 @@ func (c *UpstreamClient) doRequest(ctx context.Context, reqCtx *RequestContext, 
 // classified as stream-unavailable are retried against the next base. Other HTTP
 // responses stop the attempts because the configured route answered.
 func (c *UpstreamClient) doRequestForMode(ctx context.Context, reqCtx *RequestContext, method, path string, params url.Values, body any, headers http.Header, stream bool, mode outboundAuthMode) (*http.Response, error) {
+	if c.isRetired() { return nil, fmt.Errorf("upstream client is no longer configured") }
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1008,7 +1057,13 @@ func (c *UpstreamClient) doRequestForMode(ctx context.Context, reqCtx *RequestCo
 // body of the pre-fallback doRequestForMode; every identity rule it applies is
 // unchanged.
 func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestContext, method, path string, params url.Values, body any, headers http.Header, stream bool, mode outboundAuthMode, base string) (*http.Response, error) {
+	if c.isRetired() { return nil, errNoUsableStreamBase }
 	auth := c.authSnapshot()
+	if frozen, controlled, err := countsAuthForRequest(ctx, c); controlled {
+		if err != nil { return nil, err }
+		auth = frozen
+	}
+	clientIdentity, spoofIdentity := c.configuredOutboundIdentity()
 	policy := resolveOutboundPolicy(path, method, stream, mode, base)
 
 	fullURL, err := url.Parse(base + path)
@@ -1025,13 +1080,24 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 
 	preparedURL, err := prepareOutboundURLWithReport(fullURL, reqCtx, auth, policy)
 	if err != nil {
-		c.scheduleRecoveryForPreparationError(err)
+		if !isCountsRequestContext(ctx) { c.scheduleRecoveryForPreparationError(err) }
 		return nil, err
+	}
+
+	// Only actual EIO-to-upstream requests normalize client Query identity.
+	// BuildURL/redirect Location preparation deliberately stays unchanged.
+	if spoofIdentity {
+		businessPath := strings.TrimPrefix(preparedURL.url.Path, urlPathPrefix(base))
+		preparedQuery, identityChanged := clientIdentity.applyQuery(preparedURL.url.Query(), businessPath, method, stream)
+		preparedURL.url.RawQuery = preparedQuery.Encode()
+		if identityChanged {
+			preparedURL.changed = append(preparedURL.changed, carrierQuery)
+		}
 	}
 
 	preparedBody, bodyOutcome, err := prepareOutboundBodyWithReport(body, reqCtx, auth, policy)
 	if err != nil {
-		c.scheduleRecoveryForPreparationError(err)
+		if !isCountsRequestContext(ctx) { c.scheduleRecoveryForPreparationError(err) }
 		return nil, err
 	}
 
@@ -1061,6 +1127,15 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 	if err != nil {
 		return nil, err
 	}
+	// Protect the configured identity after every caller/extra-header merge.
+	// Passthrough keeps its existing real-identity and credential preparation.
+	if spoofIdentity {
+		if headers == nil {
+			headers = clientIdentity.headers()
+		} else {
+			headers = clientIdentity.applyHeaders(headers)
+		}
+	}
 	var requestHeaders http.Header
 	if headers != nil {
 		requestHeaders = prepareOutboundHeaders(headers, reqCtx, auth, mode)
@@ -1087,7 +1162,7 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 	// Lifecycle diagnostics retain only the fixed route, never the upstream
 	// host, URL, query, or raw transport cause. Handler-level redaction alone
 	// cannot protect messages emitted here before the error is classified.
-	sessionLifecycle := isSessionLifecyclePath(path)
+	sessionLifecycle := isSessionLifecyclePath(path) || isCountsRequestContext(ctx)
 	logTarget := path
 	if !sessionLifecycle {
 		logTarget = formatOutboundURLForLog(preparedURL.url.String())
@@ -1112,6 +1187,7 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 	// This is a reverse proxy forwarding client requests to admin-configured upstream Emby
 	// servers. The base URL (c.BaseURL/c.StreamBaseURL) is set by the administrator.
 	// User-controlled path segments are inherent to proxy functionality.
+	recordCountsTransportAttempt(ctx)
 	resp, doErr := client.Do(request) // CodeQL: intentional proxy forwarding to admin-configured upstream
 	if doErr != nil {
 		if stream && !errors.Is(doErr, context.Canceled) && !errors.Is(doErr, context.DeadlineExceeded) {
@@ -1143,7 +1219,7 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 		c.logger.Debugf("[%s] <- %s %s %d", c.Name, method, logTarget, resp.StatusCode)
 	}
 	if (resp.StatusCode == 401 || resp.StatusCode == 403) &&
-		!isUpstreamLoginPath(path) && c.onAuthError != nil {
+		!isUpstreamLoginPath(path) && !isCountsRequestContext(ctx) && c.onAuthError != nil {
 		go c.onAuthError(c)
 	}
 	return resp, nil
@@ -1171,7 +1247,6 @@ func (c *UpstreamClient) identityHeaders(reqCtx *RequestContext, identity *Clien
 }
 
 func (c *UpstreamClient) resolveIdentityHeaders(reqCtx *RequestContext, identity *ClientIdentityService, override http.Header) (string, http.Header) {
-	headers := http.Header{}
 	if c.Config.SpoofClient == "passthrough" {
 		if hasPassthroughIdentity(override) {
 			return "override", mergePassthroughHeaders(override)
@@ -1188,24 +1263,8 @@ func (c *UpstreamClient) resolveIdentityHeaders(reqCtx *RequestContext, identity
 		}
 		return "infuse-fallback", mergePassthroughHeaders(http.Header{})
 	}
-	profile := embyClientHeaders
-	if spoofed, ok := spoofProfiles[c.Config.SpoofClient]; ok {
-		profile = spoofed
-	} else if c.Config.SpoofClient == "custom" {
-		profile = map[string]string{
-			"User-Agent":            c.Config.CustomUserAgent,
-			"X-Emby-Client":         c.Config.CustomClient,
-			"X-Emby-Client-Version": c.Config.CustomClientVersion,
-			"X-Emby-Device-Name":    c.Config.CustomDeviceName,
-			"X-Emby-Device-Id":      c.Config.CustomDeviceId,
-		}
-	}
-	for key, value := range profile {
-		if value != "" {
-			headers.Set(key, value)
-		}
-	}
-	return c.Config.SpoofClient, headers
+	profile, _ := c.configuredOutboundIdentity()
+	return c.Config.SpoofClient, profile.headers()
 }
 
 // requestHeaders builds the caller-side header set for one request from the same
@@ -1249,16 +1308,16 @@ func (c *UpstreamClient) passthroughRequestHeaders(reqCtx *RequestContext, ident
 	return headers
 }
 
-func (c *UpstreamClient) recordSuccessfulIdentity(identity *ClientIdentityService, source string, headers http.Header) {
+func (c *UpstreamClient) recordSuccessfulIdentity(identity *ClientIdentityService, source string, headers http.Header, epoch uint64, reqCtx *RequestContext) {
 	if identity == nil || c.Config.SpoofClient != "passthrough" || !hasPassthroughIdentity(headers) {
 		return
 	}
 	if source == "infuse-fallback" {
 		return
 	}
-	identity.SaveLastSuccess(c.serverKey, headers)
-	switch source {
-	case "live-request", "captured-token", "captured-latest", "override":
-		identity.SaveLatestCapturedHeaders(headers)
-	}
+	if c.isRetired() { return }
+	owner := ""
+	if reqCtx != nil && reqCtx.ProxyUser != nil { owner = reqCtx.ProxyUser.UserID }
+	promote := source == "live-request" || source == "captured-token" || source == "captured-latest" || source == "override"
+	identity.saveSuccessfulIdentity(c.serverKey, headers, promote, epoch, owner)
 }

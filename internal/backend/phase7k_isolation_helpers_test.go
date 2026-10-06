@@ -127,6 +127,7 @@ func phase7KWithFixture(t *testing.T, fn func(*phase7KFixture)) {
 				}); err != nil {
 					t.Fatalf("seed progress: %v", err)
 				}
+				seedPhase5WatchOwner(t, app, user.Info.UserID, f.Items[serverIndex], serverID, phase7KItemID, phase7KDeviceID, phase7KSessionID, "shared-media", 1000)
 				lease := app.PlaybackLimiter.Reserve(user.Info.UserID, serverID, phase7KDeviceID, f.Items[serverIndex], phase7KSessionID)
 				if !lease.Allowed || !lease.Created {
 					t.Fatalf("seed lease user=%d server=%s result=%+v", userIndex, serverID, lease)
@@ -135,6 +136,7 @@ func phase7KWithFixture(t *testing.T, fn func(*phase7KFixture)) {
 				owner := "token:" + user.Token
 				app.playbackRoutes.Activate(owner, f.Items[serverIndex], serverID, phase7KSessionID, f.Sessions[serverIndex])
 				app.playbackRoutes.RememberMediaSource(owner, f.Media[serverIndex], serverID, phase7KSessionID, f.Sessions[serverIndex])
+				app.playbackRoutes.RememberMediaSourceItem(owner, f.Media[serverIndex], f.Items[serverIndex], serverID)
 			}
 		}
 		if f.Items[0] == f.Items[1] || f.Sessions[0] == f.Sessions[1] {

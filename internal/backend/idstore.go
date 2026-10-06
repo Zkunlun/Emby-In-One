@@ -18,6 +18,7 @@ type ResolvedID struct {
 	OriginalID     string
 	ServerID       string
 	OtherInstances []AdditionalInstance
+	MediaItemID    string // nonempty only for item-qualified media-source routing handles
 }
 
 type IDStoreStats struct {
@@ -55,6 +56,9 @@ type IDStore struct {
 	originalToVirtual   map[string]string
 	originalIDToVirtual map[string][]string          // originalID → virtual IDs known for it
 	activeStreamServer  map[string]activeStreamEntry // virtualItemID → last-chosen server
+	configuredSources   map[string]bool              // nil for standalone/internal stores; production is explicit.
+	mergeState          mergeStoreState
+	closed              bool
 }
 
 func NewIDStore(dataDir string, logger *Logger, upstreamIDs ...string) (*IDStore, error) {
@@ -71,6 +75,7 @@ func NewIDStore(dataDir string, logger *Logger, upstreamIDs ...string) (*IDStore
 		originalToVirtual:   map[string]string{},
 		originalIDToVirtual: map[string][]string{},
 		activeStreamServer:  map[string]activeStreamEntry{},
+		mergeState:          emptyMergeStoreState(),
 	}
 
 	dbPath := filepath.Join(dataDir, "mappings.db")
@@ -109,6 +114,10 @@ func NewIDStore(dataDir string, logger *Logger, upstreamIDs ...string) (*IDStore
 	}
 	store.db = db
 	store.persistent = true
+	if err := store.initMergeSchema(); err != nil {
+		_ = closeSQLite(db)
+		return nil, fmt.Errorf("merge schema: %w", err)
+	}
 	// The database holds user password hashes and per-user watch history, and sqlite
 	// creates its files with the process umask. WAL mode adds -wal/-shm siblings.
 	chmodPrivate(dbPath, dbPath+"-wal", dbPath+"-shm")
@@ -180,6 +189,9 @@ func (s *IDStore) load() error {
 			s.originalToVirtual[compositeKey(originalID, serverID)] = virtualID
 		}
 	}
+	if err := s.loadMergeGroupsLocked(); err != nil {
+		return err
+	}
 	s.rebuildIndexesLocked()
 	return nil
 }
@@ -187,7 +199,11 @@ func (s *IDStore) load() error {
 func (s *IDStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return closeSQLite(s.db)
+	err := closeSQLite(s.db)
+	if err == nil {
+		s.closed = true
+	}
+	return err
 }
 
 func compositeKey(originalID, serverID string) string {
@@ -200,9 +216,22 @@ func (s *IDStore) GetOrCreateVirtualID(originalID, serverID string) string {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.configuredSources != nil && !s.configuredSources[serverID] {
+		return ""
+	}
 	key := compositeKey(originalID, serverID)
 	if existing, ok := s.originalToVirtual[key]; ok {
 		return existing
+	}
+	// A raw item may span multiple exact version identities. Do not manufacture
+	// an unqualified mapping that bypasses their explicit member lookup.
+	if groups := s.mergeState.Items[mergeItemKey{serverID, originalID}]; len(groups) != 0 {
+		if len(groups) == 1 {
+			for id := range groups {
+				return id
+			}
+		}
+		return ""
 	}
 	virtualID := randomHex(16)
 	s.virtualToOriginal[virtualID] = &idEntry{OriginalID: originalID, ServerID: serverID, OtherInstances: []AdditionalInstance{}}
@@ -227,10 +256,16 @@ func (s *IDStore) AssociateAdditionalInstance(virtualID, originalID, serverID st
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.configuredSources != nil && !s.configuredSources[serverID] {
+		return
+	}
 	entry, ok := s.virtualToOriginal[virtualID]
 	if !ok {
 		return
 	}
+	if s.storedMergeGroupLocked(virtualID) != nil {
+		return
+	} // precise groups require the transactional version API.
 	if entry.OriginalID == originalID && entry.ServerID == serverID {
 		return
 	}
@@ -288,11 +323,12 @@ func (s *IDStore) ResolveVirtualID(virtualID string) *ResolvedID {
 	if !ok {
 		return nil
 	}
-	return &ResolvedID{
-		OriginalID:     entry.OriginalID,
-		ServerID:       entry.ServerID,
-		OtherInstances: append([]AdditionalInstance(nil), entry.OtherInstances...),
+	result := &ResolvedID{OriginalID: entry.OriginalID, ServerID: entry.ServerID, OtherInstances: append([]AdditionalInstance(nil), entry.OtherInstances...)}
+	if item, source, ok := decodeMergeSourceRoute(entry.OriginalID); ok {
+		result.OriginalID = source
+		result.MediaItemID = item
 	}
+	return result
 }
 
 // ResolveByOriginalID finds a ResolvedID by original upstream ID.
@@ -316,6 +352,39 @@ func (s *IDStore) ResolveByOriginalID(originalID string) *ResolvedID {
 		}
 	}
 	return nil
+}
+
+// ResolveOriginalIDForServer resolves only an explicitly qualified raw ID.
+// Rebase the returned locator to that exact source; never choose the oldest
+// same-text ID from a different upstream namespace.
+func (s *IDStore) ResolveOriginalIDForServer(originalID, serverID string) (string, *ResolvedID, bool) {
+	if originalID == "" || serverID == "" {
+		return "", nil, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	virtualID, ok := s.originalToVirtual[compositeKey(originalID, serverID)]
+	if !ok {
+		return "", nil, false
+	}
+	entry := s.virtualToOriginal[virtualID]
+	if entry == nil {
+		return "", nil, false
+	}
+	instances := append([]AdditionalInstance{{OriginalID: entry.OriginalID, ServerID: entry.ServerID}}, entry.OtherInstances...)
+	found := false
+	remaining := make([]AdditionalInstance, 0, len(instances))
+	for _, instance := range instances {
+		if instance.ServerID == serverID && instance.OriginalID == originalID {
+			found = true
+		} else {
+			remaining = append(remaining, instance)
+		}
+	}
+	if !found {
+		return "", nil, false
+	}
+	return virtualID, &ResolvedID{OriginalID: originalID, ServerID: serverID, OtherInstances: remaining}, true
 }
 
 func containsString(values []string, candidate string) bool {
@@ -360,6 +429,7 @@ func (s *IDStore) RemoveByServerIDPreservingInstances(serverID string) (ServerRe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	mergeRemoval := s.planMergeSourceRemovalLocked(serverID, nil)
 	type promotionPlan struct {
 		primary AdditionalInstance
 		others  []AdditionalInstance
@@ -411,7 +481,10 @@ func (s *IDStore) RemoveByServerIDPreservingInstances(serverID string) (ServerRe
 			}
 			// Surviving primaries only need the deleted server removed from their
 			// additional-instance list.
-			return s.db.execParams(`DELETE FROM id_additional_instances WHERE server_id = ?`, serverID)
+			if err := s.db.execParams(`DELETE FROM id_additional_instances WHERE server_id = ?`, serverID); err != nil {
+				return err
+			}
+			return s.writeMergeRemovalSQL(mergeRemoval)
 		}); err != nil {
 			return ServerRemovalResult{}, err
 		}
@@ -419,6 +492,9 @@ func (s *IDStore) RemoveByServerIDPreservingInstances(serverID string) (ServerRe
 
 	for virtualID, entry := range s.virtualToOriginal {
 		if plan, ok := promotions[virtualID]; ok {
+			if active, exists := s.activeStreamServer[virtualID]; exists && active.ServerID == serverID {
+				delete(s.activeStreamServer, virtualID)
+			}
 			entry.OriginalID = plan.primary.OriginalID
 			entry.ServerID = plan.primary.ServerID
 			entry.OtherInstances = append([]AdditionalInstance(nil), plan.others...)
@@ -440,6 +516,7 @@ func (s *IDStore) RemoveByServerIDPreservingInstances(serverID string) (ServerRe
 			delete(s.activeStreamServer, virtualID)
 		}
 	}
+	s.publishMergeRemovalLocked(mergeRemoval)
 	s.rebuildIndexesLocked()
 	return result, nil
 }
@@ -449,6 +526,17 @@ func (s *IDStore) rebuildIndexesLocked() {
 	rebuilt := make(map[string]string, len(s.originalToVirtual))
 	byOriginal := make(map[string][]string, len(s.originalIDToVirtual))
 	for virtualID, entry := range s.virtualToOriginal {
+		if group := s.storedMergeGroupLocked(virtualID); group != nil {
+			if virtualID == group.VirtualID {
+				for _, item := range group.LegacyItems {
+					rebuilt[compositeKey(item.OriginalID, item.ServerID)] = virtualID
+					if !containsString(byOriginal[item.OriginalID], virtualID) {
+						byOriginal[item.OriginalID] = append(byOriginal[item.OriginalID], virtualID)
+					}
+				}
+			}
+			continue
+		}
 		rebuilt[compositeKey(entry.OriginalID, entry.ServerID)] = virtualID
 		byOriginal[entry.OriginalID] = append(byOriginal[entry.OriginalID], virtualID)
 		for _, other := range entry.OtherInstances {
@@ -476,6 +564,9 @@ func randomHex(byteLen int) string {
 func (s *IDStore) SetActiveStream(virtualItemID string, serverID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.configuredSources != nil && !s.configuredSources[serverID] {
+		return
+	}
 	s.activeStreamServer[virtualItemID] = activeStreamEntry{ServerID: serverID, CreatedAt: time.Now()}
 }
 

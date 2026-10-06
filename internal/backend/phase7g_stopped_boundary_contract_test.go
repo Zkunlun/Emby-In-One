@@ -76,8 +76,8 @@ func TestPhase7GStoppedUnavailableCannotReleaseWrongOwnerOrOldSession(t *testing
 					t.Fatalf("Stopped status=%d want=204 body=%s", rr.Code, rr.Body.String())
 				}
 				progress := app.WatchStore.GetProgress(info.UserID, itemID)
-				if progress == nil || progress.PositionTicks != 700 {
-					t.Fatalf("Stopped did not preserve local final progress: %#v", progress)
+				if progress == nil || progress.PositionTicks != 111 {
+					t.Fatalf("non-matching Stopped changed current shared progress: %#v", progress)
 				}
 				if got := app.PlaybackLimiter.CountForServer("server-a"); got != 1 {
 					t.Fatalf("non-matching Stopped released current lease: count=%d want=1", got)

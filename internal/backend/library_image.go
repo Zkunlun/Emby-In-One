@@ -16,6 +16,7 @@ type indexedItem struct {
 }
 
 func (a *App) registerLibraryAndImageRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /Items/Counts", a.withCountsContext(a.requireCountsAuth(a.handleItemsCounts)))
 	mux.HandleFunc("GET /Library/VirtualFolders", a.withContext(a.requireAuth(a.handleLibraryVirtualFolders)))
 	mux.HandleFunc("GET /Library/SelectableRemoteLibraries", a.withContext(a.requireAuth(a.handleLibrarySelectableRemoteLibraries)))
 	mux.HandleFunc("GET /Library/MediaFolders", a.withContext(a.requireAuth(a.handleLibraryMediaFolders)))
@@ -120,201 +121,105 @@ func (a *App) handleLibraryTaxonomy(w http.ResponseWriter, r *http.Request, endp
 	writeJSON(w, http.StatusOK, map[string]any{"Items": toAnySlice(results), "TotalRecordCount": len(results), "StartIndex": 0})
 }
 func (a *App) handleShowsSeasons(w http.ResponseWriter, r *http.Request) {
-	resolved := a.resolveRouteID(r.PathValue("seriesId"))
-	if resolved == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"Items": []any{}, "TotalRecordCount": 0, "StartIndex": 0})
-		return
-	}
-	if !a.requireServerAccess(w, r, resolved) {
-		return
-	}
-	instances := a.collectAllowedInstances(requestContextFrom(r.Context()), resolved)
-	cfg := a.ConfigStore.Snapshot()
-	merged := map[int]*indexedItem{}
-	unknown := []indexedItem{}
-	for _, inst := range instances {
-		query := cloneValues(r.URL.Query())
-		query.Set("UserId", inst.Client.clientUserID())
-		payload, err := inst.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Shows/"+inst.OriginalID+"/Seasons", query, nil)
-		if err != nil {
-			continue
-		}
-		for _, item := range asItems(payload) {
-			season := deepCloneMap(item)
-			idx, ok := numericInt(season["IndexNumber"])
-			if !ok {
-				originalID, _ := season["Id"].(string)
-				season["_originalId"] = originalID
-				if originalID != "" {
-					season["Id"] = a.IDStore.GetOrCreateVirtualID(originalID, inst.ServerID)
-				}
-				unknown = append(unknown, indexedItem{Item: season, ServerID: inst.ServerID})
-				continue
-			}
-			if existing, found := merged[idx]; found {
-				virtualID, _ := existing.Item["Id"].(string)
-				if virtualID == "" {
-					if originalID, _ := existing.Item["_originalId"].(string); originalID != "" {
-						virtualID = a.IDStore.GetOrCreateVirtualID(originalID, existing.ServerID)
-					}
-				}
-				if originalID, _ := season["Id"].(string); virtualID != "" && originalID != "" {
-					a.IDStore.AssociateAdditionalInstance(virtualID, originalID, inst.ServerID)
-				}
-				// Check if candidate has better metadata; if so, replace
-				if isBetterMetadata(existing.Item, existing.ServerID, season, inst.ServerID, cfg) {
-					season["_originalId"], _ = season["Id"].(string)
-					season["Id"] = virtualID
-					existing.Item = season
-					existing.ServerID = inst.ServerID
-				}
-				continue
-			}
-			originalID, _ := season["Id"].(string)
-			season["_originalId"] = originalID
-			season["Id"] = a.IDStore.GetOrCreateVirtualID(originalID, inst.ServerID)
-			merged[idx] = &indexedItem{Item: season, ServerID: inst.ServerID, SortA: idx}
-		}
-	}
-	keys := make([]int, 0, len(merged))
-	for idx := range merged {
-		keys = append(keys, idx)
-	}
-	sort.Ints(keys)
-	items := make([]map[string]any, 0, len(keys)+len(unknown))
-	for _, idx := range keys {
-		item := merged[idx].Item
-		preservedID, _ := item["Id"].(string)
-		delete(item, "_originalId")
-		delete(item, "Id")
-		rewriteResponseIDs(item, merged[idx].ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
-		item["Id"] = preservedID
-		items = append(items, item)
-	}
-	for _, entry := range unknown {
-		preservedID, _ := entry.Item["Id"].(string)
-		delete(entry.Item, "_originalId")
-		delete(entry.Item, "Id")
-		rewriteResponseIDs(entry.Item, entry.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
-		entry.Item["Id"] = preservedID
-		items = append(items, entry.Item)
-	}
-	// Seasons and episodes carry per-user UserData: for a regular user the local
-	// record wins over the shared upstream account's state.
-	a.overlayLocalUserDataItems(r, items)
-	writeJSON(w, http.StatusOK, map[string]any{"Items": toAnySlice(items), "TotalRecordCount": len(items), "StartIndex": 0})
+	a.handleMergeShows(w, r, "Season", "Seasons")
+}
+func (a *App) handleShowsEpisodes(w http.ResponseWriter, r *http.Request) {
+	a.handleMergeShows(w, r, "Episode", "Episodes")
 }
 
-func (a *App) handleShowsEpisodes(w http.ResponseWriter, r *http.Request) {
-	resolved := a.resolveRouteID(r.PathValue("seriesId"))
+func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, endpoint string) {
+	resolved, ok := a.resolveRequestRouteID(w, r, r.PathValue("seriesId"))
+	if !ok {
+		return
+	}
+	empty := map[string]any{"Items": []any{}, "TotalRecordCount": 0, "StartIndex": 0}
 	if resolved == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"Items": []any{}, "TotalRecordCount": 0, "StartIndex": 0})
+		writeJSON(w, http.StatusOK, empty)
 		return
 	}
 	if !a.requireServerAccess(w, r, resolved) {
 		return
 	}
-	instances := a.collectAllowedInstances(requestContextFrom(r.Context()), resolved)
-	cfg := a.ConfigStore.Snapshot()
-	merged := map[string]*indexedItem{}
-	var unkeyed []indexedItem
-	for _, inst := range instances {
-		query := cloneValues(r.URL.Query())
-		query.Set("UserId", inst.Client.clientUserID())
-		if seasonID := firstQueryValue(query, "SeasonId", "seasonId", "seasonid"); seasonID != "" {
-			if resolvedSeason := a.IDStore.ResolveVirtualID(seasonID); resolvedSeason != nil {
-				mapped := ""
-				if resolvedSeason.ServerID == inst.ServerID {
-					mapped = resolvedSeason.OriginalID
-				} else {
-					for _, other := range resolvedSeason.OtherInstances {
-						if other.ServerID == inst.ServerID {
-							mapped = other.OriginalID
-							break
-						}
-					}
-				}
-				if mapped != "" {
-					query.Del("seasonId")
-					query.Del("seasonid")
-					query.Set("SeasonId", mapped)
-				} else {
-					continue
-				}
-			}
+	reqCtx := requestContextFrom(r.Context())
+	queryTemplate := cloneValues(r.URL.Query())
+	filter, localFilter := a.prepareLocalUserFilter(w, r, queryTemplate)
+	if !localFilter {
+		requestMergedCandidateSet(queryTemplate)
+	}
+	full := requestMergeFields(queryTemplate)
+	seasonID := firstQueryValue(queryTemplate, "SeasonId", "seasonId", "seasonid")
+	if seasonID != "" {
+		season, valid := a.resolveRequestRouteID(w, r, seasonID)
+		if !valid {
+			return
 		}
-		payload, err := inst.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Shows/"+inst.OriginalID+"/Episodes", query, nil)
-		if err != nil {
+		if season == nil {
+			writeJSON(w, http.StatusOK, empty)
+			return
+		}
+	}
+	var results []upstreamItemsResult
+	for _, inst := range a.collectAllowedInstances(reqCtx, resolved) {
+		if !a.isServerAllowed(reqCtx, inst.ServerID) {
 			continue
 		}
-		for _, item := range asItems(payload) {
-			episode := deepCloneMap(item)
-			seasonNum, okSeason := numericInt(episode["ParentIndexNumber"])
-			episodeNum, okEpisode := numericInt(episode["IndexNumber"])
-			if !okSeason || !okEpisode {
-				originalID, _ := episode["Id"].(string)
-				episode["_originalId"] = originalID
-				episode["Id"] = a.IDStore.GetOrCreateVirtualID(originalID, inst.ServerID)
-				unkeyed = append(unkeyed, indexedItem{Item: episode, ServerID: inst.ServerID})
+		query := cloneValues(queryTemplate)
+		query.Set("UserId", inst.Client.clientUserID())
+		if seasonID != "" {
+			raw := resolvedOriginalIDForServer(a.IDStore.ResolveVirtualID(seasonID), inst.ServerID)
+			if raw == "" {
 				continue
 			}
-			key := strconv.Itoa(seasonNum) + ":" + strconv.Itoa(episodeNum)
-			if existing, found := merged[key]; found {
-				virtualID, _ := existing.Item["Id"].(string)
-				if virtualID == "" {
-					if originalID, _ := existing.Item["_originalId"].(string); originalID != "" {
-						virtualID = a.IDStore.GetOrCreateVirtualID(originalID, existing.ServerID)
-					}
-				}
-				if originalID, _ := episode["Id"].(string); virtualID != "" && originalID != "" {
-					a.IDStore.AssociateAdditionalInstance(virtualID, originalID, inst.ServerID)
-				}
-				// Check if candidate has better metadata; if so, replace
-				if isBetterMetadata(existing.Item, existing.ServerID, episode, inst.ServerID, cfg) {
-					episode["_originalId"], _ = episode["Id"].(string)
-					episode["Id"] = virtualID
-					existing.Item = episode
-					existing.ServerID = inst.ServerID
-				}
-				continue
+			query.Del("seasonId")
+			query.Del("seasonid")
+			query.Set("SeasonId", raw)
+		}
+		payload, err := inst.Client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Shows/"+inst.OriginalID+"/"+endpoint, query, nil)
+		if err != nil || !a.isServerAllowed(reqCtx, inst.ServerID) {
+			continue
+		}
+		if err := a.observeLegacyShowsParent(reqCtx, inst.ServerID, inst.OriginalID); err != nil {
+			a.logMergeHTTPError(err)
+			continue
+		}
+		items := asItems(payload)
+		for _, item := range items {
+			if _, exists := item["Type"]; !exists {
+				item["Type"] = kind
 			}
-			originalID, _ := episode["Id"].(string)
-			episode["_originalId"] = originalID
-			episode["Id"] = a.IDStore.GetOrCreateVirtualID(originalID, inst.ServerID)
-			merged[key] = &indexedItem{Item: episode, ServerID: inst.ServerID, SortA: seasonNum, SortB: episodeNum}
+			if _, exists := item["SeriesId"]; !exists {
+				item["SeriesId"] = inst.OriginalID
+			}
 		}
+		results = append(results, upstreamItemsResult{ServerID: inst.ServerID, Items: items, FullSources: full, RequestScope: reqCtx})
 	}
-	entries := make([]indexedItem, 0, len(merged))
-	for _, entry := range merged {
-		entries = append(entries, *entry)
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].SortA != entries[j].SortA {
-			return entries[i].SortA < entries[j].SortA
+	results = a.hydrateMergeResults(r, results)
+	items := a.mergeRoundRobinItems(results, a.clientFacingUserIDFor(r), reqCtx)
+	sort.SliceStable(items, func(i, j int) bool {
+		left, right := newMergeCandidate("", items[i], nil, false), newMergeCandidate("", items[j], nil, false)
+		if left.Season.valid() != right.Season.valid() {
+			return left.Season.valid()
 		}
-		return entries[i].SortB < entries[j].SortB
+		if left.Season.Ticks != right.Season.Ticks {
+			return left.Season.Ticks < right.Season.Ticks
+		}
+		if kind == "Episode" {
+			if left.Episode.valid() != right.Episode.valid() {
+				return left.Episode.valid()
+			}
+			return left.Episode.Ticks < right.Episode.Ticks
+		}
+		return false
 	})
-	items := make([]map[string]any, 0, len(entries)+len(unkeyed))
-	for _, entry := range entries {
-		preservedID, _ := entry.Item["Id"].(string)
-		delete(entry.Item, "_originalId")
-		delete(entry.Item, "Id")
-		rewriteResponseIDs(entry.Item, entry.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
-		entry.Item["Id"] = preservedID
-		items = append(items, entry.Item)
+	if localFilter {
+		var recency map[string]int64
+		items, recency = a.filterItemsByLocalUserState(r, items, filter)
+		if r.URL.Query().Get("SortBy") != "" {
+			localItemSort(items, r.URL.Query(), recency)
+		}
 	}
-	for _, entry := range unkeyed {
-		preservedID, _ := entry.Item["Id"].(string)
-		delete(entry.Item, "_originalId")
-		delete(entry.Item, "Id")
-		rewriteResponseIDs(entry.Item, entry.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
-		entry.Item["Id"] = preservedID
-		items = append(items, entry.Item)
-	}
-	// Seasons and episodes carry per-user UserData: for a regular user the local
-	// record wins over the shared upstream account's state.
 	a.overlayLocalUserDataItems(r, items)
-	writeJSON(w, http.StatusOK, map[string]any{"Items": toAnySlice(items), "TotalRecordCount": len(items), "StartIndex": 0})
+	writeJSON(w, http.StatusOK, paginateItems(items, r.URL.Query()))
 }
 
 func (a *App) handleSearchHints(w http.ResponseWriter, r *http.Request) {
@@ -325,6 +230,7 @@ func (a *App) handleSearchHints(w http.ResponseWriter, r *http.Request) {
 	perClient := fanOutClients(clients, func(c *UpstreamClient) *upstreamItemsResult {
 		query := cloneValues(r.URL.Query())
 		query.Set("UserId", c.clientUserID())
+		fullSources := requestMergeFields(query)
 		payload, err := c.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Search/Hints", query, nil)
 		if err != nil {
 			return nil
@@ -337,7 +243,7 @@ func (a *App) handleSearchHints(w http.ResponseWriter, r *http.Request) {
 		if len(items) == 0 {
 			items = asItems(payload)
 		}
-		return &upstreamItemsResult{ServerID: c.ID, Items: items}
+		return &upstreamItemsResult{ServerID: c.ID, Items: items, FullSources: fullSources, RequestScope: reqCtx}
 	})
 
 	collected := make([]upstreamItemsResult, 0, len(perClient))
@@ -346,7 +252,8 @@ func (a *App) handleSearchHints(w http.ResponseWriter, r *http.Request) {
 			collected = append(collected, *result)
 		}
 	}
-	merged := a.mergeRoundRobinItems(collected, a.clientFacingUserIDFor(r))
+	collected = a.hydrateMergeResults(r, collected)
+	merged := a.mergeRoundRobinItems(collected, a.clientFacingUserIDFor(r), reqCtx)
 
 	a.overlayLocalUserDataItems(r, merged)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -357,6 +264,13 @@ func (a *App) handleSearchHints(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleItemImage(w http.ResponseWriter, r *http.Request) {
 	resolved := a.resolveRouteID(r.PathValue("itemId"))
+	if ctx := requestContextFrom(r.Context()); ctx != nil && ctx.ProxyUser != nil {
+		var routeOK bool
+		resolved, routeOK = a.resolveRequestRouteID(w, r, r.PathValue("itemId"))
+		if !routeOK {
+			return
+		}
+	}
 	if resolved == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return

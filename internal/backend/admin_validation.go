@@ -357,10 +357,10 @@ func validatePlaybackMode(mode string) error {
 
 func validateSpoofClient(mode string) error {
 	switch strings.TrimSpace(mode) {
-	case "none", "passthrough", "infuse", "custom":
+	case "none", "passthrough", "infuse", "hills", "capyplayer", "custom":
 		return nil
 	default:
-		return &httpError{message: "spoofClient 必须为 none、passthrough、infuse 或 custom"}
+		return &httpError{message: "spoofClient 必须为 none、passthrough、infuse、hills、capyplayer 或 custom"}
 	}
 }
 

@@ -27,7 +27,9 @@ func TestPhase7StoppedTranslationRequiresExplicitRouteSessionMatch(t *testing.T)
 	currentB := store.GetOrCreateVirtualID("play-current-b", "server-b")
 	oldB := store.GetOrCreateVirtualID("play-old-b", "server-b")
 	owner := &RequestContext{ProxyToken: "owner", ProxyUser: &tokenInfo{UserID: "user", Role: "user"}}
+	seedPhase5RouteScope(app, owner)
 	app.playbackRoutes.RememberMediaSource(playbackRouteOwner(owner), media, "server-b", "play-current-b", currentA)
+	app.playbackRoutes.RememberMediaSourceItem(playbackRouteOwner(owner), media, item, "server-b")
 	app.playbackRoutes.Activate(playbackRouteOwner(owner), item, "server-b", "play-current-b", currentA)
 
 	for _, routeKind := range []string{"active", "media"} {
@@ -58,6 +60,16 @@ func TestPhase7StoppedTranslationRequiresExplicitRouteSessionMatch(t *testing.T)
 					body["MediaSourceId"] = media
 				}
 				serverID, found := app.translateSessionBodyIDs(reqCtx, body)
+				// An explicit B version cannot consume an unproven old/other-owner A session.
+				if routeKind == "media" && (tc.name == "old client session" || tc.otherOwner) {
+					if found {
+						t.Fatalf("conflicting explicit version/session accepted: %#v", body)
+					}
+					return
+				}
+				if routeKind == "active" && (tc.name == "missing session" || tc.name == "unknown old raw session") {
+					tc.wantServer = "server-a"
+				}
 				if !found || serverID != tc.wantServer || body["PlaySessionId"] != tc.wantSession {
 					t.Fatalf("translation server=%q found=%v session=%v, want %s/%s", serverID, found, body["PlaySessionId"], tc.wantServer, tc.wantSession)
 				}
@@ -156,10 +168,11 @@ func TestPhase7StoppedLatestRouteCannotReleaseNewLease(t *testing.T) {
 						t.Fatalf("old Stopped changed current session=%q", current)
 					}
 					progress := app.WatchStore.GetProgress(info.UserID, itemID)
-					if progress == nil || progress.PositionTicks != 600 || progress.RuntimeTicks != 1000 {
-						t.Fatalf("old Stopped did not finalize local progress: %#v", progress)
+					if progress == nil || progress.PositionTicks != 111 || progress.RuntimeTicks != 1000 {
+						t.Fatalf("old Stopped changed current shared progress: %#v", progress)
 					}
 
+					seedPhase5WatchOwner(t, app, info.UserID, itemID, "server-a", "item-a", "xbox-001", "play-new", "ms-a", 1000)
 					postStopped(newSession)
 					if got := app.PlaybackLimiter.CountForServer("server-a"); got != 0 {
 						t.Fatalf("current Stopped left matching lease: count=%d", got)

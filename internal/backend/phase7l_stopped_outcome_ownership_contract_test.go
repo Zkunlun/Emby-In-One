@@ -32,13 +32,17 @@ func TestPhase7LStoppedOutcomeMatrixFinalizesOnlyExactLease(t *testing.T) {
 						rr := phase1ESessionPost(t, f.Handler, phase7LStoppedPath, f.Users[user].Token, device, body)
 						phase7LAssertResponse(t, rr, mode)
 						key := phase7LWatchOwner(f, user, server)
-						phase7LAssertProgress(t, f, before, key, f.Servers[server], phase7KItemID, 700, 2000, false)
+						var changedWatch []phase7LWatchKey
+						if owner == "matching" {
+							phase7LAssertProgress(t, f, before, key, f.Servers[server], phase7KItemID, 700, 2000, false)
+							changedWatch = []phase7LWatchKey{key}
+						}
 						var changedLeases []streamKey
 						if owner == "matching" {
 							changedLeases = []streamKey{f.Key(user, server)}
 							phase7LAssertLeaseAbsent(t, f, changedLeases[0])
 						}
-						phase7LAssertUnchangedExcept(t, f, before, []phase7LWatchKey{key}, changedLeases)
+						phase7LAssertUnchangedExcept(t, f, before, changedWatch, changedLeases)
 						phase7LAssertCalls(t, f, server, mode, attempts, session, 700)
 					})
 				})
@@ -82,6 +86,11 @@ func TestPhase7LStoppedEmptyMissingAndExpiredLeaseBoundaries(t *testing.T) {
 								phase1EAgeLease(t, f.App, leaseKey.UserID, leaseKey.ServerID, time.Now().Add(-playbackHeartbeatTimeout-time.Second))
 							}
 						}
+						if !tc.absent && tc.leaseSession == "" {
+							if err := f.App.watchPlayback.mutate(leaseKey.UserID, f.Items[server], true, func() error { return nil }); err != nil {
+								t.Fatal(err)
+							}
+						}
 						body := f.Body(user, server, 700)
 						body["PlaySessionId"] = tc.requestSession
 						if tc.requestSession == phase7KSessionID {
@@ -102,13 +111,17 @@ func TestPhase7LStoppedEmptyMissingAndExpiredLeaseBoundaries(t *testing.T) {
 						rr := phase1ESessionPost(t, f.Handler, phase7LStoppedPath, f.Users[user].Token, device, body)
 						phase7LAssertResponse(t, rr, mode)
 						watchKey := phase7LWatchOwner(f, user, server)
-						phase7LAssertProgress(t, f, before, watchKey, leaseKey.ServerID, phase7KItemID, 700, 2000, false)
+						var changedWatch []phase7LWatchKey
+						if tc.requestSession == phase7KSessionID && (tc.leaseSession != "" || tc.absent) && !tc.wrongDevice {
+							phase7LAssertProgress(t, f, before, watchKey, leaseKey.ServerID, phase7KItemID, 700, 2000, false)
+							changedWatch = []phase7LWatchKey{watchKey}
+						}
 						var changed []streamKey
 						if tc.removed {
 							changed = []streamKey{leaseKey}
 							phase7LAssertLeaseAbsent(t, f, leaseKey)
 						}
-						phase7LAssertUnchangedExcept(t, f, before, []phase7LWatchKey{watchKey}, changed)
+						phase7LAssertUnchangedExcept(t, f, before, changedWatch, changed)
 						phase7LAssertCalls(t, f, server, mode, attempts, tc.requestSession, 700)
 						if tc.omit && mode.Status != 0 {
 							if _, exists := f.Upstreams[server].Requests()[0].Body["PlaySessionId"]; exists {
@@ -178,7 +191,7 @@ func TestPhase7LStopReturnValueSeparatesMatchingReleaseFromExpiryCleanup(t *test
 	}
 }
 
-func TestPhase7LStoppedMissingDevicePersistsProgressWithoutForwardOrRelease(t *testing.T) {
+func TestPhase7LStoppedMissingDeviceHasNoStateForwardOrReleaseEffects(t *testing.T) {
 	for user := 0; user < 2; user++ {
 		for server := 0; server < 2; server++ {
 			t.Run(strconv.Itoa(user)+"/"+strconv.Itoa(server), func(t *testing.T) {
@@ -189,9 +202,7 @@ func TestPhase7LStoppedMissingDevicePersistsProgressWithoutForwardOrRelease(t *t
 					if rr.Code != http.StatusBadRequest || phase1GErrorCode(t, rr) != playbackDeviceIDRequiredCode {
 						t.Fatalf("missing-device response=%d %s", rr.Code, rr.Body.String())
 					}
-					key := phase7LWatchOwner(f, user, server)
-					phase7LAssertProgress(t, f, before, key, f.Servers[server], phase7KItemID, 700, 2000, false)
-					phase7LAssertUnchangedExcept(t, f, before, []phase7LWatchKey{key}, nil)
+					phase7LAssertUnchangedExcept(t, f, before, nil, nil)
 					if len(f.Upstreams[0].Requests()) != 0 || len(f.Upstreams[1].Requests()) != 0 {
 						t.Fatal("unidentified Stopped reached upstream")
 					}

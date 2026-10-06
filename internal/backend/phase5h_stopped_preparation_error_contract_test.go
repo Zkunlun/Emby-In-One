@@ -44,6 +44,7 @@ func TestPhase5HStoppedPreparationErrorFinalizesMatchingLocalPlayback(t *testing
 		}); err != nil {
 			t.Fatalf("seed watch progress: %v", err)
 		}
+		seedPhase5WatchOwner(t, app, info.UserID, virtualItemID, serverID, "item-a", "xbox-001", "session-current", "ms-a", 1000)
 		created := app.PlaybackLimiter.Reserve(info.UserID, serverID, "xbox-001", virtualItemID, "session-current")
 		if !created.Allowed || !created.Created {
 			t.Fatalf("reserve = %+v, want created lease", created)
@@ -57,6 +58,7 @@ func TestPhase5HStoppedPreparationErrorFinalizesMatchingLocalPlayback(t *testing
 		}
 		rr := httptest.NewRecorder()
 		req := phase5HStoppedRequest(t, app, info, token, "xbox-001")
+		req = app.admitSessionWatchRequest(req, virtualItemID, body, serverID, playbackWatchStopped)
 		prepErr := newMissingAuthStateError("body.UserId")
 		if !app.handleStoppedPreparationError(rr, req, virtualItemID, body, serverID, "session-current", prepErr) {
 			t.Fatal("preparation error was not handled")
@@ -103,6 +105,7 @@ func TestPhase5HStoppedPreparationErrorCannotReleaseNonMatchingLease(t *testing.
 		}); err != nil {
 			t.Fatalf("seed watch progress: %v", err)
 		}
+		seedPhase5WatchOwner(t, app, info.UserID, virtualItemID, serverID, "item-a", "xbox-001", "session-current", "ms-a", 1000)
 		created := app.PlaybackLimiter.Reserve(info.UserID, serverID, "xbox-001", virtualItemID, "session-current")
 		if !created.Allowed || !created.Created {
 			t.Fatalf("reserve = %+v, want created lease", created)
@@ -116,6 +119,7 @@ func TestPhase5HStoppedPreparationErrorCannotReleaseNonMatchingLease(t *testing.
 		}
 		rr := httptest.NewRecorder()
 		req := phase5HStoppedRequest(t, app, info, token, "phone-001")
+		req = app.admitSessionWatchRequest(req, virtualItemID, body, serverID, playbackWatchStopped)
 		if !app.handleStoppedPreparationError(rr, req, virtualItemID, body, serverID, "session-current", newMissingAuthStateError("body.UserId")) {
 			t.Fatal("preparation error was not handled")
 		}
@@ -123,8 +127,8 @@ func TestPhase5HStoppedPreparationErrorCannotReleaseNonMatchingLease(t *testing.
 			t.Fatalf("status = %d, want 503", rr.Code)
 		}
 		progress := app.WatchStore.GetProgress(info.UserID, virtualItemID)
-		if progress == nil || progress.PositionTicks != 600 {
-			t.Fatalf("local progress was not recorded for wrong-device stop: %#v", progress)
+		if progress == nil || progress.PositionTicks != 0 {
+			t.Fatalf("wrong-device stop changed shared progress: %#v", progress)
 		}
 		if got := app.PlaybackLimiter.CountForServer(serverID); got != 1 {
 			t.Fatalf("wrong-device preparation error released lease: count=%d want=1", got)

@@ -45,6 +45,7 @@ func TestPhase7LStoppedMergedAliasUsesCurrentTokenAndKeepsOtherUpstreamLease(t *
 						f.App.playbackRoutes.Activate("token:"+f.Users[0].Token, item, "server-a", phase7KSessionID, f.Sessions[0])
 						f.App.playbackRoutes.Activate("token:"+second, item, "server-b", phase7KSessionID, f.Sessions[0])
 						f.App.playbackRoutes.RememberMediaSource("token:"+second, f.Media[1], "server-b", phase7KSessionID, f.Sessions[0])
+						f.App.playbackRoutes.RememberMediaSourceItem("token:"+second, f.Media[1], item, "server-b")
 						f.App.IDStore.SetActiveStream(item, "server-b")
 						user, server, token := 0, 0, f.Users[0].Token
 						if tokenIndex == 1 {
@@ -53,6 +54,11 @@ func TestPhase7LStoppedMergedAliasUsesCurrentTokenAndKeepsOtherUpstreamLease(t *
 						if tokenIndex == 2 {
 							user, token = 1, f.Users[1].Token
 						}
+						qualifiedOriginal := "merged-a"
+						if server == 1 {
+							qualifiedOriginal = "merged-b"
+						}
+						seedPhase5WatchOwner(t, f.App, f.Users[user].Info.UserID, item, f.Servers[server], qualifiedOriginal, phase7KDeviceID, phase7KSessionID, "shared-media", 1000)
 						body := map[string]any{
 							"ItemId": item, "PlaySessionId": f.Sessions[0], "UserId": f.Users[1-user].Info.UserID,
 							"PositionTicks": int64(700), "RunTimeTicks": int64(2000),
@@ -63,6 +69,17 @@ func TestPhase7LStoppedMergedAliasUsesCurrentTokenAndKeepsOtherUpstreamLease(t *
 						before := phase7LSnapshot(t, f)
 						attempts := phase7LPrepareMode(t, f, server, mode)
 						rr := phase1ESessionPost(t, f.Handler, phase7LStoppedPath, token, phase7KDeviceID, body)
+						if route == "media" && tokenIndex != 1 {
+							// A token-scoped A alias cannot authorize an explicit B version.
+							if rr.Code != http.StatusNoContent {
+								t.Fatalf("unproven media alias=%d %s", rr.Code, rr.Body.String())
+							}
+							phase7LAssertUnchangedExcept(t, f, before, nil, nil)
+							if attempts.Load() != 0 || len(f.Upstreams[0].Requests()) != 0 || len(f.Upstreams[1].Requests()) != 0 {
+								t.Fatal("unproven media alias attempted an upstream request")
+							}
+							return
+						}
 						phase7LAssertResponse(t, rr, mode)
 						key := phase7LWatchKey{UserID: f.Users[user].Info.UserID, ItemID: item}
 						original := "merged-a"
@@ -137,13 +154,13 @@ func TestPhase7LStoppedForbiddenPrecedesEveryUpstreamOutcome(t *testing.T) {
 	}
 }
 
-func TestPhase7LStoppedWithoutItemSeparatesProgressFromLeaseFinalization(t *testing.T) {
+func TestPhase7LStoppedWithoutItemHasNoSourceOrLocalEffects(t *testing.T) {
 	for caseIndex, tc := range []struct {
-		name                        string
-		media, omitSession, release bool
+		name               string
+		media, omitSession bool
 	}{
-		{name: "explicit session without item", release: true},
-		{name: "media and session without item", media: true, release: true},
+		{name: "explicit session without item"},
+		{name: "media and session without item", media: true},
 		{name: "media without item or session", media: true, omitSession: true},
 	} {
 		for _, mode := range []phase7LMode{{Name: "HTTP 204", Status: http.StatusNoContent}, {Name: "offline"}, {Name: "auth preparation"}} {
@@ -160,36 +177,13 @@ func TestPhase7LStoppedWithoutItemSeparatesProgressFromLeaseFinalization(t *test
 					before := phase7LSnapshot(t, f)
 					attempts := phase7LPrepareMode(t, f, server, mode)
 					rr := phase1ESessionPost(t, f.Handler, phase7LStoppedPath, f.Users[0].Token, phase7KDeviceID, body)
-					phase7LAssertResponse(t, rr, mode)
-					var changed []streamKey
-					if tc.release {
-						changed = []streamKey{f.Key(0, server)}
-						phase7LAssertLeaseAbsent(t, f, changed[0])
+					// Without an item, session/media aliases alone do not prove the source-item relationship.
+					if rr.Code != http.StatusNoContent {
+						t.Fatalf("itemless Stopped=%d %s", rr.Code, rr.Body.String())
 					}
-					phase7LAssertUnchangedExcept(t, f, before, nil, changed)
-					wantHits := 0
-					if mode.Status != 0 {
-						wantHits = 1
-					}
-					requests := f.Upstreams[server].Requests()
-					if len(requests) != wantHits || len(f.Upstreams[1-server].Requests()) != 0 || attempts.Load() != 0 {
-						t.Fatal("itemless Stopped reached wrong upstream")
-					}
-					if wantHits != 0 {
-						sent := requests[0]
-						if _, exists := sent.Body["ItemId"]; exists {
-							t.Fatal("itemless Stopped manufactured ItemId")
-						}
-						if sent.Path != phase7LStoppedPath || sent.Body["UserId"] != "upstream-user-"+f.Servers[server] {
-							t.Fatalf("itemless Stopped identity mismatch: %+v", sent)
-						}
-						if tc.omitSession {
-							if _, exists := sent.Body["PlaySessionId"]; exists {
-								t.Fatal("itemless Stopped manufactured PlaySessionId")
-							}
-						} else if sent.Body["PlaySessionId"] != phase7KSessionID {
-							t.Fatalf("itemless Stopped session=%v", sent.Body["PlaySessionId"])
-						}
+					phase7LAssertUnchangedExcept(t, f, before, nil, nil)
+					if len(f.Upstreams[0].Requests()) != 0 || len(f.Upstreams[1].Requests()) != 0 || attempts.Load() != 0 {
+						t.Fatal("itemless Stopped attempted an upstream request")
 					}
 				})
 			})

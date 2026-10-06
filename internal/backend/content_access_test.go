@@ -19,6 +19,11 @@ func restrictedUpstreamStub(t *testing.T, hits *atomic.Int32) *httptest.Server {
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "tok-b", "User": map[string]any{"Id": "user-b"}})
 			return
 		}
+		// Counts/health are service background traffic, not item access.
+		if r.URL.Path == "/Items/Counts" || r.URL.Path == "/System/Info/Public" {
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+			return
+		}
 		hits.Add(1)
 		if r.Method == http.MethodGet && r.URL.Path == "/Items/movie-b" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "movie-b", "Name": "Movie B", "MediaSources": []any{}})

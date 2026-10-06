@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -10,14 +11,19 @@ import (
 // current regular proxy user's local state anywhere a JSON response carries
 // BaseItem/UserData objects. Administrators intentionally keep upstream state.
 func (a *App) normalizeLocalUserDataPayload(r *http.Request, payload any) {
+	a.filterAuthorizedMediaSources(requestContextFrom(r.Context()), payload)
 	if a.WatchStore == nil || !isRegularProxyUser(r) || payload == nil {
 		return
 	}
-	reqCtx := requestContextFrom(r.Context())
 	ids := make([]string, 0)
 	seen := map[string]struct{}{}
 	collectUserStateItemIDs(payload, &ids, seen)
-	rows := a.WatchStore.GetProgressBatch(reqCtx.ProxyUser.UserID, ids)
+	rows, err := a.visibleWatchProgressBatch(r, ids)
+	if err != nil {
+		a.logVisibleWatchReadError(err)
+		clearPersonalUserState(payload)
+		return
+	}
 	applyLocalUserStateRecursive(payload, rows)
 }
 
@@ -136,11 +142,16 @@ func isBaseItemStateCandidate(m map[string]any) bool {
 // explicit handlers. It deliberately does not rewrite IDs; callers preserve
 // their current response ordering and ID semantics.
 func (a *App) normalizeLocalUserDataForItem(r *http.Request, virtualItemID string, payload any) {
+	a.filterAuthorizedMediaSources(requestContextFrom(r.Context()), payload)
 	if a.WatchStore == nil || !isRegularProxyUser(r) || virtualItemID == "" || payload == nil {
 		return
 	}
-	reqCtx := requestContextFrom(r.Context())
-	row := a.WatchStore.GetProgress(reqCtx.ProxyUser.UserID, virtualItemID)
+	row, err := a.visibleWatchProgress(r, virtualItemID)
+	if err != nil {
+		a.logVisibleWatchReadError(err)
+		clearPersonalUserState(payload)
+		return
+	}
 	normalizeExplicitUserState(payload, row)
 }
 
@@ -149,12 +160,7 @@ func normalizeExplicitUserState(payload any, row *WatchProgress) {
 	if !ok {
 		return
 	}
-	if isUserDataMap(m) {
-		applyUserDataState(m, row)
-	}
-	if ud, ok := m["UserData"].(map[string]any); ok {
-		applyUserDataState(ud, row)
-	}
+	applyUserDataStateToItem(m, row)
 }
 
 func applyUserDataState(ud map[string]any, progress *WatchProgress) {
@@ -215,6 +221,7 @@ func (a *App) ensureWatchRecordMetadata(r *http.Request, reqCtx *RequestContext,
 	if a.WatchStore == nil || reqCtx == nil || reqCtx.ProxyUser == nil || reqCtx.ProxyUser.Role == "admin" || virtualItemID == "" || resolved == nil {
 		return nil
 	}
+	virtualItemID = a.IDStore.CanonicalMergeID(virtualItemID)
 	seed := &WatchProgress{
 		ProxyUserID:    reqCtx.ProxyUser.UserID,
 		VirtualItemID:  virtualItemID,
@@ -224,6 +231,17 @@ func (a *App) ensureWatchRecordMetadata(r *http.Request, reqCtx *RequestContext,
 	existing := a.WatchStore.GetProgress(reqCtx.ProxyUser.UserID, virtualItemID)
 	if existing == nil || existing.ItemType == "" || (existing.ItemType == "Episode" && existing.SeriesVirtualID == "") {
 		a.enrichWatchProgressMetadata(r, reqCtx, seed, resolved.OriginalID, resolved.ServerID)
+	}
+	a.watchLifecycleMu.RLock()
+	defer a.watchLifecycleMu.RUnlock()
+	virtualItemID = a.IDStore.CanonicalMergeID(virtualItemID)
+	seed.VirtualItemID = virtualItemID
+	if !a.mediaAccessScopeLocked(reqCtx).allows(resolved.ServerID) ||
+		a.watchItemOriginalID(virtualItemID, resolved.ServerID) != resolved.OriginalID {
+		return fmt.Errorf("watch metadata authorization changed")
+	}
+	if err := a.WatchStore.SeedMergeState(seed.ProxyUserID, virtualItemID); err != nil {
+		return err
 	}
 	return a.WatchStore.UpsertMetadata(seed)
 }

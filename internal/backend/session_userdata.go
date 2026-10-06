@@ -18,6 +18,8 @@ func (a *App) registerSessionAndUserStateRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /Sessions/Capabilities/Full", a.withContext(a.requireAuth(a.handleSessionsCapabilitiesFull)))
 	mux.HandleFunc("POST /Users/{userId}/PlayingItems/{itemId}", a.withContext(a.requireAuth(a.handleUserPlayingItemStart)))
 	mux.HandleFunc("DELETE /Users/{userId}/PlayingItems/{itemId}", a.withContext(a.requireAuth(a.handleUserPlayingItemStop)))
+	mux.HandleFunc("POST /Users/{userId}/PlayingItems/{itemId}/Progress", a.withContext(a.requireAuth(a.handleUserPlayingItemProgress)))
+	mux.HandleFunc("POST /Users/{userId}/PlayingItems/{itemId}/Delete", a.withContext(a.requireAuth(a.handleUserPlayingItemStopCompat)))
 	mux.HandleFunc("POST /Users/{userId}/Items/{itemId}/UserData", a.withContext(a.requireAuth(a.handleUserItemUserData)))
 	mux.HandleFunc("POST /Users/{userId}/PlayedItems/{itemId}", a.withContext(a.requireAuth(a.handlePlayedItemAdd)))
 	mux.HandleFunc("DELETE /Users/{userId}/PlayedItems/{itemId}", a.withContext(a.requireAuth(a.handlePlayedItemRemove)))
@@ -58,153 +60,149 @@ func resolvedOriginalIDForServer(resolved *ResolvedID, serverID string) string {
 			return other.OriginalID
 		}
 	}
-	return resolved.OriginalID
+	return "" // No instance on this source: never forward another source's raw ID.
 }
 
 func (a *App) translateSessionBodyIDs(reqCtx *RequestContext, body map[string]any) (string, bool) {
 	rawItemID, _ := body["ItemId"].(string)
 	rawMediaSourceID, _ := body["MediaSourceId"].(string)
 	rawPlaySessionID, _ := body["PlaySessionId"].(string)
-
-	resolve := func(value string) *ResolvedID {
-		if value == "" {
-			return nil
-		}
-		resolved := a.IDStore.ResolveVirtualID(value)
-		if resolved == nil {
-			resolved = a.IDStore.ResolveByOriginalID(value)
-		}
-		return resolved
+	if a.IDStore == nil || rawItemID == "" {
+		return "", false
 	}
-	itemResolved := resolve(rawItemID)
-	mediaResolved := resolve(rawMediaSourceID)
-	playResolved := resolve(rawPlaySessionID)
-
+	item := a.IDStore.ResolveVirtualID(rawItemID)
+	media := a.IDStore.ResolveVirtualID(rawMediaSourceID)
+	play := a.IDStore.ResolveVirtualID(rawPlaySessionID)
 	owner := playbackRouteOwner(reqCtx)
-	serverID := ""
-	targetPlaySessionID := ""
-
-	// Item and MediaSource routes are overwritten by later PlaybackInfo calls.
-	// Only an explicit session match may translate a client session onto a route's
-	// upstream session; a delayed old event must never acquire the latest session.
 	routeMatchesSession := func(route playbackRouteEntry) bool {
 		if rawPlaySessionID == "" {
+			return false // Never acquire the latest session from a missing identity.
+		}
+		if rawPlaySessionID == route.PlaySessionID || rawPlaySessionID == route.ClientPlaySessionID {
 			return true
 		}
-		if route.ClientPlaySessionID != "" {
-			if rawPlaySessionID == route.ClientPlaySessionID {
-				return true
+		if play == nil {
+			alias := a.IDStore.ResolveVirtualID(route.ClientPlaySessionID)
+			return alias != nil && rawPlaySessionID == alias.OriginalID
+		}
+		if play.ServerID == route.ServerID && play.OriginalID == route.PlaySessionID {
+			return true
+		}
+		alias := a.IDStore.ResolveVirtualID(route.ClientPlaySessionID)
+		return alias != nil && alias.ServerID == play.ServerID && alias.OriginalID == play.OriginalID
+	}
+	serverID, targetSessionID := "", ""
+	virtualSourceID := rawMediaSourceID
+	if media != nil {
+		serverID = media.ServerID
+		if route, ok := a.playbackRoutes.MediaSource(owner, rawMediaSourceID); ok &&
+			route.ItemID == rawItemID && route.ServerID == serverID && routeMatchesSession(route) {
+			targetSessionID = route.PlaySessionID
+		}
+	}
+	if serverID == "" && rawMediaSourceID == "" {
+		if route, ok := a.playbackRoutes.Active(owner, rawItemID); ok && routeMatchesSession(route) {
+			serverID, targetSessionID = route.ServerID, route.PlaySessionID
+		}
+	}
+	if serverID == "" && play != nil {
+		serverID, targetSessionID = play.ServerID, play.OriginalID
+	}
+	if serverID == "" && item != nil {
+		if resolved, err := a.resolveAuthorizedSessionRouteID(reqCtx, rawItemID); err == nil && resolved != nil {
+			serverID = resolved.ServerID
+		}
+	}
+	if serverID == "" && item == nil {
+		// A raw item has no global namespace. Accept only one proven mapping
+		// among this request's authorized sources, never the oldest global ID.
+		for _, client := range a.allowedClients(reqCtx) {
+			if _, _, known := a.IDStore.ResolveOriginalIDForServer(rawItemID, client.ID); !known {
+				continue
 			}
-			if clientSession := resolve(route.ClientPlaySessionID); clientSession != nil && playResolved != nil &&
-				clientSession.ServerID == playResolved.ServerID && clientSession.OriginalID == playResolved.OriginalID {
-				return true
+			if rawMediaSourceID != "" {
+				if _, _, known := a.IDStore.ResolveOriginalIDForServer(rawMediaSourceID, client.ID); !known {
+					continue
+				}
+			}
+			if serverID != "" {
+				return "", false
+			}
+			serverID = client.ID
+		}
+	}
+	if serverID == "" || !a.isServerAllowed(reqCtx, serverID) {
+		return "", false
+	}
+	if item == nil {
+		if media != nil && media.MediaItemID == rawItemID {
+			if group := a.IDStore.ResolveMergeMember(serverID, rawItemID, media.OriginalID); group != "" {
+				item = a.IDStore.ResolveVirtualID(group)
 			}
 		}
-		if playResolved != nil {
-			return playResolved.ServerID == route.ServerID && playResolved.OriginalID == route.PlaySessionID
-		}
-		return rawPlaySessionID == route.PlaySessionID
-	}
-
-	// A selected MediaSource is the strongest evidence of the server actually
-	// serving bytes. PlaybackInfo records that source's own upstream PlaySessionID.
-	if mediaResolved != nil {
-		serverID = mediaResolved.ServerID
-		if route, ok := a.playbackRoutes.MediaSource(owner, rawMediaSourceID); ok && route.ServerID == serverID && routeMatchesSession(route) {
-			targetPlaySessionID = route.PlaySessionID
-		}
-	}
-	// Some clients omit MediaSourceId from check-ins after opening the stream. Use
-	// the request-owner-scoped active route instead of the old process-global item route.
-	if serverID == "" && rawItemID != "" {
-		if route, ok := a.playbackRoutes.Active(owner, rawItemID); ok {
-			serverID = route.ServerID
-			if routeMatchesSession(route) {
-				targetPlaySessionID = route.PlaySessionID
+		if item == nil {
+			if groups := a.IDStore.MergeGroupsForItem(serverID, rawItemID); len(groups) == 1 {
+				item = a.IDStore.ResolveVirtualID(groups[0])
 			}
 		}
-	}
-	if targetPlaySessionID == "" && playResolved != nil {
-		// Without a proven cross-upstream alias, the explicit session retains its
-		// own server namespace even when the latest item/media route has moved.
-		serverID = playResolved.ServerID
-		targetPlaySessionID = playResolved.OriginalID
-	}
-	if serverID == "" && itemResolved != nil {
-		serverID = itemResolved.ServerID
-	}
-	if serverID == "" && rawItemID != "" {
-		// Legacy last resort for callers that do not yet have request-scoped route state.
-		if active, ok := a.IDStore.GetActiveStream(rawItemID); ok {
-			serverID = active
+		if item == nil {
+			_, mapped, ok := a.IDStore.ResolveOriginalIDForServer(rawItemID, serverID)
+			if !ok {
+				return "", false
+			}
+			item = mapped
 		}
 	}
-
-	if itemResolved != nil {
-		body["ItemId"] = resolvedOriginalIDForServer(itemResolved, serverID)
+	originalItemID := resolvedOriginalIDForServer(item, serverID)
+	if media != nil && media.MediaItemID != "" {
+		originalItemID = media.MediaItemID
 	}
-	if mediaResolved != nil {
-		body["MediaSourceId"] = mediaResolved.OriginalID
+	if originalItemID == "" {
+		return "", false
 	}
-	if rawPlaySessionID != "" {
-		if targetPlaySessionID != "" {
-			body["PlaySessionId"] = targetPlaySessionID
-		} else if playResolved != nil {
-			body["PlaySessionId"] = playResolved.OriginalID
+	if rawMediaSourceID != "" {
+		if media == nil {
+			var known bool
+			virtualSourceID, media, known = a.IDStore.ResolveMergeMediaSourceForItem(rawMediaSourceID, serverID, originalItemID)
+			if !known {
+				return "", false
+			}
+			if route, ok := a.playbackRoutes.MediaSource(owner, virtualSourceID); ok &&
+				route.ItemID == rawItemID && route.ServerID == serverID && routeMatchesSession(route) {
+				targetSessionID = route.PlaySessionID
+			}
 		}
+		if media.ServerID != serverID {
+			return "", false
+		}
+		groupID := rawItemID
+		if a.IDStore.ResolveVirtualID(rawItemID) == nil {
+			groupID = a.IDStore.ResolveMergeMember(serverID, originalItemID, media.OriginalID)
+		}
+		if (media.MediaItemID != "" && media.MediaItemID != originalItemID) || !a.IDStore.MergeMemberAllowed(groupID, serverID, originalItemID, media.OriginalID) {
+			return "", false
+		}
+		body["MediaSourceId"] = media.OriginalID
 	}
-
-	if a.Logger != nil {
-		a.Logger.Debugf("Session translation: TargetServer=%s, MediaSourceId=%v, ItemId=%v, PlaySessionId=%v",
-			serverID, body["MediaSourceId"], body["ItemId"], body["PlaySessionId"])
+	if targetSessionID == "" && play != nil {
+		// An explicit source/session pair can cross namespaces only through a
+		// proven owner/item-scoped PlaybackInfo alias, never the latest route.
+		if play.ServerID != serverID {
+			return "", false
+		}
+		targetSessionID = play.OriginalID
 	}
-	return serverID, serverID != ""
+	body["ItemId"] = originalItemID
+	if rawPlaySessionID != "" && targetSessionID != "" {
+		body["PlaySessionId"] = targetSessionID
+	}
+	return serverID, true
 }
 
-// recordSessionToWatchStore writes playback progress to the local WatchStore
-// for non-admin users. virtualItemID is the pre-translation virtual ID.
-// isStopped indicates whether the playback has ended (Stopped event).
-func (a *App) recordSessionToWatchStore(r *http.Request, virtualItemID string, body map[string]any, serverID string, isStopped bool) {
-	if a.WatchStore == nil || virtualItemID == "" {
-		return
-	}
-	reqCtx := requestContextFrom(r.Context())
-	if reqCtx == nil || reqCtx.ProxyUser == nil || reqCtx.ProxyUser.Role == "admin" {
-		return
-	}
-	positionTicks, _ := numericInt64(body["PositionTicks"])
-	runtimeTicks, _ := numericInt64(body["RunTimeTicks"])
-	originalItemID, _ := body["ItemId"].(string)
-
-	p := &WatchProgress{
-		ProxyUserID:    reqCtx.ProxyUser.UserID,
-		VirtualItemID:  virtualItemID,
-		ServerID:       serverID,
-		OriginalItemID: originalItemID,
-		PositionTicks:  positionTicks,
-		RuntimeTicks:   runtimeTicks,
-	}
-
-	// Auto-mark played if stopped near end (>= 90% of runtime)
-	if isStopped && runtimeTicks > 0 && positionTicks > 0 {
-		ratio := float64(positionTicks) / float64(runtimeTicks)
-		if ratio >= 0.90 {
-			p.Played = true
-			p.PositionTicks = 0
-		}
-	}
-
-	// Enrich with item metadata if not already stored
-	existing := a.WatchStore.GetProgress(reqCtx.ProxyUser.UserID, virtualItemID)
-	if existing == nil || existing.ItemType == "" {
-		a.enrichWatchProgressMetadata(r, reqCtx, p, originalItemID, serverID)
-	}
-
-	if err := a.WatchStore.RecordProgress(p); err != nil {
-		if a.Logger != nil {
-			a.Logger.Warnf("WatchStore record error: %s", redactURLInError(err))
-		}
-	}
+// recordSessionWatchEvent consumes IDs after the existing session translation.
+func (a *App) recordSessionWatchEvent(r *http.Request, virtualItemID string, body map[string]any, serverID string, kind playbackWatchEventKind) {
+	event, playSessionID := sessionWatchEvent(body, serverID, kind)
+	a.recordPlaybackWatchEvent(r, virtualItemID, playSessionID, event)
 }
 
 // enrichWatchProgressMetadata fetches item details from upstream and populates
@@ -224,6 +222,15 @@ func (a *App) enrichWatchProgressMetadata(r *http.Request, reqCtx *RequestContex
 	if !ok {
 		return
 	}
+	a.watchLifecycleMu.RLock()
+	defer a.watchLifecycleMu.RUnlock()
+	if !a.mediaAccessScopeLocked(reqCtx).allows(serverID) || a.watchItemOriginalID(p.VirtualItemID, serverID) != originalItemID {
+		return
+	}
+	a.populateWatchProgressMetadata(p, item, serverID)
+}
+
+func (a *App) populateWatchProgressMetadata(p *WatchProgress, item map[string]any, serverID string) {
 	p.ItemType, _ = item["Type"].(string)
 	p.Name, _ = item["Name"].(string)
 	if year, ok := numericInt(item["ProductionYear"]); ok {
@@ -385,8 +392,8 @@ func (a *App) sessionUpstreamClient(serverID string) (*UpstreamClient, bool) {
 // has ended playback locally, so watch progress must be persisted and only the
 // matching device/session lease may be released.
 func (a *App) finalizeStoppedPlayback(r *http.Request, virtualItemID string, body map[string]any, serverID, playSessionID string) {
-	a.recordSessionToWatchStore(r, virtualItemID, body, serverID, true)
-	a.stopPlaybackLease(requestContextFrom(r.Context()), serverID, playSessionID)
+	a.recordSessionWatchEvent(r, virtualItemID, body, serverID, playbackWatchStopped)
+	a.stopAdmittedPlaybackLease(r, serverID, playSessionID)
 }
 
 // handleStoppedPreparationError preserves the preparation error response while
@@ -414,6 +421,11 @@ func (a *App) handleSessionPlaying(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	virtualItemID, _ := body["ItemId"].(string) // capture before translation
+	mediaID, _ := body["MediaSourceId"].(string)
+	if a.sessionTargetAccessDenied(requestContextFrom(r.Context()), virtualItemID, mediaID) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
+		return
+	}
 	serverID, found := a.translateSessionBodyIDs(requestContextFrom(r.Context()), body)
 	if !found {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "Cannot determine target server"})
@@ -423,6 +435,7 @@ func (a *App) handleSessionPlaying(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
 		return
 	}
+	r = a.admitSessionWatchRequest(r, virtualItemID, body, serverID, playbackWatchStarted)
 	if a.playbackDeviceIDRequired(requestContextFrom(r.Context()), serverID) {
 		writePlaybackDeviceIDRequired(w)
 		return
@@ -454,7 +467,7 @@ func (a *App) handleSessionPlaying(w http.ResponseWriter, r *http.Request) {
 
 	// Local watch state and the lease heartbeat commit only after the upstream
 	// has confirmed the Playing event with a 2xx response.
-	a.recordSessionToWatchStore(r, virtualItemID, body, serverID, false)
+	a.recordSessionWatchEvent(r, virtualItemID, body, serverID, playbackWatchStarted)
 	a.heartbeatPlaybackLease(requestContextFrom(r.Context()), serverID)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -471,6 +484,11 @@ func (a *App) handleSessionPlayingProgress(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	virtualItemID, _ := body["ItemId"].(string)
+	mediaID, _ := body["MediaSourceId"].(string)
+	if a.sessionTargetAccessDenied(requestContextFrom(r.Context()), virtualItemID, mediaID) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
+		return
+	}
 	serverID, found := a.translateSessionBodyIDs(requestContextFrom(r.Context()), body)
 	if !found {
 		w.WriteHeader(http.StatusNoContent)
@@ -480,6 +498,7 @@ func (a *App) handleSessionPlayingProgress(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
 		return
 	}
+	r = a.admitSessionWatchRequest(r, virtualItemID, body, serverID, playbackWatchProgress)
 	if a.playbackDeviceIDRequired(requestContextFrom(r.Context()), serverID) {
 		writePlaybackDeviceIDRequired(w)
 		return
@@ -508,7 +527,7 @@ func (a *App) handleSessionPlayingProgress(w http.ResponseWriter, r *http.Reques
 
 	// Local watch state and the lease heartbeat commit only after the upstream
 	// has confirmed the Progress event with a 2xx response.
-	a.recordSessionToWatchStore(r, virtualItemID, body, serverID, false)
+	a.recordSessionWatchEvent(r, virtualItemID, body, serverID, playbackWatchProgress)
 	a.heartbeatPlaybackLease(requestContextFrom(r.Context()), serverID)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -525,6 +544,11 @@ func (a *App) handleSessionPlayingStopped(w http.ResponseWriter, r *http.Request
 		return
 	}
 	virtualItemID, _ := body["ItemId"].(string)
+	mediaID, _ := body["MediaSourceId"].(string)
+	if a.sessionTargetAccessDenied(requestContextFrom(r.Context()), virtualItemID, mediaID) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
+		return
+	}
 	serverID, found := a.translateSessionBodyIDs(requestContextFrom(r.Context()), body)
 	if !found {
 		w.WriteHeader(http.StatusNoContent)
@@ -535,11 +559,11 @@ func (a *App) handleSessionPlayingStopped(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
 		return
 	}
+	r = a.admitSessionWatchRequest(r, virtualItemID, body, serverID, playbackWatchStopped)
 	if a.playbackDeviceIDRequired(requestContextFrom(r.Context()), serverID) {
-		// A local Stopped event still updates per-user progress, but an unidentified
-		// request must never release a device-owned lease or be reported upstream as
-		// if its playback identity were authoritative.
-		a.recordSessionToWatchStore(r, virtualItemID, body, serverID, true)
+		// Preserve the terminal handler shape. Without an admitted device/session
+		// identity, the shared writer skips this event and no lease is released.
+		a.recordSessionWatchEvent(r, virtualItemID, body, serverID, playbackWatchStopped)
 		writePlaybackDeviceIDRequired(w)
 		return
 	}
@@ -608,18 +632,57 @@ func (a *App) handleUserPlayingItemStop(w http.ResponseWriter, r *http.Request) 
 }
 
 func (a *App) handleUserPlayingItem(w http.ResponseWriter, r *http.Request, method string) {
-	resolved := a.resolveRouteID(r.PathValue("itemId"))
-	if resolved == nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Item not found"})
+	mediaID, _ := explicitMediaSourceID(r.URL.Query(), nil)
+	if a.sessionTargetAccessDenied(requestContextFrom(r.Context()), r.PathValue("itemId"), mediaID) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
 		return
 	}
-	if !a.requireServerAccess(w, r, resolved) {
+	resolved, query, found := a.resolveLegacyWatchTarget(r)
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Cannot determine authorized playback source"})
 		return
 	}
-	query := cloneValues(r.URL.Query())
-	a.translateMediaSourceQuery(query)
+	kind := playbackWatchStarted
+	if method == http.MethodDelete {
+		kind = playbackWatchStopped
+	}
+	// Ordering is captured before version qualification or lifecycle network I/O.
+	r = a.admitLegacyWatchRequest(r, resolved.ServerID, query, kind)
+	if kind == playbackWatchStopped {
+		// Also finish the captured lease on a version/preparation rejection. The
+		// revision fence makes a repeated successful finalization harmless.
+		sessionID, _ := legacyPlaySessionID(query)
+		defer a.stopAdmittedPlaybackLease(r, resolved.ServerID, sessionID)
+	}
+	if _, available := a.sessionUpstreamClient(resolved.ServerID); !available {
+		if kind == playbackWatchStopped {
+			a.recordLegacyWatchEvent(r, resolved.ServerID, query, kind)
+			w.WriteHeader(http.StatusNoContent)
+		} else {
+			writeSessionUpstreamUnavailable(w)
+		}
+		return
+	}
+	if sourceID, err := explicitMediaSourceID(r.URL.Query(), nil); err != nil {
+		writeMediaSelectionError(w, err)
+		return
+	} else if sourceID != "" {
+		selection, err := a.selectAuthorizedMediaSource(r, r.PathValue("itemId"), sourceID, resolved)
+		if err != nil {
+			writeMediaSelectionError(w, err)
+			return
+		}
+		if selection.ServerID != resolved.ServerID {
+			writeMediaSelectionError(w, errMediaAccessDenied)
+			return
+		}
+		setSelectedMediaSource(query, nil, selection)
+	}
 	path := "/Users/" + resolved.Client.clientUserID() + "/PlayingItems/" + resolved.OriginalID
-	_ = a.forwardNoContent(r, resolved.Client, method, path, query, nil)
+	err := a.forwardNoContent(r, resolved.Client, method, path, query, nil)
+	if err == nil || kind == playbackWatchStopped {
+		a.recordLegacyWatchEvent(r, resolved.ServerID, query, kind)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -637,7 +700,10 @@ func (a *App) handlePlayedItemRemoveCompat(w http.ResponseWriter, r *http.Reques
 
 func (a *App) handlePlayedItemState(w http.ResponseWriter, r *http.Request, method string, played, deleteCompat bool) {
 	virtualItemID := r.PathValue("itemId")
-	resolved := a.resolveRouteID(virtualItemID)
+	resolved, routeOK := a.resolveRequestRouteID(w, r, virtualItemID)
+	if !routeOK {
+		return
+	}
 	if resolved == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Item not found"})
 		return
@@ -679,7 +745,7 @@ func (a *App) handlePlayedItemState(w http.ResponseWriter, r *http.Request, meth
 				return
 			}
 			playedAt := parseLocalPlayedAt(query.Get("DatePlayed"))
-			if err := a.WatchStore.MarkPlayedAt(reqCtx.ProxyUser.UserID, virtualItemID, played, playedAt); err != nil {
+			if err := a.mutateLocalPlayed(reqCtx.ProxyUser.UserID, virtualItemID, played, playedAt, reqCtx); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local watched state"})
 				return
 			}
@@ -701,7 +767,10 @@ func (a *App) handlePlayedItemState(w http.ResponseWriter, r *http.Request, meth
 
 func (a *App) handleUserItemUserData(w http.ResponseWriter, r *http.Request) {
 	virtualItemID := r.PathValue("itemId")
-	resolved := a.resolveRouteID(virtualItemID)
+	resolved, routeOK := a.resolveRequestRouteID(w, r, virtualItemID)
+	if !routeOK {
+		return
+	}
 	if resolved == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Item not found"})
 		return
@@ -754,33 +823,10 @@ func (a *App) handleUserItemUserData(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			// A UserData payload may carry Played=false together with a non-zero
-			// PlaybackPositionTicks. Apply the unplayed transition first so the explicit
-			// position that follows is preserved as the new in-progress state. Played=true
-			// stays last because a completed item must finish at position zero.
-			if playedValue != nil && !*playedValue {
-				if err := a.WatchStore.MarkPlayedAt(reqCtx.ProxyUser.UserID, virtualItemID, false, localPlayedAt); err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local watched state"})
-					return
-				}
-			}
-			if positionValue != nil {
-				if err := a.WatchStore.UpdatePositionAt(reqCtx.ProxyUser.UserID, virtualItemID, *positionValue, runtimeValue, localPlayedAt); err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local playback position"})
-					return
-				}
-			}
-			if favoriteValue != nil {
-				if err := a.WatchStore.SetFavorite(reqCtx.ProxyUser.UserID, virtualItemID, *favoriteValue); err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local favorite state"})
-					return
-				}
-			}
-			if playedValue != nil && *playedValue {
-				if err := a.WatchStore.MarkPlayedAt(reqCtx.ProxyUser.UserID, virtualItemID, true, localPlayedAt); err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local watched state"})
-					return
-				}
+			if err := a.mutateLocalUserData(reqCtx.ProxyUser.UserID, virtualItemID,
+				playedValue, positionValue, runtimeValue, favoriteValue, localPlayedAt, reqCtx); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": err.Error()})
+				return
 			}
 		}
 	}
@@ -800,7 +846,10 @@ func (a *App) handleUserItemUserData(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleFavoriteItemAdd(w http.ResponseWriter, r *http.Request) {
 	virtualItemID := r.PathValue("itemId")
-	resolved := a.resolveRouteID(virtualItemID)
+	resolved, routeOK := a.resolveRequestRouteID(w, r, virtualItemID)
+	if !routeOK {
+		return
+	}
 	if resolved == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Item not found"})
 		return
@@ -826,7 +875,7 @@ func (a *App) handleFavoriteItemAdd(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to prepare local favorite state"})
 				return
 			}
-			if err := a.WatchStore.SetFavorite(reqCtx.ProxyUser.UserID, virtualItemID, true); err != nil {
+			if err := a.mutateLocalFavorite(reqCtx, virtualItemID, true); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local favorite state"})
 				return
 			}
@@ -847,7 +896,10 @@ func (a *App) handleFavoriteItemAdd(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleFavoriteItemRemove(w http.ResponseWriter, r *http.Request) {
 	virtualItemID := r.PathValue("itemId")
-	resolved := a.resolveRouteID(virtualItemID)
+	resolved, routeOK := a.resolveRequestRouteID(w, r, virtualItemID)
+	if !routeOK {
+		return
+	}
 	if resolved == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Item not found"})
 		return
@@ -872,7 +924,7 @@ func (a *App) handleFavoriteItemRemove(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to prepare local favorite state"})
 				return
 			}
-			if err := a.WatchStore.SetFavorite(reqCtx.ProxyUser.UserID, virtualItemID, false); err != nil {
+			if err := a.mutateLocalFavorite(reqCtx, virtualItemID, false); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to update local favorite state"})
 				return
 			}
@@ -894,17 +946,26 @@ func (a *App) handleFavoriteItemRemove(w http.ResponseWriter, r *http.Request) {
 // These compatibility wrappers keep existing explicit handlers small while all
 // regular-user UserData semantics live in user_state.go.
 func (a *App) overlayLocalUserDataItems(r *http.Request, items []map[string]any) {
+	for _, item := range items {
+		a.filterAuthorizedMediaSources(requestContextFrom(r.Context()), item)
+	}
 	if a.WatchStore == nil || !isRegularProxyUser(r) || len(items) == 0 {
 		return
 	}
-	reqCtx := requestContextFrom(r.Context())
 	ids := make([]string, 0, len(items))
 	for _, item := range items {
 		if id, _ := item["Id"].(string); id != "" {
 			ids = append(ids, id)
 		}
 	}
-	rows := a.WatchStore.GetProgressBatch(reqCtx.ProxyUser.UserID, ids)
+	rows, err := a.visibleWatchProgressBatch(r, ids)
+	if err != nil {
+		a.logVisibleWatchReadError(err)
+		for _, item := range items {
+			clearPersonalUserState(item)
+		}
+		return
+	}
 	for _, item := range items {
 		id, _ := item["Id"].(string)
 		applyUserDataStateToItem(item, progressPtr(rows, id))
@@ -917,6 +978,15 @@ func applyUserDataStateToItem(item map[string]any, row *WatchProgress) {
 	}
 	if ud, ok := item["UserData"].(map[string]any); ok {
 		applyUserDataState(ud, row)
+	} else if row != nil && isBaseItemStateCandidate(item) {
+		// Lists and explicit item responses need the same missing-UserData
+		// behavior as the recursive fallback normalizer.
+		ud := map[string]any{}
+		if id, _ := item["Id"].(string); id != "" {
+			ud["ItemId"] = id
+		}
+		applyUserDataState(ud, row)
+		item["UserData"] = ud
 	}
 	if isUserDataMap(item) {
 		applyUserDataState(item, row)

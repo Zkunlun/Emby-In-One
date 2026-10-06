@@ -102,6 +102,7 @@ func TestPhase7LDelayedStoppedKeepsNewSessionAndTakeoverLease(t *testing.T) {
 						owner := "token:" + f.Users[0].Token
 						f.App.playbackRoutes.Activate(owner, f.Items[0], key.ServerID, session, virtualSession)
 						f.App.playbackRoutes.RememberMediaSource(owner, f.Media[0], key.ServerID, session, virtualSession)
+						seedPhase5WatchOwner(t, f.App, key.UserID, f.Items[0], key.ServerID, phase7KItemID, device, session, "shared-media", 2000)
 						beforeProgress := phase7LSnapshot(t, f)
 						progressBody := f.Body(0, 0, 800)
 						progressBody["PlaySessionId"] = virtualSession
@@ -116,10 +117,8 @@ func TestPhase7LDelayedStoppedKeepsNewSessionAndTakeoverLease(t *testing.T) {
 						unblock()
 						phase7LWaitStopped(t, done)
 						phase7KAssertEmptySuccess(t, rr)
-						// The established terminal-event rule still saves final progress.
-						// Lease protection must not be confused with suppressing that write.
-						phase7LAssertProgress(t, f, newCommitted, watchKey, key.ServerID, phase7KItemID, 900, 2000, false)
-						phase7LAssertUnchangedExcept(t, f, newCommitted, []phase7LWatchKey{watchKey}, nil)
+						// Task 4 fences the old terminal event after the new Started owner.
+						phase7LAssertUnchangedExcept(t, f, newCommitted, nil, nil)
 						requests := f.Upstreams[0].Requests()
 						if len(requests) != 2 || len(f.Upstreams[1].Requests()) != 0 ||
 							requests[0].Path != phase7LStoppedPath || requests[0].Body["PlaySessionId"] != phase7KSessionID ||

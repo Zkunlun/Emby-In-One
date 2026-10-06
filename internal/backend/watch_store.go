@@ -81,23 +81,13 @@ func NewWatchStore(db *sqliteDB, logger *Logger) (*WatchStore, error) {
 		);
 		CREATE INDEX IF NOT EXISTS idx_watch_user ON user_watch_progress(proxy_user_id);
 		CREATE INDEX IF NOT EXISTS idx_watch_user_series ON user_watch_progress(proxy_user_id, series_name);
+		CREATE TABLE IF NOT EXISTS media_merge_aliases (alias_id TEXT PRIMARY KEY, virtual_id TEXT NOT NULL);
 	`); err != nil {
 		return nil, fmt.Errorf("watch store schema: %w", err)
 	}
 
-	// Migrate dirty data: mark items as played if they were watched >= 90%
-	if err := db.exec(`
-		UPDATE user_watch_progress
-		SET played = 1
-		WHERE position_ticks > 0
-		  AND runtime_ticks > 0
-		  AND played = 0
-		  AND CAST(position_ticks AS REAL) / runtime_ticks >= 0.9
-	`); err != nil {
-		if logger != nil {
-			logger.Warnf("watch store migration warning: %v", err)
-		}
-	}
+	// Opening the store must not infer Played from historical positions. Only
+	// qualified playback events and explicit user mutations change that state.
 
 	return &WatchStore{db: db, logger: logger}, nil
 }

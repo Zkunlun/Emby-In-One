@@ -40,7 +40,10 @@ func (a *App) proxyStream(w http.ResponseWriter, r *http.Request, route streamRo
 		a.Logger.Debugf("%s request: itemId=%s, query=%s", route.label, virtualItemID, formatValuesForLog(query))
 	}
 
-	resolved := a.resolveRouteID(virtualItemID)
+	resolved, routeOK := a.resolveRequestRouteID(w, r, virtualItemID)
+	if !routeOK {
+		return
+	}
 	if resolved == nil {
 		if a.Logger != nil {
 			a.Logger.Warnf("%s: itemId=%s not found in mappings", route.label, virtualItemID)
@@ -57,15 +60,44 @@ func (a *App) proxyStream(w http.ResponseWriter, r *http.Request, route streamRo
 		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Stream not found"})
 		return
 	}
-	// Resolve a virtual MediaSourceId embedded in subtitle/attachment paths:
-	// /Videos/{itemId}/{mediaSourceId}/Subtitles/...  or  .../Attachments/...
-	rest = resolveMediaSourceInPath(rest, a.IDStore)
-
-	// Resolve the client-facing PlaySessionId before target selection so a
-	// cross-upstream MediaSource switch can replace it with that target's own session.
-	a.resolvePlaySessionID(query)
+	// Subtitle/attachment path source IDs are explicit version selections too.
+	pathSourceID := ""
+	pathTail := ""
+	if slash := strings.IndexByte(rest, '/'); slash > 0 {
+		tail := rest[slash:]
+		if strings.HasPrefix(tail, "/Subtitles/") || strings.HasPrefix(tail, "/Attachments/") {
+			pathSourceID, pathTail = rest[:slash], tail
+			querySourceID, err := explicitMediaSourceID(query, nil)
+			if err != nil || (querySourceID != "" && querySourceID != pathSourceID) {
+				writeMediaSelectionError(w, errMediaMappingMissing)
+				return
+			}
+			query.Set("MediaSourceId", pathSourceID)
+		}
+	}
+	if selected, err := explicitMediaSourceID(query, nil); err == nil && selected == "" {
+		if err := a.prepareMergePlaybackItem(r, virtualItemID, resolved); err != nil {
+			writeMediaSelectionError(w, err)
+			return
+		}
+		if source := a.defaultMergeSource(virtualItemID, resolved.ServerID, resolved.OriginalID); source != "" {
+			virtual, err := a.IDStore.GetMergeMediaSourceID(resolved.ServerID, resolved.OriginalID, source)
+			if err != nil {
+				writeMediaSelectionError(w, err)
+				return
+			}
+			query.Set("MediaSourceId", virtual)
+		}
+	}
 	client, originalID, ok := a.resolveStreamTarget(w, r, resolved, virtualItemID, query)
 	if !ok {
+		return
+	}
+	if pathSourceID != "" {
+		rest = query.Get("MediaSourceId") + pathTail
+	}
+	if !a.isServerAllowed(requestContextFrom(r.Context()), client.ID) {
+		writeMediaSelectionError(w, errMediaAccessDenied)
 		return
 	}
 
@@ -103,6 +135,10 @@ func (a *App) proxyStream(w http.ResponseWriter, r *http.Request, route streamRo
 			}
 		}
 
+		if !a.isServerAllowed(reqCtx, client.ID) {
+			writeMediaSelectionError(w, errMediaAccessDenied)
+			return
+		}
 		redirectURL, err := client.BuildURL(upstreamPath, query, true, reqCtx)
 		if err != nil {
 			if !writePreparationError(w, err) {
@@ -142,6 +178,11 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, client *Upst
 	}
 	defer resp.Body.Close()
 
+	if !a.isServerAllowed(reqCtx, client.ID) {
+		writeMediaSelectionError(w, errMediaAccessDenied)
+		return
+	}
+
 	contentType := resp.Header.Get("Content-Type")
 	if isPlaylistResponse(contentType, rest) {
 		body, _ := io.ReadAll(resp.Body)
@@ -166,6 +207,20 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, client *Upst
 			baseURL = prepared
 		}
 		manifest := RewriteM3U8ForItem(string(body), baseURL, virtualItemID, proxyToken)
+		if source := query.Get("MediaSourceId"); source != "" {
+			business, ok := streamBusinessPath(upstreamPath)
+			parts := strings.Split(strings.TrimPrefix(business, "/"), "/")
+			if !ok || len(parts) < 3 {
+				writeMediaSelectionError(w, errMediaMappingMissing)
+				return
+			}
+			qualified, err := a.IDStore.GetMergeMediaSourceID(client.ID, parts[1], source)
+			if err != nil {
+				writeMediaSelectionError(w, err)
+				return
+			}
+			manifest = qualifyMergeManifestSources(manifest, virtualItemID, qualified)
+		}
 		w.Header().Set("Content-Type", "application/x-mpegURL")
 		_, _ = io.WriteString(w, manifest)
 		return
@@ -181,25 +236,32 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, client *Upst
 	_, _ = io.Copy(w, resp.Body)
 }
 
-// resolveStreamTarget returns the client and original item id that will actually
-// serve the stream. A MediaSourceId on another upstream also selects that upstream's
-// PlaybackInfo session and moves the regular user's device-owned playback lease.
+// resolveStreamTarget binds an explicit version to its authorized source/item.
+// Unknown or revoked versions never fall back to another copy of the film.
 func (a *App) resolveStreamTarget(w http.ResponseWriter, r *http.Request, resolved *routeResolution, virtualItemID string, query url.Values) (*UpstreamClient, string, bool) {
-	virtualMediaSourceID := query.Get("MediaSourceId")
-	if virtualMediaSourceID == "" {
-		return resolved.Client, resolved.OriginalID, true
+	sourceID, err := explicitMediaSourceID(query, nil)
+	if err != nil {
+		writeMediaSelectionError(w, err)
+		return nil, "", false
 	}
-	mediaSource := a.IDStore.ResolveVirtualID(virtualMediaSourceID)
-	if mediaSource == nil {
-		if a.Logger != nil {
-			a.Logger.Warnf("Stream: MediaSourceId %s cannot be resolved to any server", virtualMediaSourceID)
+	if sourceID == "" {
+		if !a.translateStreamSession(w, r, query, resolved.ServerID) {
+			return nil, "", false
 		}
 		return resolved.Client, resolved.OriginalID, true
+	}
+	selection, err := a.selectAuthorizedMediaSource(r, virtualItemID, sourceID, resolved)
+	if err != nil {
+		writeMediaSelectionError(w, err)
+		return nil, "", false
 	}
 	reqCtx := requestContextFrom(r.Context())
 	routeOwner := playbackRouteOwner(reqCtx)
 	previousServerID := resolved.ServerID
 	previousPlaySessionID := query.Get("PlaySessionId")
+	if mapped := a.IDStore.ResolveVirtualID(previousPlaySessionID); mapped != nil {
+		previousPlaySessionID = mapped.OriginalID
+	}
 	if active, ok := a.playbackRoutes.Active(routeOwner, virtualItemID); ok {
 		previousServerID = active.ServerID
 		if active.PlaySessionID != "" {
@@ -208,47 +270,40 @@ func (a *App) resolveStreamTarget(w http.ResponseWriter, r *http.Request, resolv
 	}
 	targetPlaySessionID := ""
 	clientPlaySessionID := ""
-	if candidate, ok := a.playbackRoutes.MediaSource(routeOwner, virtualMediaSourceID); ok && candidate.ServerID == mediaSource.ServerID {
+	if candidate, ok := a.playbackRoutes.MediaSource(routeOwner, selection.VirtualID); ok &&
+		candidate.ServerID == selection.ServerID && candidate.ItemID == virtualItemID {
 		targetPlaySessionID = candidate.PlaySessionID
 		clientPlaySessionID = candidate.ClientPlaySessionID
 	}
-	query.Set("MediaSourceId", mediaSource.OriginalID)
+	setSelectedMediaSource(query, nil, selection)
 	if targetPlaySessionID != "" {
 		query.Set("PlaySessionId", targetPlaySessionID)
+	} else if !a.translateStreamSession(w, r, query, selection.ServerID) {
+		return nil, "", false
 	}
-	if mediaSource.ServerID == resolved.ServerID {
-		if previousServerID != mediaSource.ServerID {
-			if !a.switchPlaybackLease(w, r, mediaSource.ServerID, previousServerID, virtualItemID, targetPlaySessionID, previousPlaySessionID, clientPlaySessionID) {
-				return nil, "", false
-			}
-		} else {
-			a.playbackRoutes.Activate(routeOwner, virtualItemID, mediaSource.ServerID, targetPlaySessionID, clientPlaySessionID)
+	if previousServerID != selection.ServerID {
+		if !a.switchPlaybackLease(w, r, selection.ServerID, previousServerID, virtualItemID,
+			targetPlaySessionID, previousPlaySessionID, clientPlaySessionID) {
+			return nil, "", false
 		}
-		return resolved.Client, resolved.OriginalID, true
+	} else {
+		a.activatePlaybackRoute(reqCtx, virtualItemID, selection.ServerID, targetPlaySessionID, clientPlaySessionID)
 	}
+	return selection.Client, selection.ItemOriginalID, true
+}
 
-	if !a.isServerAllowed(requestContextFrom(r.Context()), mediaSource.ServerID) {
-		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
-		return nil, "", false
-	}
-	target := a.Upstream.ClientByID(mediaSource.ServerID)
-	if target == nil || !target.IsOnline() {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Target media source server is unavailable"})
-		return nil, "", false
-	}
-	if a.Logger != nil {
-		a.Logger.Infof("Stream: switching to server [%s] for MediaSourceId %s", target.Name, virtualMediaSourceID)
-	}
-	if !a.switchPlaybackLease(w, r, mediaSource.ServerID, previousServerID, virtualItemID, targetPlaySessionID, previousPlaySessionID, clientPlaySessionID) {
-		return nil, "", false
-	}
-	// Prefer this server's own copy of the item when it has one.
-	for _, other := range resolved.OtherInstances {
-		if other.ServerID == mediaSource.ServerID {
-			return target, other.OriginalID, true
+// A known upstream session cannot be sent to a different source. Raw session
+// compatibility remains source-local; owner/item proof belongs to Phase3.
+func (a *App) translateStreamSession(w http.ResponseWriter, r *http.Request, query url.Values, serverID string) bool {
+	sessionID := query.Get("PlaySessionId")
+	if mapped := a.IDStore.ResolveVirtualID(sessionID); mapped != nil {
+		if mapped.ServerID != serverID || !a.isServerAllowed(requestContextFrom(r.Context()), mapped.ServerID) {
+			writeMediaSelectionError(w, errMediaAccessDenied)
+			return false
 		}
+		query.Set("PlaySessionId", mapped.OriginalID)
 	}
-	return target, resolved.OriginalID, true
+	return true
 }
 
 // switchPlaybackLease moves the active route only after the target lease has been
@@ -256,6 +311,12 @@ func (a *App) resolveStreamTarget(w http.ResponseWriter, r *http.Request, resolv
 // released only by the same resolved device and the previous exact session.
 func (a *App) switchPlaybackLease(w http.ResponseWriter, r *http.Request, targetID, previousID, virtualItemID, targetPlaySessionID, previousPlaySessionID, clientPlaySessionID string) bool {
 	reqCtx := requestContextFrom(r.Context())
+	a.watchLifecycleMu.RLock()
+	defer a.watchLifecycleMu.RUnlock()
+	if !a.mediaAccessScopeLocked(reqCtx).allows(targetID) {
+		writeMediaSelectionError(w, errMediaAccessDenied)
+		return false
+	}
 	routeOwner := playbackRouteOwner(reqCtx)
 	limiterUserID, applies := a.playbackLimiterKey(reqCtx, targetID)
 	if applies {
@@ -272,6 +333,7 @@ func (a *App) switchPlaybackLease(w http.ResponseWriter, r *http.Request, target
 			a.PlaybackLimiter.Stop(limiterUserID, previousID, deviceID, previousPlaySessionID)
 		}
 	}
+	a.playbackRoutes.RegisterOwner(routeOwner, reqCtx.ProxyUser.UserID)
 	a.playbackRoutes.Activate(routeOwner, virtualItemID, targetID, targetPlaySessionID, clientPlaySessionID)
 	a.IDStore.SetActiveStream(virtualItemID, targetID)
 	return true

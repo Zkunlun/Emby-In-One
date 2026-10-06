@@ -106,7 +106,7 @@ func TestAdminUpstreamLibrariesOffline(t *testing.T) {
 }
 
 func TestAdminHomeLibrariesPatchSemantics(t *testing.T) {
-	withHomeLibraryApp(t, func(app *App, handler http.Handler, viewsHits *atomic.Int32) {
+	withHomeLibraryPatchApp(t, func(app *App, handler http.Handler, viewsHits *atomic.Int32) {
 		token := loginToken(t, handler, "secret")
 		serverID := app.Upstream.Clients()[0].ID
 

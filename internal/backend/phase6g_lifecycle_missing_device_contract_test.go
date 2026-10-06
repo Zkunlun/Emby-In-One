@@ -89,8 +89,8 @@ func TestPhase6GMissingDeviceRejectsPlayingProgressAndStoppedWithoutMutatingLeas
 		if got := app.PlaybackLimiter.CountForServer("server-a"); got != 1 {
 			t.Fatalf("missing-device Stopped released lease: count=%d, want 1", got)
 		}
-		if progress := app.WatchStore.GetProgress(userID, itemID); progress == nil || progress.PositionTicks != 1000 {
-			t.Fatalf("missing-device Stopped did not retain local watch progress: %#v", progress)
+		if progress := app.WatchStore.GetProgress(userID, itemID); progress != nil {
+			t.Fatalf("missing-device Stopped created unqualified watch progress: %#v", progress)
 		}
 		if got := playingHits.Load(); got != 0 {
 			t.Fatalf("Playing upstream hits=%d, want 0", got)

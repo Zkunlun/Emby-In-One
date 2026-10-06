@@ -51,7 +51,7 @@ func TestPhase7EProgressCommitsOnlyAfterUpstreamConfirmation(t *testing.T) {
 
 				progress := app.WatchStore.GetProgress(info.UserID, itemID)
 				if tc.wantCommit {
-					if progress == nil || progress.PositionTicks != 900 || progress.RuntimeTicks != 1000 {
+					if progress == nil || !progress.Played || progress.PositionTicks != 0 || progress.RuntimeTicks != 1000 {
 						t.Fatalf("confirmed Progress did not commit progress: %#v", progress)
 					}
 					after := phase1ELeaseHeartbeat(t, app, info.UserID, "server-a")

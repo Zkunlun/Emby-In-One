@@ -24,78 +24,69 @@ type App struct {
 	WatchStore      *WatchStore
 	HiddenLibraries *HiddenLibraryStore
 	libraryCache    *upstreamLibraryCache
+	mediaCounts     *mediaCountsService
 	PlaybackLimiter *PlaybackLimiter
 	playbackRoutes  *playbackRouteStore
+	watchPlayback   playbackWatchCache
 	loginLimiter    loginRateLimiter
 	noticeThrottle  noticeThrottle
 	// grantCapacityMu serializes full-config admin writes with authorization-grant
 	// mutations so a stale Config snapshot cannot restore an old maxConcurrent or
 	// recreate a grant for an upstream that was just deleted.
 	grantCapacityMu sync.Mutex
+	// watchLifecycleMu coordinates request-scoped authorization/state reads with
+	// binding and deletion publication. Never hold it during upstream I/O.
+	watchLifecycleMu sync.RWMutex
+	lifecyclePending bool // Protected by watchLifecycleMu; unresolved cleanup denies regular access.
 }
 
 func NewApp() (*App, error) {
-	configStore, err := LoadConfigStore()
-	if err != nil {
-		return nil, err
-	}
-	cfg := configStore.Snapshot()
-	logger := NewLogger(LogConfig{DataDir: cfg.DataDir})
-	logTimeoutNotice(logger, cfg.Timeouts)
-	upstreamIDs := make([]string, len(cfg.Upstream))
-	for i, u := range cfg.Upstream {
-		upstreamIDs[i] = u.ID
-	}
-	idStore, err := NewIDStore(cfg.DataDir, logger, upstreamIDs...)
-	if err != nil {
-		return nil, err
-	}
-	identity := NewClientIdentityServiceFromDetectedConfig()
-	auth, err := NewAuthManager(configStore, identity, logger)
-	if err != nil {
-		return nil, err
-	}
-	upstream := NewUpstreamPool(cfg, logger)
-	upstream.LoginAll()
-
-	var userStore *UserStore
-	var watchStore *WatchStore
-	var hiddenLibraries *HiddenLibraryStore
-	if db := idStore.DB(); db != nil {
-		us, err := NewUserStore(db, logger)
-		if err != nil {
-			logger.Warnf("UserStore init failed: %v (multi-user disabled)", err)
-		} else {
-			userStore = us
-		}
-		wst, err := NewWatchStore(db, logger)
-		if err != nil {
-			logger.Warnf("WatchStore init failed: %v (per-user watch history disabled)", err)
-		} else {
-			watchStore = wst
-		}
-		hls, err := NewHiddenLibraryStore(db, logger)
-		if err != nil {
-			logger.Warnf("HiddenLibraryStore init failed: %v (home library hiding disabled)", err)
-		} else {
-			hiddenLibraries = hls
-		}
-	}
-
-	return &App{
-		ConfigStore:     configStore,
-		Logger:          logger,
-		IDStore:         idStore,
-		Identity:        identity,
-		Auth:            auth,
-		Upstream:        upstream,
-		UserStore:       userStore,
-		WatchStore:      watchStore,
-		HiddenLibraries: hiddenLibraries,
-		libraryCache:    newUpstreamLibraryCache(),
-		PlaybackLimiter: NewPlaybackLimiter(),
-		playbackRoutes:  newPlaybackRouteStore(),
-	}, nil
+ configStore, err := LoadConfigStore()
+ if err != nil { return nil, err }
+ cfg := configStore.Snapshot()
+ logger := NewLogger(LogConfig{DataDir: cfg.DataDir})
+ logTimeoutNotice(logger, cfg.Timeouts)
+ upstreamIDs := make([]string, len(cfg.Upstream))
+ for i, source := range cfg.Upstream { upstreamIDs[i] = source.ID }
+ idStore, err := NewIDStore(cfg.DataDir, logger, upstreamIDs...)
+ if err != nil { _ = logger.Close(); return nil, err }
+ success := false
+ defer func() { if !success { _ = idStore.Close(); _ = logger.Close() } }()
+ var users *UserStore
+ var watch *WatchStore
+ var hidden *HiddenLibraryStore
+ if db := idStore.DB(); db != nil {
+  users, err = NewUserStore(db, logger)
+  if err != nil { return nil, err }
+  watch, err = NewWatchStore(db, logger)
+  if err != nil { return nil, err }
+  hidden, err = NewHiddenLibraryStore(db, logger)
+  if err != nil { return nil, err }
+ }
+ identity := NewClientIdentityServiceFromDetectedConfig()
+ auth, err := NewAuthManager(configStore, identity, logger, users)
+ if err != nil { return nil, err }
+ app := &App{ConfigStore: configStore, Logger: logger, IDStore: idStore,
+  Identity: identity, Auth: auth, UserStore: users, WatchStore: watch,
+  HiddenLibraries: hidden, libraryCache: newUpstreamLibraryCache(),
+  PlaybackLimiter: NewPlaybackLimiter(), playbackRoutes: newPlaybackRouteStore()}
+ app.watchLifecycleMu.Lock()
+ app.publishConfiguredSourcesLocked(configStore.Snapshot())
+ if idStore.DB() != nil { err = app.recoverWatchLifecycleLocked() }
+ app.watchLifecycleMu.Unlock()
+ if err != nil { return nil, err }
+ // Recovery precedes identity migration, upstream login and HTTP authentication.
+ if err := identity.migrateSourceOwnership(configStore.Snapshot().Upstream); err != nil { return nil, err }
+ app.installIdentityLifecycle()
+ app.Upstream = NewUpstreamPool(configStore.Snapshot(), logger)
+ app.Upstream.LoginAll()
+ counts, err := newMediaCountsService(app, realCountsScheduleClock(), nil)
+ if err != nil { app.Upstream.stopHealthChecks(); return nil, err }
+ app.mediaCounts = counts
+ app.installCountsNotifications()
+ counts.start()
+ success = true
+ return app, nil
 }
 
 // logTimeoutNotice warns when the per-operation timeouts are tighter than the API
@@ -111,6 +102,7 @@ func logTimeoutNotice(logger *Logger, timeouts TimeoutsConfig) {
 }
 
 func (a *App) Close() error {
+	if a.mediaCounts != nil { a.mediaCounts.close() }
 	if a.Upstream != nil {
 		a.Upstream.stopHealthChecks()
 	}
@@ -164,6 +156,7 @@ func (a *App) Run() error {
 		<-shutdownCh
 		a.Logger.Infof("Shutdown signal received, draining connections...")
 		evictCancel()
+		if a.mediaCounts != nil { a.mediaCounts.close() }
 		a.Upstream.stopHealthChecks()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

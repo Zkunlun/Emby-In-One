@@ -188,6 +188,40 @@ func (l *PlaybackLimiter) Stop(userID string, serverID string, deviceID string, 
 	return true
 }
 
+// Lifecycle evidence is captured before network I/O and fenced at finalization.
+// PlaybackInfo may replace a lease even before its new Started has arrived.
+func (l *PlaybackLimiter) PlaybackRevision(userID, serverID, deviceID, itemID, playSessionID string) uint64 {
+	if l == nil || deviceID == "" || itemID == "" {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pruneExpiredLocked(time.Now())
+	entry := l.streams[streamKey{UserID: userID, ServerID: serverID}]
+	if entry == nil || entry.DeviceID != deviceID ||
+		entry.ItemID != itemID || entry.PlaySessionID != playSessionID {
+		return 0
+	}
+	return entry.Revision
+}
+
+func (l *PlaybackLimiter) StopPlaybackRevision(userID, serverID, deviceID, itemID, playSessionID string, revision uint64) bool {
+	if l == nil || revision == 0 {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pruneExpiredLocked(time.Now())
+	key := streamKey{UserID: userID, ServerID: serverID}
+	entry := l.streams[key]
+	if entry == nil || entry.Revision != revision ||
+		entry.DeviceID != deviceID || entry.ItemID != itemID || entry.PlaySessionID != playSessionID {
+		return false
+	}
+	delete(l.streams, key)
+	return true
+}
+
 // CountForServer returns the number of active playback leases on a server. Counting
 // is also a cleanup boundary: stale leases are removed first so read-only inspection
 // cannot leave expired entries accumulating in the map.

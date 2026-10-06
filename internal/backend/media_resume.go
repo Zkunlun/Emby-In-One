@@ -17,7 +17,10 @@ func (a *App) handleUserItemsResume(w http.ResponseWriter, r *http.Request) {
 	query := cloneValues(r.URL.Query())
 	parentID := firstQueryValue(query, "ParentId", "parentId", "parentid")
 	if parentID != "" {
-		resolved := a.resolveRouteID(parentID)
+		resolved, routeOK := a.resolveRequestRouteID(w, r, parentID)
+		if !routeOK {
+			return
+		}
 		if resolved == nil {
 			writeJSON(w, http.StatusOK, map[string]any{"Items": []any{}, "TotalRecordCount": 0, "StartIndex": 0})
 			return
@@ -51,7 +54,7 @@ func (a *App) handleUserItemsResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	results := a.fetchItemsAcrossUpstreams(r.Context(), requestContextFrom(r.Context()), "/Users/%s/Items/Resume", query, nil)
-	writeJSON(w, http.StatusOK, a.mergedItemsPayload(results, a.clientFacingUserIDFor(r)))
+	writeJSON(w, http.StatusOK, a.mergedItemsPayload(results, a.clientFacingUserIDFor(r), reqCtx))
 }
 
 // handleLocalResume serves resume items from local WatchStore for non-admin users.
@@ -59,45 +62,30 @@ func (a *App) handleUserItemsResume(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleLocalResume(w http.ResponseWriter, r *http.Request, reqCtx *RequestContext) {
 	query := cloneValues(r.URL.Query())
 	parentID := firstQueryValue(query, "ParentId", "parentId", "parentid")
-	limit := 20
-	if l, ok := queryInt(query, "Limit"); ok && l > 0 {
-		limit = l
-	}
-
-	items, err := a.WatchStore.GetResumeItems(reqCtx.ProxyUser.UserID, limit)
-	if err != nil || len(items) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"Items": []any{}, "TotalRecordCount": 0, "StartIndex": 0})
-		return
-	}
-
-	// If ParentId specified, filter to that series only
 	if parentID != "" {
-		var filtered []WatchProgress
-		for _, item := range items {
-			if item.SeriesVirtualID == parentID {
-				filtered = append(filtered, item)
-			}
-		}
-		items = filtered
-		if len(items) == 0 {
-			writeJSON(w, http.StatusOK, map[string]any{"Items": []any{}, "TotalRecordCount": 0, "StartIndex": 0})
+		if _, routeOK := a.resolveRequestRouteID(w, r, parentID); !routeOK {
 			return
 		}
 	}
-
-	enriched := a.enrichWatchItems(r, reqCtx, items)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"Items":            toAnySlice(enriched),
-		"TotalRecordCount": len(enriched),
-		"StartIndex":       0,
+	var items []WatchProgress
+	err := a.withVisibleWatchScope(reqCtx, true, func(scope mediaAccessScope) error {
+		var err error
+		items, err = a.WatchStore.GetVisibleResumeCandidates(scope, a.IDStore.CanonicalMergeID(parentID))
+		return err
 	})
+	if err != nil {
+		a.logVisibleWatchReadError(err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to read resume state"})
+		return
+	}
+	enriched := a.enrichWatchItems(r, reqCtx, items)
+	writeJSON(w, http.StatusOK, watchResponsePage(enriched, query))
 }
 
 // enrichWatchItems fetches fresh metadata from upstream for a list of WatchProgress items,
 // groups by server, batch-fetches via GET /Items?Ids=..., overlays local UserData.
 // When a recorded server is offline, items are remapped to an online OtherInstance via IDStore.
 func (a *App) enrichWatchItems(r *http.Request, reqCtx *RequestContext, items []WatchProgress) []map[string]any {
-	cfg := a.ConfigStore.Snapshot()
 
 	// Group by server ID, remapping offline servers to online alternatives
 	type serverGroup struct {
@@ -106,10 +94,11 @@ func (a *App) enrichWatchItems(r *http.Request, reqCtx *RequestContext, items []
 	}
 	groups := map[string]*serverGroup{}
 	for i := range items {
-		serverID, originalID, ok := a.resolveWatchItemServer(&items[i])
-		if !ok {
+		resolved, err := a.resolveAuthorizedRouteID(reqCtx, items[i].VirtualItemID)
+		if err != nil || resolved == nil {
 			continue // all instances offline
 		}
+		serverID, originalID := resolved.ServerID, resolved.OriginalID
 		items[i].ServerID = serverID
 		items[i].OriginalItemID = originalID
 		g, exists := groups[serverID]
@@ -122,22 +111,36 @@ func (a *App) enrichWatchItems(r *http.Request, reqCtx *RequestContext, items []
 	}
 
 	// Fetch metadata per server (all groups now point to online servers)
-	fetched := map[string]map[string]any{} // originalID → item metadata
+	type metadataKey struct {
+		serverID   string
+		originalID string
+	}
+	// Original item IDs belong to an upstream namespace, not a global one.
+	fetched := map[metadataKey]map[string]any{}
 	for serverID, g := range groups {
 		client := a.Upstream.ClientByID(serverID)
-		if client == nil || !client.IsOnline() {
+		if client == nil || !client.IsOnline() || !a.isServerAllowed(reqCtx, serverID) {
 			continue
 		}
 		q := url.Values{}
-		q.Set("Ids", joinComma(g.originalIDs))
 		q.Set("Fields", "BasicSyncInfo,CanDelete,PrimaryImageAspectRatio,Overview,DateCreated,MediaSources,Path,SortName,Studios,Taglines,Genres,CommunityRating,OfficialRating,CumulativeRunTimeTicks,Chapters,ProviderIds")
-		payload, err := client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Items", q, nil)
-		if err != nil {
-			continue
-		}
-		for _, item := range asItems(payload) {
-			if id, _ := item["Id"].(string); id != "" {
-				fetched[id] = item
+		for start := 0; start < len(g.originalIDs); start += maxBatchIDCount {
+			end := start + maxBatchIDCount
+			if end > len(g.originalIDs) {
+				end = len(g.originalIDs)
+			}
+			if !a.isServerAllowed(reqCtx, serverID) {
+				break
+			}
+			q.Set("Ids", joinComma(g.originalIDs[start:end]))
+			payload, err := client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Items", q, nil)
+			if err != nil || !a.isServerAllowed(reqCtx, serverID) {
+				continue
+			}
+			for _, item := range asItems(payload) {
+				if id, _ := item["Id"].(string); id != "" {
+					fetched[metadataKey{serverID: serverID, originalID: id}] = item
+				}
 			}
 		}
 	}
@@ -146,11 +149,22 @@ func (a *App) enrichWatchItems(r *http.Request, reqCtx *RequestContext, items []
 	// used by every other media response so percentage/history fields cannot leak.
 	var result []map[string]any
 	for _, wp := range items {
-		item, ok := fetched[wp.OriginalItemID]
+		if !a.isServerAllowed(reqCtx, wp.ServerID) {
+			continue
+		}
+		item, ok := fetched[metadataKey{serverID: wp.ServerID, originalID: wp.OriginalItemID}]
 		if !ok {
 			continue
 		}
-		rewriteResponseIDs(item, wp.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
+		item = deepCloneMap(item)
+		if err := a.observeMergeDetail(reqCtx, wp.VirtualItemID, wp.ServerID, wp.OriginalItemID, item, true); err != nil {
+			a.logMergeHTTPError(err)
+			continue
+		}
+		item = a.projectMergeItem(item, wp.ServerID, a.IDStore.CanonicalMergeID(wp.VirtualItemID), a.clientFacingUserIDFor(r))
+		if item == nil {
+			continue
+		}
 		if _, ok := item["UserData"].(map[string]any); !ok {
 			item["UserData"] = map[string]any{}
 		}

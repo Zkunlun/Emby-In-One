@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sync"
@@ -99,9 +100,9 @@ func (a *App) fetchUpstreamLibraries(ctx context.Context, reqCtx *RequestContext
 			"collectionType": collectionType,
 		})
 	}
-	if a.libraryCache != nil {
-		a.libraryCache.set(client.ID, libraries)
-	}
+	a.publishPlaybackState(reqCtx, client.ID, func() {
+		if a.libraryCache != nil { a.libraryCache.set(client.ID, libraries) }
+	})
 	return libraries, nil
 }
 
@@ -189,14 +190,42 @@ func (a *App) handleAdminHomeLibrariesPut(w http.ResponseWriter, r *http.Request
 // absent or null key leaves the stored data untouched — which is how an
 // offline server's config survives a save from the panel.
 func (a *App) applyHiddenLibrariesPatch(userID string, hidden map[string]*[]string) error {
+	a.watchLifecycleMu.Lock()
+	defer a.watchLifecycleMu.Unlock()
+	if a.lifecyclePending {
+		if err := a.recoverWatchLifecycleLocked(); err != nil { return err }
+	}
+	if a.HiddenLibraries == nil || a.HiddenLibraries.db == nil || userID == "" {
+		return fmt.Errorf("hidden library store is unavailable")
+	}
+	configured := configuredSourceIDs(a.ConfigStore.Snapshot())
 	for serverID, ids := range hidden {
-		if serverID == "" || ids == nil {
-			continue
-		}
-		if err := a.HiddenLibraries.SetServerHidden(userID, serverID, *ids); err != nil {
-			return err
+		if serverID != "" && ids != nil && len(*ids) > 0 && !configured[serverID] {
+			return fmt.Errorf("hidden library source is no longer configured")
 		}
 	}
+	s := a.HiddenLibraries
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	next := make(map[string]map[string]struct{})
+	for serverID, ids := range s.HiddenForUser(userID) { next[serverID] = ids }
+	for serverID, ids := range hidden {
+		if serverID == "" || ids == nil { continue }
+		libraries := make(map[string]struct{}, len(*ids))
+		for _, id := range *ids { if id != "" { libraries[id] = struct{}{} } }
+		if len(libraries) == 0 { delete(next, serverID) } else { next[serverID] = libraries }
+	}
+	if err := s.db.withWriteTx(func() error {
+		for serverID, ids := range hidden {
+			if serverID == "" || ids == nil { continue }
+			if err := s.db.execParams("DELETE FROM user_hidden_libraries WHERE user_id = ? AND server_id = ?", userID, serverID); err != nil { return err }
+			for id := range next[serverID] {
+				if err := s.db.execParams("INSERT INTO user_hidden_libraries (user_id, server_id, library_id) VALUES (?, ?, ?)", userID, serverID, id); err != nil { return err }
+			}
+		}
+		return nil
+	}); err != nil { return err }
+	s.replaceUserServers(userID, next)
 	return nil
 }
 

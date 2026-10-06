@@ -94,6 +94,7 @@ func TestPhase7KPlaybackRoutesRemainScopedToTheCurrentValidatedToken(t *testing.
 		f.App.playbackRoutes.Activate("token:"+f.Users[0].Token, item, "server-a", phase7KSessionID, f.Sessions[0])
 		f.App.playbackRoutes.Activate("token:"+secondToken, item, "server-b", phase7KSessionID, f.Sessions[0])
 		f.App.playbackRoutes.RememberMediaSource("token:"+secondToken, f.Media[1], "server-b", phase7KSessionID, f.Sessions[0])
+		f.App.playbackRoutes.RememberMediaSourceItem("token:"+secondToken, f.Media[1], item, "server-b")
 		// Deliberately disagree with the first token's route: the legacy global
 		// item route must not override the current token's explicit mapping.
 		f.App.IDStore.SetActiveStream(item, "server-b")
@@ -117,6 +118,12 @@ func TestPhase7KPlaybackRoutesRemainScopedToTheCurrentValidatedToken(t *testing.
 					serverID, found := f.App.translateSessionBodyIDs(&RequestContext{
 						ProxyToken: tc.token, ProxyUser: tc.info, PlaybackDeviceID: phase7KDeviceID,
 					}, body)
+					if routeKind == "media" && tc.wantServer == "server-a" {
+						if found {
+							t.Fatalf("unproven cross-source session accepted: %#v", body)
+						}
+						return
+					}
 					wantItem := "route-item-a"
 					if tc.wantServer == "server-b" {
 						wantItem = "route-item-b"
@@ -153,6 +160,8 @@ func TestPhase7KMergedItemSharesUserProgressButNotUpstreamLease(t *testing.T) {
 				}
 				f.App.playbackRoutes.Activate("token:"+f.Users[0].Token, item, "server-b", phase7KSessionID, f.Sessions[0])
 				f.App.playbackRoutes.RememberMediaSource("token:"+f.Users[0].Token, f.Media[1], "server-b", phase7KSessionID, f.Sessions[0])
+				f.App.playbackRoutes.RememberMediaSourceItem("token:"+f.Users[0].Token, f.Media[1], item, "server-b")
+				seedPhase5WatchOwner(t, f.App, f.Users[0].Info.UserID, item, "server-b", "merged-b", phase7KDeviceID, phase7KSessionID, "shared-media", 1000)
 				before := f.Snapshot(t)
 				ownBefore := f.App.WatchStore.GetProgress(f.Users[0].Info.UserID, item)
 				otherBefore := f.App.WatchStore.GetProgress(f.Users[1].Info.UserID, item)

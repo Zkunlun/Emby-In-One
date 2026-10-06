@@ -14,8 +14,30 @@ import (
 var fallbackVirtualIDPattern = regexp.MustCompile(`(?i)[a-f0-9]{32}`)
 
 func (a *App) handleFallbackProxy(w http.ResponseWriter, r *http.Request) {
+	a.handleFallbackProxyWithWatchEvent(w, r, nil)
+}
+
+// Only the dedicated legacy lifecycle routes supply a watch event.
+func (a *App) handleFallbackProxyWithWatchEvent(w http.ResponseWriter, r *http.Request, watchKind *playbackWatchEventKind) {
 	reqCtx := requestContextFrom(r.Context())
 	targetClient, rewrittenPath, serverID, query, ambiguous := a.resolveFallbackTarget(r, reqCtx)
+	if watchKind != nil {
+		// Dedicated legacy lifecycle routes use exact session aliases rather
+		// than the generic fallback's independent source/session constraints.
+		resolved, sessionQuery, found := a.resolveLegacyWatchTarget(r)
+		if found {
+			targetClient, serverID, query = resolved.Client, resolved.ServerID, sessionQuery
+			segments := strings.Split(r.URL.Path, "/")
+			for index, segment := range segments {
+				if index > 0 && strings.EqualFold(segments[index-1], "PlayingItems") && segment == r.PathValue("itemId") {
+					segments[index] = resolved.OriginalID
+				}
+			}
+			rewrittenPath, ambiguous = strings.Join(segments, "/"), false
+		} else {
+			targetClient, ambiguous = nil, false
+		}
+	}
 	if targetClient == nil {
 		if ambiguous {
 			if a.Logger != nil {
@@ -44,7 +66,30 @@ func (a *App) handleFallbackProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"message": "Invalid request body"})
 		return
 	}
+	if watchKind != nil {
+		r = a.admitLegacyWatchRequest(r, serverID, query, *watchKind)
+		if _, available := a.sessionUpstreamClient(serverID); !available {
+			if *watchKind == playbackWatchStopped {
+				a.recordLegacyWatchEvent(r, serverID, query, *watchKind)
+				w.WriteHeader(http.StatusNoContent)
+			} else {
+				writeSessionUpstreamUnavailable(w)
+			}
+			return
+		}
+	}
+	if !a.prepareFallbackMediaSelection(w, r, targetClient, query, body) {
+		if watchKind != nil && *watchKind == playbackWatchStopped {
+			sessionID, _ := legacyPlaySessionID(query)
+			a.stopAdmittedPlaybackLease(r, serverID, sessionID)
+		}
+		return
+	}
 	resp, err := a.performUpstreamRequest(r, targetClient, r.Method, rewrittenPath, query, body)
+	if watchKind != nil && (*watchKind == playbackWatchStopped ||
+		(err == nil && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices)) {
+		a.recordLegacyWatchEvent(r, serverID, query, *watchKind)
+	}
 	if err != nil {
 		if writePreparationError(w, err) {
 			return
@@ -56,6 +101,11 @@ func (a *App) handleFallbackProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	if !a.isServerAllowed(reqCtx, serverID) {
+		writeMediaSelectionError(w, errMediaAccessDenied)
+		return
+	}
 
 	// Content-Length is deliberately not copied here. Every buffered path below
 	// re-serializes the payload (JSON is re-encoded after ID rewriting, HTML errors are
@@ -104,8 +154,16 @@ func (a *App) handleFallbackProxy(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Invalid upstream JSON"})
 			return
 		}
-		cfg := a.ConfigStore.Snapshot()
-		rewriteResponseIDs(payload, serverID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
+		if !a.isServerAllowed(reqCtx, serverID) {
+			writeMediaSelectionError(w, errMediaAccessDenied)
+			return
+		}
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			payload = a.rewriteVersionAwarePayload(r, payload, serverID)
+		} else {
+			cfg := a.ConfigStore.Snapshot()
+			rewriteResponseIDs(payload, serverID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
+		}
 		a.normalizeLocalUserDataPayload(r, payload)
 		writeJSON(w, resp.StatusCode, payload)
 		return
@@ -116,64 +174,127 @@ func (a *App) handleFallbackProxy(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) resolveFallbackTarget(r *http.Request, reqCtx *RequestContext) (*UpstreamClient, string, string, url.Values, bool) {
 	query := cloneValues(r.URL.Query())
-	rewrittenPath := r.URL.Path
-	serverID := ""
-	var targetClient *UpstreamClient
-
-	for _, candidate := range fallbackVirtualIDPattern.FindAllString(r.URL.Path, -1) {
-		if resolved := a.IDStore.ResolveVirtualID(candidate); resolved != nil {
-			// Try primary
-			if a.isServerAllowed(reqCtx, resolved.ServerID) {
-				if client := a.Upstream.ClientByID(resolved.ServerID); client != nil && client.IsOnline() {
-					targetClient = client
-					serverID = resolved.ServerID
-					rewrittenPath = strings.ReplaceAll(rewrittenPath, candidate, resolved.OriginalID)
-					break
+	segments := strings.Split(r.URL.Path, "/")
+	type constraint struct {
+		id             string
+		mapping        *ResolvedID
+		explicitSource bool
+	}
+	constraints := make([]constraint, 0)
+	add := func(id string, explicitSource bool) bool {
+		if id == "" {
+			return true
+		}
+		mapping := a.IDStore.ResolveVirtualID(id)
+		if mapping == nil {
+			// Unmapped explicit sources cannot fall back to the only online
+			// server. Raw source IDs are qualified and validated below.
+			if explicitSource && !a.IDStore.ContainsOriginalID(id) {
+				return false
+			}
+			return true
+		}
+		constraints = append(constraints, constraint{id: id, mapping: mapping, explicitSource: explicitSource})
+		return true
+	}
+	for index, segment := range segments {
+		if index > 0 && strings.EqualFold(segments[index-1], "Users") {
+			continue // user identity is normalized at the outbound boundary
+		}
+		if !add(segment, false) {
+			return nil, r.URL.Path, "", query, false
+		}
+		if index > 0 && fallbackResourceSegment(segments[index-1]) &&
+			fallbackVirtualIDPattern.MatchString(segment) && a.IDStore.ResolveVirtualID(segment) == nil {
+			// A classified unknown resource ID must not be guessed on B.
+			return nil, r.URL.Path, "", query, false
+		}
+	}
+	for key, values := range query {
+		explicitSource := strings.EqualFold(key, "MediaSourceId") || strings.EqualFold(key, "PlaySessionId") || strings.EqualFold(key, "SessionId")
+		_, simple := simpleIDFields[key]
+		if !simple && !explicitSource && !isBatchIDQueryKey(key) {
+			continue
+		}
+		if strings.EqualFold(key, "UserId") {
+			continue
+		}
+		for _, value := range values {
+			for _, id := range strings.Split(value, ",") {
+				if !add(strings.TrimSpace(id), explicitSource) {
+					return nil, r.URL.Path, "", query, false
 				}
 			}
-			// Primary offline — try OtherInstances
-			for _, other := range resolved.OtherInstances {
-				if a.isServerAllowed(reqCtx, other.ServerID) {
-					if client := a.Upstream.ClientByID(other.ServerID); client != nil && client.IsOnline() {
-						targetClient = client
-						serverID = other.ServerID
-						rewrittenPath = strings.ReplaceAll(rewrittenPath, candidate, other.OriginalID)
-						break
-					}
-				}
+		}
+	}
+	online := a.allowedClients(reqCtx)
+	var target *UpstreamClient
+	for _, client := range online {
+		matches := true
+		for _, required := range constraints {
+			if required.explicitSource {
+				matches = required.mapping.ServerID == client.ID
+			} else {
+				matches = resolvedOriginalIDForServer(required.mapping, client.ID) != ""
 			}
-			if targetClient != nil {
+			if !matches {
 				break
 			}
 		}
-	}
-
-	if rewritten, sid, found := rewriteIDQueryValues(query, a.IDStore); found {
-		query = url.Values(rewritten)
-		if targetClient == nil {
-			if a.isServerAllowed(reqCtx, sid) {
-				if client := a.Upstream.ClientByID(sid); client != nil && client.IsOnline() {
-					targetClient = client
-					serverID = sid
-				}
+		if matches {
+			if target == nil {
+				target = client
+			}
+			// With no route evidence, retain the existing ambiguity failure.
+			if len(constraints) == 0 && target != client {
+				return nil, r.URL.Path, "", query, true
 			}
 		}
-	} else {
-		query = url.Values(rewritten)
 	}
+	if target == nil {
+		return nil, r.URL.Path, "", query, false
+	}
+	for index, segment := range segments {
+		if index > 0 && strings.EqualFold(segments[index-1], "Users") {
+			continue
+		}
+		if mapping := a.IDStore.ResolveVirtualID(segment); mapping != nil {
+			originalID := resolvedOriginalIDForServer(mapping, target.ID)
+			if originalID == "" {
+				return nil, r.URL.Path, "", query, false
+			}
+			segments[index] = originalID
+		}
+	}
+	for key, values := range query {
+		_, simple := simpleIDFields[key]
+		if !simple && !isBatchIDQueryKey(key) && !strings.EqualFold(key, "MediaSourceId") &&
+			!strings.EqualFold(key, "PlaySessionId") && !strings.EqualFold(key, "SessionId") {
+			continue
+		}
+		if strings.EqualFold(key, "UserId") {
+			continue
+		}
+		for index, value := range values {
+			parts := strings.Split(value, ",")
+			for position, id := range parts {
+				if mapping := a.IDStore.ResolveVirtualID(strings.TrimSpace(id)); mapping != nil {
+					parts[position] = resolvedOriginalIDForServer(mapping, target.ID)
+				}
+			}
+			values[index] = strings.Join(parts, ",")
+		}
+	}
+	return target, strings.Join(segments, "/"), target.ID, query, false
+}
 
-	if targetClient == nil {
-		online := a.allowedClients(reqCtx)
-		if len(online) == 0 {
-			return nil, rewrittenPath, serverID, query, false
-		}
-		if len(online) > 1 {
-			return nil, rewrittenPath, serverID, query, true
-		}
-		targetClient = online[0]
-		serverID = targetClient.ID
+func fallbackResourceSegment(segment string) bool {
+	switch strings.ToLower(segment) {
+	case "items", "videos", "audio", "shows", "playingitems":
+		return true
+	default:
+		return false
 	}
-	return targetClient, rewrittenPath, serverID, query, false
 }
 
 // decodeFallbackBody reads the client body once. A JSON-declared body is decoded

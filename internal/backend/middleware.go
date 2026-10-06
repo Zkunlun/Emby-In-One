@@ -193,7 +193,7 @@ func (a *App) corsMiddleware(next http.Handler) http.Handler {
 		// directly and are unaffected.
 		w.Header().Set("Access-Control-Allow-Methods", allowMethods)
 		w.Header().Set("Access-Control-Allow-Headers", allowHeaders)
-		if r.Method == http.MethodOptions {
+		if r.Method == http.MethodOptions && !isCountsRoutePath(r.URL.Path) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}

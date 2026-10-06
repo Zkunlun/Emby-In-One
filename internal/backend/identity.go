@@ -20,6 +20,8 @@ type capturedEntry struct {
 	headers    http.Header
 	capturedAt string
 	sequence   uint64
+	ownerUserID string
+	ownerServerID string
 }
 
 type ResolvedPassthroughHeaders struct {
@@ -34,8 +36,15 @@ type ClientIdentityService struct {
 	latestCaptured      *capturedEntry
 	lastSuccessByServer map[string]capturedEntry
 	captureListeners    []func(string, http.Header)
+	onCountsIdentity func() // Notification only, always invoked outside mu.
 	persistence         *IdentityPersistence
 	sequence            atomic.Uint64
+	configuredSources map[string]bool
+	legacySourceOwners map[string]string
+	lifecycleEpoch uint64
+	capturePublish func(string, func(string)) bool
+	captureRequest func(string, http.Header) *RequestContext
+	ownerAllowed func(string) bool
 }
 
 func NewClientIdentityService() *ClientIdentityService {
@@ -62,15 +71,24 @@ func newClientIdentityService(persistence *IdentityPersistence) *ClientIdentityS
 }
 
 func (s *ClientIdentityService) SetCaptured(token string, headers http.Header) {
+	defer s.notifyCountsIdentity()
 	if token == "" {
 		return
 	}
 	entry := s.newCapturedEntry(headers)
-	listeners := s.storeCapturedEntry(token, entry)
+	var listeners []func(string, http.Header)
+	publish := func(owner string) {
+		entry.ownerUserID = owner
+		listeners = s.storeCapturedEntry(token, entry)
+	}
+	if s.capturePublish != nil {
+		if !s.capturePublish(token, publish) { return }
+	} else { publish("") }
 	s.notifyCaptureListeners(listeners, token, entry.headers)
 }
 
 func (s *ClientIdentityService) SaveLatestCapturedHeaders(headers http.Header) {
+	defer s.notifyCountsIdentity()
 	entry := s.newCapturedEntry(headers)
 	s.mu.Lock()
 	s.latestCaptured = cloneCapturedEntry(entry)
@@ -98,6 +116,7 @@ func (s *ClientIdentityService) GetCaptured(token string) http.Header {
 }
 
 func (s *ClientIdentityService) DeleteCaptured(token string) {
+	defer s.notifyCountsIdentity()
 	if token == "" {
 		return
 	}
@@ -107,6 +126,7 @@ func (s *ClientIdentityService) DeleteCaptured(token string) {
 }
 
 func (s *ClientIdentityService) Clear() {
+	defer s.notifyCountsIdentity()
 	s.mu.Lock()
 	s.entries = map[string]capturedEntry{}
 	s.latestInfo = nil
@@ -168,6 +188,7 @@ func (s *ClientIdentityService) GetLatestCaptured() http.Header {
 }
 
 func (s *ClientIdentityService) SaveLastSuccess(serverKey string, headers http.Header) {
+	defer s.notifyCountsIdentity()
 	if serverKey == "" {
 		return
 	}
@@ -223,11 +244,13 @@ func (s *ClientIdentityService) newCapturedEntry(headers http.Header) capturedEn
 func (s *ClientIdentityService) applyPersistenceSnapshot(snapshot identityPersistenceSnapshot) {
 	if snapshot.LatestCaptured != nil {
 		entry := s.hydrateCapturedEntry(snapshot.LatestCaptured.Headers, snapshot.LatestCaptured.CapturedAt)
+		entry.ownerUserID, entry.ownerServerID = snapshot.LatestCaptured.OwnerUserID, snapshot.LatestCaptured.OwnerServerID
 		s.latestCaptured = cloneCapturedEntry(entry)
 		s.latestInfo = cloneCapturedEntry(entry)
 	}
 	for serverKey, persisted := range snapshot.LastSuccessByServer {
 		entry := s.hydrateCapturedEntry(persisted.Headers, persisted.CapturedAt)
+		entry.ownerUserID, entry.ownerServerID = persisted.OwnerUserID, persisted.OwnerServerID
 		s.lastSuccessByServer[serverKey] = entry
 	}
 }
@@ -525,5 +548,7 @@ func cloneCapturedEntry(entry capturedEntry) *capturedEntry {
 		headers:    cloneHeader(entry.headers),
 		capturedAt: entry.capturedAt,
 		sequence:   entry.sequence,
+		ownerUserID: entry.ownerUserID,
+		ownerServerID: entry.ownerServerID,
 	}
 }

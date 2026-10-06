@@ -101,7 +101,7 @@ func TestPhase7JPlayingAndProgressSuccessCommitMatrix(t *testing.T) {
 					if count := app.PlaybackLimiter.CountForServer("server-a"); count != 2 {
 						t.Fatalf("seed lease count=%d want=2", count)
 					}
-					rr := phase7BPostSession(t, handler, path, token, itemID, 900)
+					rr := phase7BPostSession(t, handler, path, token, itemID, 800)
 					if rr.Code != http.StatusNoContent {
 						t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusNoContent, rr.Body.String())
 					}
@@ -119,8 +119,8 @@ func TestPhase7JPlayingAndProgressSuccessCommitMatrix(t *testing.T) {
 					if afterProgress == nil {
 						t.Fatal("progress missing after successful upstream confirmation")
 					}
-					if afterProgress.PositionTicks != 900 {
-						t.Fatalf("PositionTicks=%d want=900", afterProgress.PositionTicks)
+					if afterProgress.PositionTicks != 800 {
+						t.Fatalf("PositionTicks=%d want=800", afterProgress.PositionTicks)
 					}
 					if beforeProgress.PositionTicks != 111 {
 						t.Fatalf("seed PositionTicks=%d want=111", beforeProgress.PositionTicks)

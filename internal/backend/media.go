@@ -14,8 +14,12 @@ type routeResolution struct {
 }
 
 type upstreamItemsResult struct {
-	ServerID string
-	Items    []map[string]any
+	ServerID      string
+	Items         []map[string]any
+	FullSources   bool // acquisition explicitly requested the complete source list
+	CompleteItems map[string]bool
+	Parents       map[string]*mergeSeriesEvidence
+	RequestScope  *RequestContext
 	// Err distinguishes "this upstream answered with no items" from "this upstream did not
 	// answer", which the index can no longer express now that an empty page is collected
 	// from every server alike.
@@ -89,20 +93,23 @@ func (a *App) resolveRouteID(id string) *routeResolution {
 // can reference upstream servers the user has no permission for; those are
 // dropped here so no handler forwards a request to them.
 func (a *App) collectAllowedInstances(reqCtx *RequestContext, resolved *routeResolution) []seriesInstance {
-	instances := buildSeriesInstances(resolved, a.Upstream)
-	if reqCtx == nil || reqCtx.ProxyUser == nil {
+	a.watchLifecycleMu.RLock()
+	defer a.watchLifecycleMu.RUnlock()
+	if resolved == nil || a.Upstream == nil {
 		return nil
 	}
-	if reqCtx.ProxyUser.Role == "admin" {
-		return instances
-	}
-	allowed := instances[:0]
-	for _, instance := range instances {
-		if a.isServerAllowed(reqCtx, instance.ServerID) {
-			allowed = append(allowed, instance)
+	scope := a.mediaAccessScopeLocked(reqCtx)
+	mapping := &ResolvedID{OriginalID: resolved.OriginalID, ServerID: resolved.ServerID,
+		OtherInstances: resolved.OtherInstances}
+	instances := make([]seriesInstance, 0)
+	for _, instance := range authorizedMediaInstances(scope, mapping) {
+		client := a.Upstream.ClientByID(instance.ServerID)
+		if client != nil && client.IsOnline() {
+			instances = append(instances, seriesInstance{OriginalID: instance.OriginalID,
+				ServerID: instance.ServerID, Client: client})
 		}
 	}
-	return allowed
+	return instances
 }
 
 func cloneValues(values url.Values) url.Values {

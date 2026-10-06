@@ -19,6 +19,7 @@ type tokenInfo struct {
 	AllowedServers []string `json:"allowedServers"`
 	DeviceID       string   `json:"deviceId,omitempty"`
 	CreatedAt      int64    `json:"createdAt"`
+	AuthRevision   int64    `json:"authRevision,omitempty"`
 }
 
 func normalizeTokenAllowedServers(role string, allowedServers []string) []string {
@@ -36,6 +37,7 @@ func (t *tokenInfo) UnmarshalJSON(data []byte) error {
 		AllowedServers json.RawMessage `json:"allowedServers,omitempty"`
 		DeviceID       string          `json:"deviceId,omitempty"`
 		CreatedAt      int64           `json:"createdAt"`
+		AuthRevision   int64           `json:"authRevision,omitempty"`
 	}
 	var raw rawTokenInfo
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -46,6 +48,7 @@ func (t *tokenInfo) UnmarshalJSON(data []byte) error {
 	t.Role = raw.Role
 	t.DeviceID = strings.TrimSpace(raw.DeviceID)
 	t.CreatedAt = raw.CreatedAt
+	t.AuthRevision = raw.AuthRevision
 
 	if len(raw.AllowedServers) > 0 && string(raw.AllowedServers) != "null" {
 		var strServers []string
@@ -67,6 +70,8 @@ func (t *tokenInfo) UnmarshalJSON(data []byte) error {
 
 type AuthManager struct {
 	mu          sync.RWMutex
+	saveMu      sync.Mutex
+	users       *UserStore
 	configStore *ConfigStore
 	identity    *ClientIdentityService
 	logger      *Logger
@@ -75,7 +80,7 @@ type AuthManager struct {
 	tokens      map[string]tokenInfo
 }
 
-func NewAuthManager(configStore *ConfigStore, identity *ClientIdentityService, logger *Logger) (*AuthManager, error) {
+func NewAuthManager(configStore *ConfigStore, identity *ClientIdentityService, logger *Logger, userStores ...*UserStore) (*AuthManager, error) {
 	cfg := configStore.Snapshot()
 	tokenFile := filepath.Join(cfg.DataDir, "tokens.json")
 	if tokenFile == "" || tokenFile == "." || tokenFile == string(filepath.Separator) {
@@ -93,6 +98,7 @@ func NewAuthManager(configStore *ConfigStore, identity *ClientIdentityService, l
 		tokens:      map[string]tokenInfo{},
 		proxyUserID: randomHex(16),
 	}
+	if len(userStores) > 0 { manager.users = userStores[0] }
 	if err := manager.ensureAdminPasswordHashed(); err != nil {
 		return nil, err
 	}
@@ -171,6 +177,8 @@ func (m *AuthManager) load() error {
 }
 
 func (m *AuthManager) save() error {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
 	m.mu.RLock()
 	payload := map[string]any{"_proxyUserId": m.proxyUserID}
 	for token, info := range m.tokens {
@@ -277,6 +285,10 @@ func (m *AuthManager) ValidateToken(token string) *tokenInfo {
 		}
 		return nil
 	}
+	if info.Role != "admin" && m.users != nil {
+		user := m.users.Get(info.UserID)
+		if user == nil || !user.Enabled || user.AuthRevision != info.AuthRevision { return nil }
+	}
 	infoCopy := info
 	return &infoCopy
 }
@@ -313,6 +325,11 @@ func (m *AuthManager) RevokeAllTokens() {
 
 // AuthenticateUser generates a token for an already-verified user from UserStore.
 func (m *AuthManager) AuthenticateUser(user *User, hasPassword bool, deviceID ...string) (map[string]any, string, error) {
+	if user == nil || !user.Enabled { return nil, "", fmt.Errorf("user authorization is unavailable") }
+	if m.users != nil {
+		current := m.users.Get(user.ID)
+		if current == nil || !current.Enabled || current.AuthRevision != user.AuthRevision { return nil, "", fmt.Errorf("user authorization changed") }
+	}
 	token := randomHex(16)
 	m.mu.Lock()
 	m.tokens[token] = tokenInfo{
@@ -320,6 +337,7 @@ func (m *AuthManager) AuthenticateUser(user *User, hasPassword bool, deviceID ..
 		Username:       user.Username,
 		Role:           "user",
 		AllowedServers: normalizeTokenAllowedServers("user", user.AllowedServers),
+		AuthRevision:   user.AuthRevision,
 		DeviceID:       optionalTokenDeviceID(deviceID),
 		CreatedAt:      time.Now().UnixMilli(),
 	}

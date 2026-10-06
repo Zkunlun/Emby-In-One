@@ -162,13 +162,16 @@ func (a *App) prepareLocalUserFilter(w http.ResponseWriter, r *http.Request, val
 
 // localUserStateIntersect is the variant for endpoints whose candidate set is fixed
 // by the request itself (GET /Items?Ids=...). The filters are still stripped so the
-// shared account cannot hide the items, but the paging is left alone.
+// shared account cannot hide the items. Fetch every bounded requested ID before
+// applying local predicates and the original client page.
 func (a *App) localUserStateIntersect(w http.ResponseWriter, r *http.Request, values url.Values) (userStateFilter, bool) {
 	f := a.localUserStateFilter(w, r, values)
 	if a.WatchStore == nil || !isRegularProxyUser(r) || !f.active() {
 		return f, false
 	}
 	f.stripFrom(values)
+	values.Set("StartIndex", "0")
+	values.Set("Limit", strconv.Itoa(maxBatchIDCount))
 	ensureSortFields(values)
 	return f, true
 }
@@ -280,11 +283,19 @@ func (a *App) filterItemsByLocalUserState(r *http.Request, items []map[string]an
 			ids = append(ids, id)
 		}
 	}
-	rows := a.WatchStore.GetProgressBatch(reqCtx.ProxyUser.UserID, ids)
+	rows, err := a.visibleWatchProgressBatch(r, ids)
+	if err != nil {
+		a.logVisibleWatchReadError(err)
+		return []map[string]any{}, nil
+	}
+	visible := a.authorizedMediaVisibilityBatch(reqCtx, ids)
 	kept := make([]map[string]any, 0, len(items))
 	recency := make(map[string]int64, len(items))
 	for _, item := range items {
 		id := itemID(item)
+		if !visible[id] {
+			continue
+		}
 		row, exists := rows[id]
 		if !satisfiesCandidateUserState(row, exists, f) {
 			continue

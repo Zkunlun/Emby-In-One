@@ -64,7 +64,7 @@ func (a *App) handleAuthenticateByName(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "failed to read user password state"})
 				return
 			}
-			response, token, authErr := a.Auth.AuthenticateUser(user, hasPassword, loginDeviceID)
+			response, token, authErr := a.authenticateCurrentUser(user, hasPassword, loginDeviceID)
 			if authErr != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"message": authErr.Error()})
 				return

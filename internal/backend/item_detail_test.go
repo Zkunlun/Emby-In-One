@@ -20,7 +20,7 @@ func TestUserItemsLatestSupportsParentRoutingAndCrossServerMerge(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-a", "User": map[string]any{"Id": "user-a"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/Users/user-a/Items/Latest":
 			primaryParent.Store(r.URL.Query().Get("ParentId"))
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"Id": "latest-a", "ParentId": "parent-a", "Name": "Latest A"}})
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"Id": "latest-a", "Type": "Movie", "ParentId": "parent-a", "Name": "Latest A"}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -33,7 +33,7 @@ func TestUserItemsLatestSupportsParentRoutingAndCrossServerMerge(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-b", "User": map[string]any{"Id": "user-b"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/Users/user-b/Items/Latest":
 			secondaryCalls.Add(1)
-			_ = json.NewEncoder(w).Encode([]map[string]any{{"Id": "latest-b", "ParentId": "parent-b", "Name": "Latest B"}})
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"Id": "latest-b", "Type": "Movie", "ParentId": "parent-b", "Name": "Latest B"}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -163,7 +163,7 @@ func TestItemDetailRelatedRoutesRewriteIDs(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "item-a", "ParentId": "parent-a", "Name": "Item A"})
 		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-a/Similar":
 			similarUserID.Store(r.URL.Query().Get("UserId"))
-			_ = json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{{"Id": "similar-a", "ParentId": "item-a"}}, "TotalRecordCount": 1})
+			_ = json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{{"Id": "similar-a", "ParentId": "item-a", "Type": "Movie"}}, "TotalRecordCount": 1})
 		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-a/ThemeMedia":
 			themeUserID.Store(r.URL.Query().Get("UserId"))
 			_ = json.NewEncoder(w).Encode(map[string]any{

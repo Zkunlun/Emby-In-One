@@ -26,6 +26,7 @@ func TestPhase7JAdditional2xxCommitsWithoutChangingLeaseOwnership(t *testing.T) 
 					before := phase7ISnapshotLease(t, app, info.UserID, "server-a")
 					rr := phase1ESessionPost(t, handler, path, token, "xbox-001", map[string]any{
 						"ItemId": itemID, "PositionTicks": int64(222), "RunTimeTicks": int64(2000),
+						"PlaySessionId": "play-a",
 					})
 					if rr.Code != http.StatusNoContent || rr.Body.Len() != 0 {
 						t.Fatalf("response status=%d body=%q want empty 204", rr.Code, rr.Body.String())

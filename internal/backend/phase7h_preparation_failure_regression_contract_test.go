@@ -152,8 +152,12 @@ func TestPhase7HStoppedPreparationFailureFinalizesOnlyExactLease(t *testing.T) {
 				})
 				phase7HAssertPreparationError(t, rr)
 				progress := app.WatchStore.GetProgress(info.UserID, itemID)
-				if progress == nil || progress.PositionTicks != 600 || progress.RuntimeTicks != 1000 {
-					t.Fatalf("Stopped preparation failure did not finalize progress: %#v", progress)
+				wantPosition := int64(111)
+				if tc.wantLeases == 0 {
+					wantPosition = 600
+				}
+				if progress == nil || progress.PositionTicks != wantPosition || progress.RuntimeTicks != 1000 {
+					t.Fatalf("Stopped preparation failure shared progress: %#v want position=%d", progress, wantPosition)
 				}
 				if got := app.PlaybackLimiter.CountForServer("server-a"); got != tc.wantLeases {
 					t.Fatalf("lease count=%d want=%d", got, tc.wantLeases)

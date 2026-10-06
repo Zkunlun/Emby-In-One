@@ -32,6 +32,8 @@ func TestVideoStreamSwitchesToMediaSourceServer(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "tok-b", "User": map[string]any{"Id": "user-b"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/Users/user-b/Items/episode-b":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "episode-b", "MediaSources": []any{map[string]any{"Id": "ms-b"}}})
 		case r.Method == http.MethodGet && r.URL.Path == "/Videos/episode-b/stream.mkv":
 			secondaryRequest.Store(r.URL.Path + "|" + r.URL.Query().Get("api_key"))
 			w.Header().Set("Content-Type", "video/x-matroska")

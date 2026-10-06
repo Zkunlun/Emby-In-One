@@ -222,12 +222,18 @@ upstream: []
 			return nil
 		})
 
+		app.IDStore.mu.Lock()
+		app.IDStore.configuredSources = configuredSourceIDs(app.ConfigStore.Snapshot())
+		app.IDStore.mu.Unlock()
+
 		results := []upstreamItemsResult{
 			{
-				ServerID: "srv-0",
+				ServerID:    "srv-0",
+				FullSources: true,
 				Items: []map[string]any{
 					{
 						"Id":             "orig-0",
+						"MediaSources":   []any{map[string]any{"Id": "source-0", "RunTimeTicks": 1000}},
 						"Type":           "Movie",
 						"Name":           "Test Movie",
 						"Overview":       "Long English overview",
@@ -237,10 +243,12 @@ upstream: []
 				},
 			},
 			{
-				ServerID: "srv-1",
+				ServerID:    "srv-1",
+				FullSources: true,
 				Items: []map[string]any{
 					{
 						"Id":             "orig-1",
+						"MediaSources":   []any{map[string]any{"Id": "source-1", "RunTimeTicks": 1000}},
 						"Type":           "Movie",
 						"Name":           "Test Movie",
 						"Overview":       "优先元数据",

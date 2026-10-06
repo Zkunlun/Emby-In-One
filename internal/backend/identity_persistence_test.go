@@ -112,7 +112,8 @@ func TestResolvePassthroughHeadersSupportsFiveLevelChain(t *testing.T) {
 			},
 		})
 	}, func(app *App, handler http.Handler, dir string) {
-		app.Identity.SetCaptured("token-a", http.Header{
+		token := loginToken(t, handler, "secret")
+		app.Identity.SetCaptured(token, http.Header{
 			"User-Agent":            []string{"Token Client UA"},
 			"X-Emby-Client":         []string{"Token Client"},
 			"X-Emby-Client-Version": []string{"2.0.0"},
@@ -126,22 +127,22 @@ func TestResolvePassthroughHeadersSupportsFiveLevelChain(t *testing.T) {
 			"X-Emby-Client-Version": []string{"3.0.0"},
 			"X-Emby-Device-Name":    []string{"Live Device"},
 			"X-Emby-Device-Id":      []string{"live-device"},
-		}, "token-a", stablePassthroughKey(upstreamA.URL, "A"))
+		}, token, "id:"+app.Upstream.Clients()[0].ID)
 		if source != "live-request" || headers.Get("X-Emby-Client") != "Live Client" {
 			t.Fatalf("live-request resolution = (%q, %q), want live-request / Live Client", source, headers.Get("X-Emby-Client"))
 		}
 
-		source, headers = callResolvePassthroughHeadersForServer(t, app.Identity, http.Header{}, "token-a", stablePassthroughKey(upstreamA.URL, "A"))
+		source, headers = callResolvePassthroughHeadersForServer(t, app.Identity, http.Header{}, token, "id:"+app.Upstream.Clients()[0].ID)
 		if source != "captured-token" || headers.Get("X-Emby-Client") != "Token Client" {
 			t.Fatalf("captured-token resolution = (%q, %q), want captured-token / Token Client", source, headers.Get("X-Emby-Client"))
 		}
 
-		source, headers = callResolvePassthroughHeadersForServer(t, app.Identity, http.Header{}, "missing-token", stablePassthroughKey(upstreamA.URL, "A"))
+		source, headers = callResolvePassthroughHeadersForServer(t, app.Identity, http.Header{}, "missing-token", "id:"+app.Upstream.Clients()[0].ID)
 		if source != "last-success" || headers.Get("X-Emby-Client") != "Server Last Client" {
 			t.Fatalf("last-success resolution = (%q, %q), want last-success / Server Last Client", source, headers.Get("X-Emby-Client"))
 		}
 
-		source, headers = callResolvePassthroughHeadersForServer(t, app.Identity, http.Header{}, "missing-token", stablePassthroughKey(upstreamB.URL, "B"))
+		source, headers = callResolvePassthroughHeadersForServer(t, app.Identity, http.Header{}, "missing-token", "id:"+app.Upstream.Clients()[1].ID)
 		if source != "captured-latest" || headers.Get("X-Emby-Client") != "Latest Client" {
 			t.Fatalf("captured-latest resolution = (%q, %q), want captured-latest / Latest Client", source, headers.Get("X-Emby-Client"))
 		}

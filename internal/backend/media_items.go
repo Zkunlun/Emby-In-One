@@ -21,7 +21,7 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 		// account. Fetch the candidate set across allowed servers, then filter/page it
 		// locally using virtual IDs.
 		results := a.fetchItemsAcrossUpstreams(r.Context(), requestContextFrom(r.Context()), "/Items", query, nil)
-		merged := a.mergedItemsPayload(results, a.clientFacingUserIDFor(r))
+		merged := a.mergedItemsPayload(results, a.clientFacingUserIDFor(r), requestContextFrom(r.Context()))
 		items := asItems(merged)
 		kept, recency := a.filterItemsByLocalUserState(r, items, filter)
 		localItemSort(kept, r.URL.Query(), recency)
@@ -55,11 +55,12 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 				if !ok {
 					return upstreamItemsResult{Err: errBatchQueryNotTranslatable}
 				}
+				fullSources := requestMergeFields(serverQuery)
 				payload, err := c.RequestJSON(bgCtx, reqCtx, a.Identity, http.MethodGet, "/Items", serverQuery, nil)
 				if err != nil {
 					return upstreamItemsResult{Err: err}
 				}
-				return upstreamItemsResult{ServerID: c.ID, Items: asItems(payload)}
+				return upstreamItemsResult{ServerID: c.ID, Items: asItems(payload), FullSources: fullSources, RequestScope: reqCtx}
 			},
 		}
 	}
@@ -68,17 +69,16 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 		gracePeriod:   time.Duration(cfg.Timeouts.SearchGracePeriod) * time.Millisecond,
 		globalTimeout: globalTimeout,
 	}, tasks)
-	merged := a.mergedItemsPayload(collected, a.clientFacingUserIDFor(r))
-	items := asItems(merged)
+	collected = a.hydrateMergeResults(r, collected)
+	merged := a.mergedItemsPayload(collected, a.clientFacingUserIDFor(r), reqCtx)
+	items := a.filterRequestedMergeItems(query, asItems(merged))
+	merged["Items"] = items
+	merged["TotalRecordCount"] = len(items)
 	if localFilter {
 		kept, recency := a.filterItemsByLocalUserState(r, items, filter)
 		localItemSort(kept, r.URL.Query(), recency)
 		a.overlayLocalUserDataItems(r, kept)
-		writeJSON(w, http.StatusOK, map[string]any{
-			"Items":            toAnySlice(kept),
-			"TotalRecordCount": len(kept),
-			"StartIndex":       0,
-		})
+		writeJSON(w, http.StatusOK, paginateItems(kept, r.URL.Query()))
 		return
 	}
 	a.overlayLocalUserDataItems(r, items)
@@ -89,7 +89,10 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 	query := cloneValues(r.URL.Query())
 	parentID := firstQueryValue(query, "ParentId", "parentId", "parentid")
 	if parentID != "" && parentID != "0" && parentID != "root" {
-		resolved := a.resolveRouteID(parentID)
+		resolved, routeOK := a.resolveRequestRouteID(w, r, parentID)
+		if !routeOK {
+			return
+		}
 		if resolved == nil {
 			writeJSON(w, http.StatusOK, map[string]any{"Items": []any{}, "TotalRecordCount": 0, "StartIndex": 0})
 			return
@@ -104,12 +107,19 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 		// scopes the query to the requested container, but it no longer decides which
 		// of that container's items the user sees.
 		filter, localFilter := a.prepareLocalUserFilter(w, r, query)
+		fullSources := requestMergeFields(query)
 		payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Users/"+resolved.Client.clientUserID()+"/Items", query, nil)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
 			return
 		}
-		items := a.rewriteItems(asItems(payload), resolved.ServerID, a.clientFacingUserIDFor(r))
+		if !a.requireServerAccess(w, r, resolved) {
+			return
+		}
+		items := a.rewriteMergeResponseItems(r, asItems(payload), resolved.ServerID, fullSources)
+		if block, ok := payload.(map[string]any); ok {
+			block["Items"] = toAnySlice(items)
+		}
 		if localFilter {
 			kept, recency := a.filterItemsByLocalUserState(r, items, filter)
 			localItemSort(kept, r.URL.Query(), recency)
@@ -133,7 +143,7 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 	if hidden := a.hiddenLibrariesFor(requestContextFrom(r.Context())); len(hidden) > 0 {
 		dropHiddenLibraryViews(results, hidden)
 	}
-	merged := a.mergedItemsPayload(results, a.clientFacingUserIDFor(r))
+	merged := a.mergedItemsPayload(results, a.clientFacingUserIDFor(r), requestContextFrom(r.Context()))
 	if items, ok := merged["Items"].([]any); ok {
 		asMaps := make([]map[string]any, 0, len(items))
 		for _, item := range items {
@@ -160,9 +170,13 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleUserItemsLatest(w http.ResponseWriter, r *http.Request) {
 	query := cloneValues(r.URL.Query())
+	filter, localFilter := a.prepareLocalUserFilter(w, r, query)
 	parentID := query.Get("ParentId")
 	if parentID != "" {
-		resolved := a.resolveRouteID(parentID)
+		resolved, routeOK := a.resolveRequestRouteID(w, r, parentID)
+		if !routeOK {
+			return
+		}
 		if resolved == nil {
 			writeJSON(w, http.StatusOK, []any{})
 			return
@@ -172,13 +186,22 @@ func (a *App) handleUserItemsLatest(w http.ResponseWriter, r *http.Request) {
 		}
 		query.Set("ParentId", resolved.OriginalID)
 		query.Set("UserId", resolved.Client.clientUserID())
+		fullSources := requestMergeFields(query)
 		payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Users/"+resolved.Client.clientUserID()+"/Items/Latest", query, nil)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
 			return
 		}
-		items := asItems(payload)
-		a.rewriteItems(items, resolved.ServerID, a.clientFacingUserIDFor(r))
+		if !a.requireServerAccess(w, r, resolved) {
+			return
+		}
+		items := a.rewriteMergeResponseItems(r, asItems(payload), resolved.ServerID, fullSources)
+		if localFilter {
+			var recency map[string]int64
+			items, recency = a.filterItemsByLocalUserState(r, items, filter)
+			localItemSort(items, r.URL.Query(), recency)
+			items = asItems(paginateItems(items, r.URL.Query()))
+		}
 		a.overlayLocalUserDataItems(r, items)
 		writeJSON(w, http.StatusOK, items)
 		return
@@ -199,13 +222,15 @@ func (a *App) handleUserItemsLatest(w http.ResponseWriter, r *http.Request) {
 			fn: func(bgCtx context.Context) upstreamItemsResult {
 				instQuery := cloneValues(query)
 				instQuery.Set("UserId", c.clientUserID())
+				fullSources := requestMergeFields(instQuery)
 				payload, err := c.RequestJSON(bgCtx, reqCtx, a.Identity, http.MethodGet, "/Users/"+c.clientUserID()+"/Items/Latest", instQuery, nil)
 				if err != nil {
 					return upstreamItemsResult{Err: err}
 				}
-				items := asItems(payload)
-				a.rewriteItems(items, c.ID, a.clientFacingUserIDFor(r))
-				return upstreamItemsResult{ServerID: c.ID, Items: items}
+				if !a.isServerAllowed(reqCtx, c.ID) {
+					return upstreamItemsResult{Err: errMediaAccessDenied}
+				}
+				return upstreamItemsResult{ServerID: c.ID, Items: asItems(payload), FullSources: fullSources, RequestScope: reqCtx}
 			},
 		}
 	}
@@ -214,156 +239,31 @@ func (a *App) handleUserItemsLatest(w http.ResponseWriter, r *http.Request) {
 		gracePeriod:   time.Duration(cfg.Timeouts.LatestGracePeriod) * time.Millisecond,
 		globalTimeout: globalTimeout,
 	}, tasks)
-	allItems := make([]map[string]any, 0)
-	for _, result := range collected {
-		allItems = append(allItems, result.Items...)
+	collected = a.hydrateMergeResults(r, collected)
+	allItems := a.mergeRoundRobinItems(collected, a.clientFacingUserIDFor(r), reqCtx)
+	if localFilter {
+		var recency map[string]int64
+		allItems, recency = a.filterItemsByLocalUserState(r, allItems, filter)
+		localItemSort(allItems, r.URL.Query(), recency)
+		allItems = asItems(paginateItems(allItems, r.URL.Query()))
 	}
 	a.overlayLocalUserDataItems(r, allItems)
 	writeJSON(w, http.StatusOK, allItems)
 }
 
 func (a *App) handleUserItemByID(w http.ResponseWriter, r *http.Request) {
-	resolved := a.resolveRouteID(r.PathValue("itemId"))
-	if resolved == nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Item not found"})
-		return
-	}
-	reqCtx := requestContextFrom(r.Context())
-	if !a.requireServerAccess(w, r, resolved) {
-		return
-	}
-	instances := a.collectAllowedInstances(reqCtx, resolved)
-	if len(instances) <= 1 {
-		query := cloneValues(r.URL.Query())
-		query.Set("UserId", resolved.Client.clientUserID())
-		payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Users/"+resolved.Client.clientUserID()+"/Items/"+resolved.OriginalID, query, nil)
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
-			return
-		}
-		cfg := a.ConfigStore.Snapshot()
-		rewriteResponseIDs(payload, resolved.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
-		a.overlayLocalUserData(r, r.PathValue("itemId"), payload)
-		writeJSON(w, http.StatusOK, payload)
-		return
-	}
-
-	var base map[string]any
-	var baseServerID string
-	allMediaSources := []map[string]any{}
-
-	cfg := a.ConfigStore.Snapshot()
-	globalTimeout := time.Duration(cfg.Timeouts.Global) * time.Millisecond
-	if globalTimeout <= 0 {
-		globalTimeout = 15 * time.Second
-	}
-	bgCtx, bgCancel := context.WithTimeout(context.Background(), globalTimeout)
-
-	type instanceResult struct {
-		serverID     string
-		data         map[string]any
-		mediaSources []map[string]any
-	}
-	resultCh := make(chan *instanceResult, len(instances))
-
-	for _, inst := range instances {
-		go func(si seriesInstance) {
-			query := cloneValues(r.URL.Query())
-			query.Set("UserId", si.Client.clientUserID())
-			payload, err := si.Client.RequestJSON(bgCtx, requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Users/"+si.Client.clientUserID()+"/Items/"+si.OriginalID, query, nil)
-			if err != nil {
-				resultCh <- nil
-				return
-			}
-			data, ok := payload.(map[string]any)
-			if !ok {
-				resultCh <- nil
-				return
-			}
-			var mediaSources []map[string]any
-			for _, raw := range asItems(map[string]any{"Items": data["MediaSources"]}) {
-				ms := deepCloneMap(raw)
-				if originalID, _ := ms["Id"].(string); originalID != "" {
-					ms["Id"] = a.IDStore.GetOrCreateVirtualID(originalID, si.ServerID)
-				}
-				if client := a.Upstream.ClientByID(si.ServerID); client != nil {
-					name, _ := ms["Name"].(string)
-					if name == "" {
-						name = "Version"
-					}
-					ms["Name"] = name + " [" + client.Name + "]"
-				}
-				mediaSources = append(mediaSources, ms)
-			}
-			resultCh <- &instanceResult{serverID: si.ServerID, data: data, mediaSources: mediaSources}
-		}(inst)
-	}
-
-	gracePeriod := time.Duration(cfg.Timeouts.MetadataGracePeriod) * time.Millisecond
-	var graceTimer <-chan time.Time
-	received := 0
-
-	for received < len(instances) {
-		select {
-		case res := <-resultCh:
-			received++
-			if res != nil {
-				if base == nil {
-					base = deepCloneMap(res.data)
-					baseServerID = res.serverID
-				}
-				allMediaSources = append(allMediaSources, res.mediaSources...)
-				if graceTimer == nil && gracePeriod > 0 {
-					graceTimer = time.After(gracePeriod)
-				}
-			}
-		case <-graceTimer:
-			goto metadataDone
-		case <-r.Context().Done():
-			goto metadataDone
-		}
-	}
-metadataDone:
-	bgCancel()
-	if base == nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Upstream request failed"})
-		return
-	}
-	mediaSources := make([]any, 0, len(allMediaSources))
-	for _, mediaSource := range allMediaSources {
-		mediaSources = append(mediaSources, mediaSource)
-	}
-	// delete-and-restore: prevent rewriteResponseIDs from double-wrapping
-	// already-virtualised MediaSource IDs and creating orphan mappings
-	delete(base, "MediaSources")
-	rewriteResponseIDs(base, baseServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
-	base["MediaSources"] = mediaSources
-	a.overlayLocalUserData(r, r.PathValue("itemId"), base)
-	writeJSON(w, http.StatusOK, base)
+	a.handleMergeItemDetail(w, r, true)
 }
 
 func (a *App) handleItemByID(w http.ResponseWriter, r *http.Request) {
-	resolved := a.resolveRouteID(r.PathValue("itemId"))
-	if resolved == nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Item not found"})
-		return
-	}
-	if !a.requireServerAccess(w, r, resolved) {
-		return
-	}
-	payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Items/"+resolved.OriginalID, cloneValues(r.URL.Query()), nil)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
-		return
-	}
-	cfg := a.ConfigStore.Snapshot()
-	rewriteResponseIDs(payload, resolved.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
-	a.overlayLocalUserData(r, r.PathValue("itemId"), payload)
-	writeJSON(w, http.StatusOK, payload)
+	a.handleMergeItemDetail(w, r, false)
 }
 
 func (a *App) handleItemSimilar(w http.ResponseWriter, r *http.Request) {
-	resolved := a.resolveRouteID(r.PathValue("itemId"))
+	resolved, routeOK := a.resolveRequestRouteID(w, r, r.PathValue("itemId"))
+	if !routeOK {
+		return
+	}
 	if resolved == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"Items": []any{}, "TotalRecordCount": 0})
 		return
@@ -373,19 +273,35 @@ func (a *App) handleItemSimilar(w http.ResponseWriter, r *http.Request) {
 	}
 	query := cloneValues(r.URL.Query())
 	query.Set("UserId", resolved.Client.clientUserID())
+	filter, localFilter := a.prepareLocalUserFilter(w, r, query)
 	payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Items/"+resolved.OriginalID+"/Similar", query, nil)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
 		return
 	}
-	cfg := a.ConfigStore.Snapshot()
-	rewriteResponseIDs(payload, resolved.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
-	a.overlayLocalUserDataItems(r, asItems(payload))
+	if !a.requireServerAccess(w, r, resolved) {
+		return
+	}
+	items := a.rewriteMergeResponseItems(r, asItems(payload), resolved.ServerID, false)
+	if page, ok := payload.(map[string]any); ok {
+		page["Items"] = toAnySlice(items)
+	}
+	if localFilter {
+		kept, recency := a.filterItemsByLocalUserState(r, items, filter)
+		localItemSort(kept, r.URL.Query(), recency)
+		a.overlayLocalUserDataItems(r, kept)
+		writeJSON(w, http.StatusOK, paginateItems(kept, r.URL.Query()))
+		return
+	}
+	a.overlayLocalUserDataItems(r, items)
 	writeJSON(w, http.StatusOK, payload)
 }
 
 func (a *App) handleItemThemeMedia(w http.ResponseWriter, r *http.Request) {
-	resolved := a.resolveRouteID(r.PathValue("itemId"))
+	resolved, routeOK := a.resolveRequestRouteID(w, r, r.PathValue("itemId"))
+	if !routeOK {
+		return
+	}
 	if resolved == nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ThemeVideosResult":     map[string]any{"Items": []any{}, "TotalRecordCount": 0},
@@ -404,8 +320,10 @@ func (a *App) handleItemThemeMedia(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
 		return
 	}
-	cfg := a.ConfigStore.Snapshot()
-	rewriteResponseIDs(payload, resolved.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
+	if !a.requireServerAccess(w, r, resolved) {
+		return
+	}
+	payload = a.rewriteVersionAwarePayload(r, payload, resolved.ServerID)
 	a.normalizeLocalUserDataPayload(r, payload)
 	writeJSON(w, http.StatusOK, payload)
 }
@@ -428,6 +346,7 @@ func (a *App) fetchItemsAcrossUpstreams(ctx context.Context, reqCtx *RequestCont
 			index: i,
 			fn: func(bgCtx context.Context) upstreamItemsResult {
 				serverQuery := cloneValues(query)
+				fullSources := requestMergeFields(serverQuery)
 				// Clients only ever hold EIO's virtual user ID, which no upstream knows.
 				serverQuery.Set("UserId", c.clientUserID())
 				if hasBatchIDQuery(serverQuery) {
@@ -441,15 +360,24 @@ func (a *App) fetchItemsAcrossUpstreams(ctx context.Context, reqCtx *RequestCont
 				if err != nil {
 					return upstreamItemsResult{Err: err}
 				}
-				return upstreamItemsResult{ServerID: c.ID, Items: asItems(payload)}
+				items := asItems(payload)
+				if pathTemplate == "/Shows/NextUp" {
+					for _, item := range items {
+						if kind, _ := item["Type"].(string); kind == "" {
+							item["Type"] = "Episode"
+						}
+					}
+				}
+				return upstreamItemsResult{ServerID: c.ID, Items: items, FullSources: fullSources, RequestScope: reqCtx}
 			},
 		}
 	}
 
-	return a.aggregateUpstreams(ctx, aggregationConfig{
+	results := a.aggregateUpstreams(ctx, aggregationConfig{
 		gracePeriod:   time.Duration(cfg.Timeouts.SearchGracePeriod) * time.Millisecond,
 		globalTimeout: globalTimeout,
 	}, tasks)
+	return a.hydrateMergeResults((&http.Request{}).WithContext(ctx), results)
 }
 
 // getItemKey generates a deduplication key for an item.
@@ -544,8 +472,8 @@ func isBetterMetadata(existing map[string]any, existingServerID string, candidat
 	return candidateOrder < existingOrder
 }
 
-func (a *App) mergedItemsPayload(results []upstreamItemsResult, clientUserID string) map[string]any {
-	merged := a.mergeRoundRobinItems(results, clientUserID)
+func (a *App) mergedItemsPayload(results []upstreamItemsResult, clientUserID string, requestScopes ...*RequestContext) map[string]any {
+	merged := a.mergeRoundRobinItems(results, clientUserID, requestScopes...)
 	return map[string]any{
 		"Items":            toAnySlice(merged),
 		"TotalRecordCount": len(merged),
@@ -553,65 +481,14 @@ func (a *App) mergedItemsPayload(results []upstreamItemsResult, clientUserID str
 	}
 }
 
-// mergeRoundRobinItems interleaves items from every server in turn, deduplicating by
-// getItemKey: the first copy keeps the virtual id and later copies are registered as
-// additional instances of it, replacing the display item only when their metadata is
-// better.
-func (a *App) mergeRoundRobinItems(results []upstreamItemsResult, clientUserID string) []map[string]any {
-	cfg := a.ConfigStore.Snapshot()
-	merged := make([]map[string]any, 0)
-	type seenEntry struct {
-		virtualID   string
-		mergedIndex int // position in merged slice
-		serverID    string
+// Demand discovery uses precise version membership, never whole-item source projection.
+func (a *App) mergeRoundRobinItems(results []upstreamItemsResult, clientUserID string, requestScopes ...*RequestContext) []map[string]any {
+	var reqCtx *RequestContext
+	if len(requestScopes) > 0 {
+		reqCtx = requestScopes[0]
+		results = a.filterAllowedUpstreamResults(reqCtx, results)
 	}
-	seen := map[string]*seenEntry{} // dedupKey → entry
-
-	maxLen := 0
-	for _, result := range results {
-		if len(result.Items) > maxLen {
-			maxLen = len(result.Items)
-		}
-	}
-
-	for i := 0; i < maxLen; i++ {
-		for _, result := range results {
-			if i >= len(result.Items) {
-				continue
-			}
-			item := result.Items[i]
-			key := getItemKey(item)
-			originalID, _ := item["Id"].(string)
-			if key == "" || originalID == "" {
-				rewriteResponseIDs(item, result.ServerID, a.IDStore, cfg.Server.ID, clientUserID)
-				merged = append(merged, item)
-				continue
-			}
-
-			if entry, found := seen[key]; found {
-				// Duplicate: associate as an additional instance of the same item.
-				a.IDStore.AssociateAdditionalInstance(entry.virtualID, originalID, result.ServerID)
-				if isBetterMetadata(merged[entry.mergedIndex], entry.serverID, item, result.ServerID, cfg) {
-					delete(item, "Id")
-					rewriteResponseIDs(item, result.ServerID, a.IDStore, cfg.Server.ID, clientUserID)
-					item["Id"] = entry.virtualID
-					merged[entry.mergedIndex] = item
-					entry.serverID = result.ServerID
-				}
-				continue
-			}
-
-			// First occurrence: keep the virtual ID, rewrite everything else.
-			virtualID := a.IDStore.GetOrCreateVirtualID(originalID, result.ServerID)
-			seen[key] = &seenEntry{virtualID: virtualID, mergedIndex: len(merged), serverID: result.ServerID}
-			delete(item, "Id")
-			rewriteResponseIDs(item, result.ServerID, a.IDStore, cfg.Server.ID, clientUserID)
-			item["Id"] = virtualID
-			merged = append(merged, item)
-		}
-	}
-
-	return merged
+	return a.mergeHTTPItems(results, clientUserID, reqCtx)
 }
 
 // mergedItemsScanLimit caps how many items one merged (no ParentId) item query may pull

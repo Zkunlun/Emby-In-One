@@ -232,12 +232,13 @@ func TestFallbackCurrentUserIdentity(t *testing.T) {
 
 // Resume and NextUp must materialize local history and rewrite upstream identity.
 func TestResponseIdentityResumeAndNextUp(t *testing.T) {
-	var resumeHits, nextUpHits atomic.Int32
+	var resumeHits, nextUpHits, parentHits atomic.Int32
 	episode := func(id string, number int) map[string]any {
 		return map[string]any{
 			"Id": id, "UserId": "user-a", "Type": "Episode", "Name": id,
 			"SeriesId": "series-a", "SeriesName": "Fixture Series",
 			"ParentIndexNumber": 1, "IndexNumber": number, "RunTimeTicks": 1000,
+			"MediaSources": []any{map[string]any{"Id": "source-" + id, "RunTimeTicks": 1000}},
 			"UserData": map[string]any{
 				"PlaybackPositionTicks": 777, "Played": true, "IsFavorite": true,
 			},
@@ -248,6 +249,11 @@ func TestResponseIdentityResumeAndNextUp(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-a", "User": map[string]any{"Id": "user-a"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			if r.URL.Query().Get("Ids") == "series-a" {
+				parentHits.Add(1)
+				_ = json.NewEncoder(w).Encode(map[string]any{"Items": []any{map[string]any{"Id": "series-a", "Type": "Series", "Name": "Fixture Series", "ProductionYear": 2024}}})
+				return
+			}
 			resumeHits.Add(1)
 			if got := r.URL.Query().Get("Ids"); got != "orig-item" {
 				t.Errorf("resume metadata Ids = %q, want orig-item", got)
@@ -341,6 +347,9 @@ func TestResponseIdentityResumeAndNextUp(t *testing.T) {
 				t.Fatalf("Alice's NextUp leaked to Bob: %#v", items)
 			}
 		})
+		if parentHits.Load() != 1 {
+			t.Fatalf("encountered parent metadata hits = %d, want 1", parentHits.Load())
+		}
 		if resumeHits.Load() != 1 || nextUpHits.Load() != 1 {
 			t.Fatalf("metadata hits: Resume=%d NextUp=%d, want 1 each", resumeHits.Load(), nextUpHits.Load())
 		}

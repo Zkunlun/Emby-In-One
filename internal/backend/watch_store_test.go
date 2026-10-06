@@ -404,7 +404,7 @@ func TestWatchStoreIsolation(t *testing.T) {
 	}
 }
 
-func TestMigratePlayedStatus(t *testing.T) {
+func TestWatchStoreOpeningDoesNotReclassifyHistoricalProgress(t *testing.T) {
 	dir := t.TempDir()
 	logger := NewLogger(LogConfig{Level: "error", FileLevel: "error", DataDir: dir})
 	t.Cleanup(func() { logger.Close() })
@@ -414,13 +414,13 @@ func TestMigratePlayedStatus(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = closeSQLite(db) })
 
-	// First NewWatchStore creates table + runs migration (no-op on empty table)
+	// Opening initializes schema without retroactively applying playback rules.
 	ws, err := NewWatchStore(db, logger)
 	if err != nil {
 		t.Fatalf("new watch store: %v", err)
 	}
 
-	// Insert dirty data: ep-1 is 100% watched but played=0
+	// Historical ep-1 has 100% position but lacks session/version completion proof.
 	if err := ws.RecordProgress(&WatchProgress{
 		ProxyUserID: "user1", VirtualItemID: "ep-1",
 		ServerID: "srv-0", OriginalItemID: "orig-1",
@@ -430,7 +430,7 @@ func TestMigratePlayedStatus(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// ep-2 is 50% watched, played=0 (correct, should NOT be migrated)
+	// Historical ep-2 also retains its explicit unplayed state.
 	if err := ws.RecordProgress(&WatchProgress{
 		ProxyUserID: "user1", VirtualItemID: "ep-2",
 		ServerID: "srv-0", OriginalItemID: "orig-2",
@@ -441,21 +441,19 @@ func TestMigratePlayedStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Re-invoke NewWatchStore to trigger migration on existing dirty data
+	// Reopening must preserve both histories rather than infer completion.
 	ws2, err := NewWatchStore(db, logger)
 	if err != nil {
 		t.Fatalf("second NewWatchStore: %v", err)
 	}
 
-	// ep-1: should have been migrated to played=true (100% >= 90%)
 	p1 := ws2.GetProgress("user1", "ep-1")
-	if p1 == nil || !p1.Played {
-		t.Errorf("ep-1: expected played=true (auto-migrated), got played=%v", p1 != nil && p1.Played)
-	}
-	// ep-2: should remain played=false (50% < 90%)
 	p2 := ws2.GetProgress("user1", "ep-2")
-	if p2 == nil || p2.Played {
-		t.Errorf("ep-2: expected played=false, got played=%v", p2 != nil && p2.Played)
+	if p1 == nil || p1.Played || p1.PositionTicks != 100 || p1.LastPlayed != 1000 {
+		t.Errorf("ep-1 history changed: %+v", p1)
+	}
+	if p2 == nil || p2.Played || p2.PositionTicks != 50 || p2.LastPlayed != 2000 {
+		t.Errorf("ep-2 history changed: %+v", p2)
 	}
 }
 

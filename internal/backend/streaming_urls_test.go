@@ -82,7 +82,14 @@ func redirectProbeUpstream(t *testing.T, probeStatus int) (*httptest.Server, *at
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "stream-token", "User": map[string]any{"Id": "stream-user"}})
+		case r.URL.Path == "/Items/Counts":
+			_ = json.NewEncoder(w).Encode(map[string]any{"MovieCount": 1, "SeriesCount": 1, "EpisodeCount": 1})
 		case r.Method == http.MethodGet && r.URL.Path == streamLivenessProbePath:
+			// Counts/API-base probes share the path but are not stream probes.
+			if r.UserAgent() != "Emby-In-One-Liveness/1.0" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"Id": "fixture-api"})
+				return
+			}
 			probeHits.Add(1)
 			w.WriteHeader(probeStatus)
 		case strings.HasPrefix(r.URL.Path, "/Videos/"):
@@ -561,6 +568,9 @@ func TestRedirectAllDeadCoolingDownReturnsBadGateway(t *testing.T) {
 	config := redirectConfigWithStreamingURLs(first.URL, first.URL, second.URL)
 
 	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		// Isolate request-scoped stream probes from completed startup traffic.
+		phase5WaitInitialStreamProbes(t, app)
+		app.mediaCounts.close()
 		app.Upstream.stopHealthChecks()
 		client := app.Upstream.GetClient(0)
 		firstProbeHits.Store(0)
@@ -590,6 +600,9 @@ func TestRedirectAllDeadRecoversOnlyEligibleBaseBeforeRedirect(t *testing.T) {
 	config := redirectConfigWithStreamingURLs(recent.URL, recent.URL, eligible.URL)
 
 	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		// Isolate request-scoped stream probes from completed startup traffic.
+		phase5WaitInitialStreamProbes(t, app)
+		app.mediaCounts.close()
 		app.Upstream.stopHealthChecks()
 		client := app.Upstream.GetClient(0)
 		recentProbeHits.Store(0)
@@ -628,6 +641,9 @@ func TestRedirectAllDeadEligibleProbeFailureReturnsBadGateway(t *testing.T) {
 	config := redirectConfigWithStreamingURLs(recent.URL, recent.URL, eligible.URL)
 
 	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		// Isolate request-scoped stream probes from completed startup traffic.
+		phase5WaitInitialStreamProbes(t, app)
+		app.mediaCounts.close()
 		app.Upstream.stopHealthChecks()
 		client := app.Upstream.GetClient(0)
 		recentProbeHits.Store(0)
@@ -664,6 +680,9 @@ func TestRedirectUnknownBaseStillRedirectsWithoutSynchronousProbe(t *testing.T) 
 	config := redirectConfigWithStreamingURLs(first.URL, first.URL, second.URL)
 
 	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		// Isolate request-scoped stream probes from completed startup traffic.
+		phase5WaitInitialStreamProbes(t, app)
+		app.mediaCounts.close()
 		app.Upstream.stopHealthChecks()
 		client := app.Upstream.GetClient(0)
 		firstProbeHits.Store(0)
@@ -694,6 +713,9 @@ func TestRedirectAgedDeadBaseStaysExcludedWhileUsableBaseExists(t *testing.T) {
 	config := redirectConfigWithStreamingURLs(dead.URL, dead.URL, live.URL)
 
 	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		// Isolate request-scoped stream probes from completed startup traffic.
+		phase5WaitInitialStreamProbes(t, app)
+		app.mediaCounts.close()
 		app.Upstream.stopHealthChecks()
 		client := app.Upstream.GetClient(0)
 		deadProbeHits.Store(0)
@@ -727,6 +749,9 @@ func TestRedirectSingleDeadBaseCanRecoverAfterCooldown(t *testing.T) {
 	config := redirectConfigWithStreamingURLs(only.URL, only.URL)
 
 	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		// Isolate request-scoped stream probes from completed startup traffic.
+		phase5WaitInitialStreamProbes(t, app)
+		app.mediaCounts.close()
 		app.Upstream.stopHealthChecks()
 		client := app.Upstream.GetClient(0)
 		probeHits.Store(0)
@@ -770,7 +795,13 @@ func TestRedirectAllDeadRecoveryProbesEligibleBasesConcurrently(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "stream-token", "User": map[string]any{"Id": "stream-user"}})
+		case r.URL.Path == "/Items/Counts":
+			_ = json.NewEncoder(w).Encode(map[string]any{"MovieCount": 1, "SeriesCount": 1, "EpisodeCount": 1})
 		case r.URL.Path == streamLivenessProbePath:
+			if r.UserAgent() != "Emby-In-One-Liveness/1.0" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"Id": "fixture-api"})
+				return
+			}
 			if !enabled.Load() {
 				http.NotFound(w, r)
 				return
@@ -816,6 +847,9 @@ func TestRedirectAllDeadRecoveryProbesEligibleBasesConcurrently(t *testing.T) {
 
 	config := redirectConfigWithStreamingURLs(first.URL, first.URL, second.URL)
 	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		// Isolate request-scoped stream probes from completed startup traffic.
+		phase5WaitInitialStreamProbes(t, app)
+		app.mediaCounts.close()
 		app.Upstream.stopHealthChecks()
 		client := app.Upstream.GetClient(0)
 		client.markStreamBaseFailed(first.URL)

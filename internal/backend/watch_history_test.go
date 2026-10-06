@@ -50,9 +50,11 @@ func TestWatchHistoryIsolationForRegularUsers(t *testing.T) {
 		// Item detail endpoint: return item with UserData embedded
 		case r.Method == http.MethodGet && r.URL.Path == "/Users/user-a/Items/movie-a":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"Id":   "movie-a",
-				"Name": "Test Movie",
-				"Type": "Movie",
+				"Id":           "movie-a",
+				"Name":         "Test Movie",
+				"Type":         "Movie",
+				"RunTimeTicks": 100000,
+				"MediaSources": []any{map[string]any{"Id": "history-media", "ItemId": "movie-a", "RunTimeTicks": 100000}},
 				"UserData": map[string]any{
 					"PlaybackPositionTicks": 0,
 					"Played":                false,
@@ -91,16 +93,17 @@ func TestWatchHistoryIsolationForRegularUsers(t *testing.T) {
 
 		// Get virtual item ID for upstream movie-a
 		virtualMovieID := app.IDStore.GetOrCreateVirtualID("movie-a", app.Upstream.Clients()[0].ID)
+		virtualSession := app.IDStore.GetOrCreateVirtualID("history-session", app.Upstream.Clients()[0].ID)
 
 		// ---- Test 1: Session progress is recorded in WatchStore ----
 		rr = doAuthJSON(t, handler, http.MethodPost, "/Sessions/Playing",
-			map[string]any{"ItemId": virtualMovieID, "PositionTicks": 10000}, childToken)
+			map[string]any{"ItemId": virtualMovieID, "PlaySessionId": virtualSession, "PositionTicks": 10000}, childToken)
 		if rr.Code != http.StatusNoContent && rr.Code != http.StatusOK {
 			t.Fatalf("session/playing: status=%d body=%s", rr.Code, rr.Body.String())
 		}
 
 		rr = doAuthJSON(t, handler, http.MethodPost, "/Sessions/Playing/Progress",
-			map[string]any{"ItemId": virtualMovieID, "PositionTicks": 25000}, childToken)
+			map[string]any{"ItemId": virtualMovieID, "PlaySessionId": virtualSession, "PositionTicks": 25000}, childToken)
 		if rr.Code != http.StatusNoContent && rr.Code != http.StatusOK {
 			t.Fatalf("session/progress: status=%d body=%s", rr.Code, rr.Body.String())
 		}

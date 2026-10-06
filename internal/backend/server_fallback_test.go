@@ -248,16 +248,13 @@ func TestResumeEndpointOfflineFallback(t *testing.T) {
 		virtualID := app.IDStore.GetOrCreateVirtualID("movie-a", app.Upstream.Clients()[0].ID)
 		app.IDStore.AssociateAdditionalInstance(virtualID, "movie-b", app.Upstream.Clients()[1].ID)
 
-		// Record watch progress on server 0 via session
-		rr = doAuthJSON(t, handler, http.MethodPost, "/Sessions/Playing",
-			map[string]any{"ItemId": virtualID, "PositionTicks": 50000}, childToken)
-		if rr.Code != http.StatusNoContent && rr.Code != http.StatusOK {
-			t.Fatalf("session/playing: status=%d", rr.Code)
+		// Seed established history: this test covers offline read routing.
+		info := app.Auth.ValidateToken(childToken)
+		if info == nil {
+			t.Fatal("resume history owner missing")
 		}
-		rr = doAuthJSON(t, handler, http.MethodPost, "/Sessions/Playing/Progress",
-			map[string]any{"ItemId": virtualID, "PositionTicks": 50000}, childToken)
-		if rr.Code != http.StatusNoContent && rr.Code != http.StatusOK {
-			t.Fatalf("session/progress: status=%d", rr.Code)
+		if err := app.WatchStore.RecordProgress(&WatchProgress{ProxyUserID: info.UserID, VirtualItemID: virtualID, ServerID: app.Upstream.Clients()[0].ID, OriginalItemID: "movie-a", ItemType: "Movie", PositionTicks: 50000, RuntimeTicks: 100000}); err != nil {
+			t.Fatal(err)
 		}
 
 		// Now set server 0 offline

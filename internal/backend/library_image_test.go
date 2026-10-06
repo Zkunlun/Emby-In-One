@@ -84,7 +84,7 @@ func TestShowsEpisodesTranslateSeasonIDAndDeduplicate(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/Shows/series-a/Episodes":
 			primarySeasonID.Store(r.URL.Query().Get("SeasonId"))
 			_ = json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{
-				{"Id": "ep-a1", "SeriesId": "series-a", "ParentId": "season-a1", "ParentIndexNumber": 1, "IndexNumber": 1, "Source": "primary"},
+				{"Id": "ep-a1", "SeriesId": "series-a", "ParentId": "season-a1", "ParentIndexNumber": 1, "IndexNumber": 1, "Source": "primary", "MediaSources": []any{map[string]any{"Id": "ep-a1-source", "RunTimeTicks": 1000}}},
 			}})
 		default:
 			http.NotFound(w, r)
@@ -99,7 +99,7 @@ func TestShowsEpisodesTranslateSeasonIDAndDeduplicate(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/Shows/series-b/Episodes":
 			secondarySeasonID.Store(r.URL.Query().Get("SeasonId"))
 			_ = json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{
-				{"Id": "ep-b1", "SeriesId": "series-b", "ParentId": "season-b1", "ParentIndexNumber": 1, "IndexNumber": 1, "Source": "secondary-dup"},
+				{"Id": "ep-b1", "SeriesId": "series-b", "ParentId": "season-b1", "ParentIndexNumber": 1, "IndexNumber": 1, "Source": "secondary-dup", "MediaSources": []any{map[string]any{"Id": "ep-b1-source", "RunTimeTicks": 1000}}},
 				{"Id": "ep-b2", "SeriesId": "series-b", "ParentId": "season-b1", "ParentIndexNumber": 1, "IndexNumber": 2, "Source": "secondary-unique"},
 			}})
 		default:
@@ -201,11 +201,12 @@ func TestShowsEpisodesAcceptsSeasonIDQueryCaseVariants(t *testing.T) {
 				if got := forwarded.Get("UserId"); got != "user-a" {
 					t.Errorf("upstream UserId = %q, want user-a", got)
 				}
-				if got := forwarded.Get("Fields"); got != "Overview,MediaSources,PremiereDate,PrimaryImageAspectRatio" {
+				if got := forwarded.Get("Fields"); got != "Overview,MediaSources,PremiereDate,PrimaryImageAspectRatio,ProviderIds" {
 					t.Errorf("upstream Fields = %q", got)
 				}
-				if got := forwarded.Get("Limit"); got != "500" {
-					t.Errorf("upstream Limit = %q, want 500", got)
+				// Task 4 filters visibility before the client page limit.
+				if got := forwarded.Get("Limit"); got != "5000" {
+					t.Errorf("upstream candidate Limit = %q, want 5000", got)
 				}
 
 				var payload map[string]any
@@ -238,7 +239,7 @@ func TestSearchHintsAggregatesAndRewritesIDs(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-a", "User": map[string]any{"Id": "user-a"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/Search/Hints":
 			primaryUserID.Store(r.URL.Query().Get("UserId"))
-			_ = json.NewEncoder(w).Encode(map[string]any{"SearchHints": []map[string]any{{"Id": "series-a", "Name": "Hint A"}}, "TotalRecordCount": 1})
+			_ = json.NewEncoder(w).Encode(map[string]any{"SearchHints": []map[string]any{{"Id": "series-a", "Name": "Hint A", "Type": "Series"}}, "TotalRecordCount": 1})
 		default:
 			http.NotFound(w, r)
 		}
@@ -251,7 +252,7 @@ func TestSearchHintsAggregatesAndRewritesIDs(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-b", "User": map[string]any{"Id": "user-b"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/Search/Hints":
 			secondaryUserID.Store(r.URL.Query().Get("UserId"))
-			_ = json.NewEncoder(w).Encode(map[string]any{"SearchHints": []map[string]any{{"Id": "series-b", "Name": "Hint B"}}, "TotalRecordCount": 1})
+			_ = json.NewEncoder(w).Encode(map[string]any{"SearchHints": []map[string]any{{"Id": "series-b", "Name": "Hint B", "Type": "Series"}}, "TotalRecordCount": 1})
 		default:
 			http.NotFound(w, r)
 		}

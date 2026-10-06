@@ -138,6 +138,7 @@ func filterStubItem(id, name, parentID string, year int, userData map[string]any
 		"Name":            name,
 		"SortName":        name,
 		"Type":            "Movie",
+		"MediaSources":    []any{map[string]any{"Id": "source-" + id, "RunTimeTicks": 1000}},
 		"ParentId":        parentID,
 		"ProductionYear":  year,
 		"CommunityRating": 7.5,
@@ -210,12 +211,17 @@ func markPlayedLocally(t *testing.T, handler http.Handler, app *App, token, virt
 	}
 }
 
-func markInProgressLocally(t *testing.T, handler http.Handler, token, virtualID string, positionTicks int) {
+func markInProgressLocally(t *testing.T, app *App, token, virtualID string, positionTicks int) {
 	t.Helper()
-	rr := doJSONRequest(t, handler, http.MethodPost, "/Sessions/Playing/Progress",
-		map[string]any{"ItemId": virtualID, "PositionTicks": positionTicks}, token)
-	if rr.Code != http.StatusNoContent && rr.Code != http.StatusOK {
-		t.Fatalf("session progress %s: status=%d body=%s", virtualID, rr.Code, rr.Body.String())
+	// This fixture exercises filtering already stored history. Bare Progress is
+	// deliberately insufficient to establish a task3/task4 playback owner.
+	info := app.Auth.ValidateToken(token)
+	route := app.IDStore.ResolveVirtualID(virtualID)
+	if info == nil || route == nil {
+		t.Fatal("filter history fixture identity missing")
+	}
+	if err := app.WatchStore.RecordProgress(&WatchProgress{ProxyUserID: info.UserID, VirtualItemID: virtualID, ServerID: route.ServerID, OriginalItemID: route.OriginalID, ItemType: "Movie", PositionTicks: int64(positionTicks), RuntimeTicks: 50000}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -349,7 +355,7 @@ func TestUserItemsResumableFilterUsesLocalState(t *testing.T) {
 	withTempAppConfig(t, singleUpstreamConfig(stub.server.URL), func(app *App, handler http.Handler) {
 		serverID := app.Upstream.Clients()[0].ID
 		userToken := createRegularUser(t, handler)
-		markInProgressLocally(t, handler, userToken, app.IDStore.GetOrCreateVirtualID("movie-c", serverID), 5000)
+		markInProgressLocally(t, app, userToken, app.IDStore.GetOrCreateVirtualID("movie-c", serverID), 5000)
 
 		rr := doJSONRequest(t, handler, http.MethodGet,
 			"/Users/"+app.Auth.ProxyUserID()+"/Items?Filters=IsResumable&SortBy=SortName&SortOrder=Ascending",

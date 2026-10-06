@@ -220,6 +220,8 @@ func TestUserStateRoutesResolveIDsAndRewriteJSONResponses(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-a", "User": map[string]any{"Id": "user-a"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/Users/user-a/Items/item-a":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "item-a", "Type": "Movie", "MediaSources": []any{map[string]any{"Id": "ms-a", "ItemId": "item-a", "RunTimeTicks": 1000}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/user-a/PlayingItems/item-a":
 			playingStartMediaSource.Store(r.URL.Query().Get("MediaSourceId"))
 			w.WriteHeader(http.StatusNoContent)

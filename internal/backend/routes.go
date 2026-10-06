@@ -62,5 +62,5 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", a.handleRoot)
 	mux.HandleFunc("/", a.withContext(a.requireAuth(a.handleFallbackProxy)))
 
-	return a.bodyLimitMiddleware(a.loggingMiddleware(a.prefixCompatMiddleware(a.corsMiddleware(mux))))
+	return a.bodyLimitMiddleware(a.loggingMiddleware(a.prefixCompatMiddleware(a.corsMiddleware(a.countsResponseMiddleware(mux)))))
 }

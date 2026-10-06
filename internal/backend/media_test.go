@@ -252,7 +252,23 @@ func TestPlaybackInfoAndMasterPlaylistProxy(t *testing.T) {
 		if strings.Contains(strings.ToLower(body), "localhost") || strings.Contains(body, "127.0.0.1") {
 			t.Fatalf("playlist should not contain a host: %s", body)
 		}
-		if !strings.Contains(body, "/Videos/"+virtualEpisode+"/segment1.ts?api_key="+token) {
+		segments := 0
+		for _, line := range strings.Split(body, "\n") {
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			u, err := url.Parse(strings.TrimSpace(line))
+			if err != nil || u.Query().Get("api_key") != token || u.Query().Get("MediaSourceId") != mediaSourceID {
+				t.Fatalf("playlist segment lost token or version selection: %s", line)
+			}
+			if u.Path == "/Videos/"+virtualEpisode+"/segment1.ts" {
+				segments++
+			}
+			if strings.HasSuffix(u.Path, "/hls1/main/seg.ts") && u.Query().Get("foo") != "1" {
+				t.Fatalf("playlist lost foo query: %s", line)
+			}
+		}
+		if segments != 1 {
 			t.Fatalf("playlist missing rewritten relative segment path: %s", body)
 		}
 		// A segment that arrived as an absolute CDN URL must also come back as a

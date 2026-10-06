@@ -98,6 +98,8 @@ func TestSessionForwardsUpstreamUserID(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": streamUpstreamToken, "User": map[string]any{"Id": streamUpstreamUserID}})
+		case r.Method == http.MethodGet && r.URL.Path == "/Users/"+streamUpstreamUserID+"/Items/orig-item":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "orig-item", "Type": "Movie", "RunTimeTicks": 1000, "MediaSources": []any{map[string]any{"Id": "orig-media", "ItemId": "orig-item", "RunTimeTicks": 1000}}})
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/Sessions/Playing"):
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -119,15 +121,18 @@ func TestSessionForwardsUpstreamUserID(t *testing.T) {
 
 		virtualItem := app.IDStore.GetOrCreateVirtualID("orig-item", app.Upstream.Clients()[0].ID)
 
+		virtualSession := app.IDStore.GetOrCreateVirtualID("orig-session", app.Upstream.Clients()[0].ID)
+		virtualMedia := app.IDStore.GetOrCreateVirtualID("orig-media", app.Upstream.Clients()[0].ID)
+
 		// The client sends EIO's global user ID in the body, as older responses
 		// taught it to.
 		events := []struct {
 			path string
 			body map[string]any
 		}{
-			{"/Sessions/Playing", map[string]any{"ItemId": virtualItem, "UserId": legacyProxyUser, "PositionTicks": 10}},
-			{"/Sessions/Playing/Progress", map[string]any{"ItemId": virtualItem, "UserId": legacyProxyUser, "PositionTicks": 20}},
-			{"/Sessions/Playing/Stopped", map[string]any{"ItemId": virtualItem, "UserId": legacyProxyUser, "PositionTicks": 30}},
+			{"/Sessions/Playing", map[string]any{"ItemId": virtualItem, "UserId": legacyProxyUser, "PlaySessionId": virtualSession, "MediaSourceId": virtualMedia, "PositionTicks": 10}},
+			{"/Sessions/Playing/Progress", map[string]any{"ItemId": virtualItem, "UserId": legacyProxyUser, "PlaySessionId": virtualSession, "MediaSourceId": virtualMedia, "PositionTicks": 20}},
+			{"/Sessions/Playing/Stopped", map[string]any{"ItemId": virtualItem, "UserId": legacyProxyUser, "PlaySessionId": virtualSession, "MediaSourceId": virtualMedia, "PositionTicks": 30}},
 		}
 		for _, event := range events {
 			rr := doJSONRequest(t, handler, http.MethodPost, event.path, event.body, aliceToken)

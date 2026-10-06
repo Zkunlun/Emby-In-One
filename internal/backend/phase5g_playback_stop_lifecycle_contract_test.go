@@ -23,7 +23,7 @@ func TestPhase5GStoppedUsesResolvedDeviceAndTranslatedSession(t *testing.T) {
 			"ItemId":        virtualItemID,
 			"PlaySessionId": virtualSessionID,
 		}
-		resolvedServerID, found := app.translateSessionBodyIDs(nil, body)
+		resolvedServerID, found := app.translateSessionBodyIDs(&RequestContext{ProxyUser: info, ProxyToken: token}, body)
 		if !found || resolvedServerID != serverID {
 			t.Fatalf("translated server = %q found=%v, want %q", resolvedServerID, found, serverID)
 		}

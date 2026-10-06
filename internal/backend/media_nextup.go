@@ -16,7 +16,10 @@ func (a *App) handleShowsNextUp(w http.ResponseWriter, r *http.Request) {
 	query := cloneValues(r.URL.Query())
 	seriesID := query.Get("SeriesId")
 	if seriesID != "" {
-		resolved := a.resolveRouteID(seriesID)
+		resolved, routeOK := a.resolveRequestRouteID(w, r, seriesID)
+		if !routeOK {
+			return
+		}
 		if resolved == nil {
 			writeJSON(w, http.StatusOK, map[string]any{"Items": []any{}, "TotalRecordCount": 0, "StartIndex": 0})
 			return
@@ -32,13 +35,19 @@ func (a *App) handleShowsNextUp(w http.ResponseWriter, r *http.Request) {
 		for _, inst := range instances {
 			instQuery := cloneValues(query)
 			instQuery.Set("SeriesId", inst.OriginalID)
+			requestMergeFields(instQuery)
 			payload, err := inst.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Shows/NextUp", instQuery, nil)
 			if err != nil {
 				continue
 			}
 			filtered := filterSeriesItems(asItems(payload), originalIDs)
 			if len(filtered) > 0 {
-				a.rewriteItems(filtered, inst.ServerID, a.clientFacingUserIDFor(r))
+				for _, item := range filtered {
+					if kind, _ := item["Type"].(string); kind == "" {
+						item["Type"] = "Episode"
+					}
+				}
+				filtered = a.rewriteMergeResponseItems(r, filtered, inst.ServerID, true)
 				writeJSON(w, http.StatusOK, map[string]any{"Items": filtered, "TotalRecordCount": len(filtered), "StartIndex": 0})
 				return
 			}
@@ -47,20 +56,22 @@ func (a *App) handleShowsNextUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	results := a.fetchItemsAcrossUpstreams(r.Context(), requestContextFrom(r.Context()), "/Shows/NextUp", query, nil)
-	writeJSON(w, http.StatusOK, a.mergedItemsPayload(results, a.clientFacingUserIDFor(r)))
+	writeJSON(w, http.StatusOK, a.mergedItemsPayload(results, a.clientFacingUserIDFor(r), reqCtx))
 }
 
 // handleLocalNextUp computes NextUp from local WatchStore for non-admin users.
 // For each series the user has watched, queries upstream for the next unwatched episode.
 func (a *App) handleLocalNextUp(w http.ResponseWriter, r *http.Request, reqCtx *RequestContext) {
 	query := cloneValues(r.URL.Query())
-	cfg := a.ConfigStore.Snapshot()
 	empty := map[string]any{"Items": []any{}, "TotalRecordCount": 0, "StartIndex": 0}
 
 	// If SeriesId specified, only compute for that series
 	seriesID := query.Get("SeriesId")
 	if seriesID != "" {
-		resolved := a.resolveRouteID(seriesID)
+		resolved, routeOK := a.resolveRequestRouteID(w, r, seriesID)
+		if !routeOK {
+			return
+		}
 		if resolved == nil {
 			writeJSON(w, http.StatusOK, empty)
 			return
@@ -69,61 +80,65 @@ func (a *App) handleLocalNextUp(w http.ResponseWriter, r *http.Request, reqCtx *
 			return
 		}
 		// Get the user's highest played episode for this series
-		seriesProgress := a.WatchStore.GetNextUpForSeries(reqCtx.ProxyUser.UserID, seriesID)
+		var seriesProgress *WatchProgress
+		err := a.withVisibleWatchScope(reqCtx, true, func(scope mediaAccessScope) error {
+			var err error
+			seriesProgress, err = a.WatchStore.GetVisibleNextUpForSeries(scope, a.IDStore.CanonicalMergeID(seriesID))
+			return err
+		})
+		if err != nil {
+			a.logVisibleWatchReadError(err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to read next-up state"})
+			return
+		}
 		if seriesProgress == nil {
 			writeJSON(w, http.StatusOK, empty)
 			return
 		}
 		nextEp := a.fetchNextEpisode(r, reqCtx, resolved.Client, resolved.OriginalID, resolved.ServerID, seriesProgress)
-		if nextEp == nil {
+		if nextEp == nil || !a.isServerAllowed(reqCtx, resolved.ServerID) {
 			writeJSON(w, http.StatusOK, empty)
 			return
 		}
-		rewriteResponseIDs(nextEp, resolved.ServerID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
-		a.overlayLocalUserDataItems(r, []map[string]any{nextEp})
-		writeJSON(w, http.StatusOK, map[string]any{"Items": []any{nextEp}, "TotalRecordCount": 1, "StartIndex": 0})
+		items := a.projectNextEpisode(r, nextEp, resolved.ServerID, seriesProgress)
+		a.overlayLocalUserDataItems(r, items)
+		writeJSON(w, http.StatusOK, watchResponsePage(items, query))
 		return
 	}
 
 	// No SeriesId: compute for all series the user is watching
-	seriesList, err := a.WatchStore.GetNextUpSeries(reqCtx.ProxyUser.UserID)
-	if err != nil || len(seriesList) == 0 {
+	var seriesList []WatchProgress
+	err := a.withVisibleWatchScope(reqCtx, true, func(scope mediaAccessScope) error {
+		var err error
+		seriesList, err = a.WatchStore.GetVisibleNextUpSeries(scope)
+		return err
+	})
+	if err != nil {
+		a.logVisibleWatchReadError(err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to read next-up state"})
+		return
+	}
+	if len(seriesList) == 0 {
 		writeJSON(w, http.StatusOK, empty)
 		return
 	}
 
 	var nextUpItems []map[string]any
-	limit := 20
-	if l, ok := queryInt(query, "Limit"); ok && l > 0 {
-		limit = l
-	}
-
 	for _, sp := range seriesList {
-		if len(nextUpItems) >= limit {
-			break
-		}
-		if sp.SeriesOriginalID == "" {
+		resolved, err := a.resolveAuthorizedRouteID(reqCtx, sp.SeriesVirtualID)
+		if err != nil || resolved == nil {
 			continue
 		}
-		serverID, seriesOrigID, client := a.resolveSeriesServer(&sp)
-		if client == nil {
-			continue
-		}
+		serverID, seriesOrigID, client := resolved.ServerID, resolved.OriginalID, resolved.Client
 		nextEp := a.fetchNextEpisode(r, reqCtx, client, seriesOrigID, serverID, &sp)
-		if nextEp != nil {
-			rewriteResponseIDs(nextEp, serverID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
-			if id, _ := nextEp["Id"].(string); id != "" {
-				a.overlayLocalUserData(r, id, nextEp)
-			}
-			nextUpItems = append(nextUpItems, nextEp)
+		if nextEp != nil && a.isServerAllowed(reqCtx, serverID) {
+			items := a.projectNextEpisode(r, nextEp, serverID, &sp)
+			a.overlayLocalUserDataItems(r, items)
+			nextUpItems = append(nextUpItems, items...)
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"Items":            toAnySlice(nextUpItems),
-		"TotalRecordCount": len(nextUpItems),
-		"StartIndex":       0,
-	})
+	writeJSON(w, http.StatusOK, watchResponsePage(nextUpItems, query))
 }
 
 // resolveSeriesServer returns an online server/client for a series watch entry.
@@ -158,6 +173,9 @@ func (a *App) resolveSeriesServer(sp *WatchProgress) (serverID string, seriesOri
 // fetchNextEpisode queries the upstream for the next unwatched episode after
 // the user's last played episode in a series.
 func (a *App) fetchNextEpisode(r *http.Request, reqCtx *RequestContext, client *UpstreamClient, seriesOriginalID string, serverID string, lastPlayed *WatchProgress) map[string]any {
+	if !a.isServerAllowed(reqCtx, serverID) {
+		return nil
+	}
 	q := url.Values{}
 	q.Set("Fields", "BasicSyncInfo,CanDelete,PrimaryImageAspectRatio,Overview,DateCreated,MediaSources,Path,SortName,Studios,Taglines,Genres,CommunityRating,OfficialRating,CumulativeRunTimeTicks,Chapters,ProviderIds")
 	q.Set("UserId", client.clientUserID())
@@ -212,6 +230,9 @@ func (a *App) fetchNextEpisode(r *http.Request, reqCtx *RequestContext, client *
 	// If we didn't find a next episode in this season and the current one was played,
 	// try the next season
 	if lastPlayed.Played {
+		if !a.isServerAllowed(reqCtx, client.ID) {
+			return nil
+		}
 		q2 := url.Values{}
 		q2.Set("Fields", q.Get("Fields"))
 		q2.Set("UserId", client.clientUserID())

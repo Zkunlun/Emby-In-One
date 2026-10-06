@@ -297,77 +297,27 @@ func (a *App) handleAdminUpstreamReorder(w http.ResponseWriter, r *http.Request)
 }
 
 func (a *App) handleAdminUpstreamDelete(w http.ResponseWriter, r *http.Request) {
-	a.grantCapacityMu.Lock()
-	defer a.grantCapacityMu.Unlock()
-
-	cfg := a.ConfigStore.Snapshot()
-	index, existing, ok := parsePathUpstream(r, &cfg)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "Server not found"})
-		return
-	}
-	serverID := existing.ID
-
-	nextCfg := cfg
-	nextCfg.Upstream = make([]UpstreamConfig, 0, len(cfg.Upstream)-1)
-	nextCfg.Upstream = append(nextCfg.Upstream, cfg.Upstream[:index]...)
-	nextCfg.Upstream = append(nextCfg.Upstream, cfg.Upstream[index+1:]...)
-
-	if err := a.commitConfig(nextCfg); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-
-	var affectedUserIDs []string
-	if a.UserStore != nil && serverID != "" {
-		var err error
-		affectedUserIDs, err = a.UserStore.RemoveServerGrants(serverID)
-		if err != nil {
-			rollbackErr := a.commitConfig(cfg)
-			if a.Logger != nil {
-				a.Logger.Errorf("delete upstream %s: remove user server grants: %v", serverID, err)
-				if rollbackErr != nil {
-					a.Logger.Errorf("delete upstream %s: rollback config after grant cleanup failure: %v", serverID, rollbackErr)
-				}
-			}
-			if rollbackErr != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "删除上游后清理用户授权失败，且配置回滚失败"})
-			} else {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "删除上游后清理用户授权失败，配置已回滚"})
-			}
-			return
-		}
-	}
-	for _, userID := range affectedUserIDs {
-		a.Auth.RevokeTokensByUserID(userID)
-	}
-
-	// Clean up database records for this server. A virtual item survives when it
-	// has another upstream instance; only true orphans lose per-user watch state.
-	var removedVirtualIDs []string
-	if a.IDStore != nil && serverID != "" {
-		result, err := a.IDStore.RemoveByServerIDPreservingInstances(serverID)
-		if err != nil {
-			if a.Logger != nil {
-				a.Logger.Errorf("delete upstream %s: remove ID mappings: %v", serverID, err)
-			}
-		} else {
-			removedVirtualIDs = result.RemovedVirtualIDs
-		}
-	}
-	if a.WatchStore != nil && len(removedVirtualIDs) > 0 {
-		if err := a.WatchStore.DeleteVirtualItems(removedVirtualIDs); err != nil && a.Logger != nil {
-			a.Logger.Errorf("delete upstream %s: delete orphan watch progress: %v", serverID, err)
-		}
-	}
-	if a.HiddenLibraries != nil && serverID != "" {
-		if err := a.HiddenLibraries.RemoveServer(serverID); err != nil && a.Logger != nil {
-			a.Logger.Errorf("delete upstream %s: remove hidden libraries: %v", serverID, err)
-		}
-	}
-	a.invalidateUpstreamLibraryCache(serverID)
-
-	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+ a.grantCapacityMu.Lock()
+ defer a.grantCapacityMu.Unlock()
+ a.watchLifecycleMu.Lock()
+ defer a.watchLifecycleMu.Unlock()
+ if err := a.recoverWatchLifecycleLocked(); err != nil {
+  writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "cleanupPending": a.lifecyclePending})
+  return
+ }
+ cfg := a.ConfigStore.Snapshot()
+ index, existing, ok := parsePathUpstream(r, &cfg)
+ if !ok {
+  writeJSON(w, http.StatusNotFound, map[string]any{"error": "Server not found"})
+  return
+ }
+ next := cfg
+ next.Upstream = append(append([]UpstreamConfig{}, cfg.Upstream[:index]...), cfg.Upstream[index+1:]...)
+ if err := a.deleteUpstreamLifecycleLocked(next, *existing); err != nil {
+  writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "cleanupPending": a.lifecyclePending})
+  return
+ }
+ writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 func (a *App) handleAdminUpstreamReconnect(w http.ResponseWriter, r *http.Request) {
@@ -807,6 +757,14 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+ a.watchLifecycleMu.Lock()
+ defer a.watchLifecycleMu.Unlock()
+ if a.lifecyclePending {
+  if err := a.recoverWatchLifecycleLocked(); err != nil {
+   writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "cleanupPending": true})
+   return
+  }
+ }
 	user, err := a.UserStore.CreateWithServerLimits(input.Username, input.Password, normalizedAllowed, limits)
 	if err != nil {
 		if writeAdminUpstreamCapacityError(w, cfg, err) {
@@ -819,6 +777,7 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	if user.Enabled { a.requestBoundCountsLocked(user.AllowedServers) }
 	writeJSON(w, http.StatusCreated, map[string]any{"id": user.ID, "username": user.Username})
 }
 
@@ -870,68 +829,27 @@ func (a *App) handleAdminUsersUpdate(w http.ResponseWriter, r *http.Request) {
 		normalizedAllowed = &normalized
 		limits = currentLimits
 	}
-	if err := a.UserStore.UpdateWithServerLimits(id, input.Username, input.Password, input.Enabled, normalizedAllowed, limits); err != nil {
-		if writeAdminUpstreamCapacityError(w, cfg, err) {
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	// Password, disable, and authorization changes invalidate existing user
-	// tokens. Regular-user tokens cache AllowedServers, so keeping them alive
-	// after a grant change could preserve stale upstream access until re-login.
-	if input.Password != nil || normalizedAllowed != nil || (input.Enabled != nil && !*input.Enabled) {
-		a.Auth.RevokeTokensByUserID(id)
-	}
-	if a.HiddenLibraries != nil {
-		if input.HiddenLibraries != nil {
-			if err := a.applyHiddenLibrariesPatch(id, input.HiddenLibraries); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-				return
-			}
-		}
-		// An explicitly supplied allow list is authoritative. Empty means the
-		// regular user has no upstream access, so every stored hidden-library
-		// record for that user must be pruned. Omitting allowedServers leaves the
-		// existing authorization (and hidden-library records) unchanged.
-		if normalizedAllowed != nil {
-			allowed := make(map[string]bool, len(*normalizedAllowed))
-			for _, serverID := range *normalizedAllowed {
-				allowed[serverID] = true
-			}
-			if err := a.HiddenLibraries.PruneUserServers(id, func(serverID string) bool { return allowed[serverID] }); err != nil && a.Logger != nil {
-				a.Logger.Errorf("prune hidden libraries for user %s: %v", id, err)
-			}
-		}
-	} else if len(input.HiddenLibraries) > 0 {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "数据库不可用，首页库隐藏未启用"})
+	a.watchLifecycleMu.Lock()
+	defer a.watchLifecycleMu.Unlock()
+	if err := a.updateUserLifecycleLocked(id, input.Username, input.Password, input.Enabled,
+		normalizedAllowed, limits, input.HiddenLibraries); err != nil {
+		if writeAdminUpstreamCapacityError(w, cfg, err) { return }
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "cleanupPending": a.lifecyclePending})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 func (a *App) handleAdminUsersDelete(w http.ResponseWriter, r *http.Request) {
-	if a.UserStore == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "multi-user disabled"})
-		return
-	}
-	id := r.PathValue("id")
-	if err := a.UserStore.Delete(id); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	if a.HiddenLibraries != nil {
-		if err := a.HiddenLibraries.RemoveUser(id); err != nil && a.Logger != nil {
-			a.Logger.Errorf("delete user %s: remove hidden libraries: %v", id, err)
-		}
-	}
-	a.Auth.RevokeTokensByUserID(id)
-	if a.WatchStore != nil {
-		if err := a.WatchStore.DeleteUser(id); err != nil && a.Logger != nil {
-			a.Logger.Warnf("failed to delete watch data for user %s: %s", id, redactURLInError(err))
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+ a.grantCapacityMu.Lock()
+ defer a.grantCapacityMu.Unlock()
+ a.watchLifecycleMu.Lock()
+ defer a.watchLifecycleMu.Unlock()
+ if err := a.deleteUserLifecycleLocked(r.PathValue("id")); err != nil {
+  writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "cleanupPending": a.lifecyclePending})
+  return
+ }
+ writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
 func (a *App) commitConfig(nextCfg Config) error {
@@ -953,13 +871,20 @@ func (a *App) commitConfigSettingsOnly(nextCfg Config) error {
 // old values. reLogin additionally re-authenticates, which an upstream's own
 // connection details need; a settings save leaves the existing sessions alone.
 func (a *App) commitConfigFull(nextCfg Config, reLogin bool) error {
+	a.watchLifecycleMu.Lock()
+	defer a.watchLifecycleMu.Unlock()
+	if a.lifecyclePending {
+		if err := a.recoverWatchLifecycleLocked(); err != nil { return err }
+	}
 	previous := a.ConfigStore.Snapshot()
 	a.ConfigStore.Replace(nextCfg)
 	if err := a.ConfigStore.Save(); err != nil {
 		a.ConfigStore.Replace(previous)
 		return err
 	}
+	a.publishConfiguredSourcesLocked(nextCfg)
 	a.Upstream.Reload(nextCfg)
+	a.resumeCountsSourcesLocked()
 	if reLogin {
 		go a.Upstream.LoginAll()
 	}

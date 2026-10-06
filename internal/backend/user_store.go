@@ -17,6 +17,7 @@ type User struct {
 	Enabled        bool
 	AllowedServers []string
 	CreatedAt      int64 // Unix milliseconds
+	AuthRevision   int64 `json:"-"` // Durable authorization generation; old users start at zero.
 }
 
 type UserStore struct {
@@ -46,7 +47,8 @@ func NewUserStore(db *sqliteDB, logger *Logger) (*UserStore, error) {
 			password_hash TEXT NOT NULL,
 			password_secret TEXT NOT NULL,
 			enabled INTEGER NOT NULL DEFAULT 1,
-			created_at INTEGER NOT NULL
+			created_at INTEGER NOT NULL,
+			auth_revision INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE IF NOT EXISTS user_servers (
 			user_id TEXT NOT NULL,
@@ -56,6 +58,15 @@ func NewUserStore(db *sqliteDB, logger *Logger) (*UserStore, error) {
 		);
 	`); err != nil {
 		return nil, fmt.Errorf("user_store: create tables: %w", err)
+	}
+	hasRevision, err := tableHasColumn(db, "users", "auth_revision")
+	if err != nil {
+		return nil, err
+	}
+	if !hasRevision {
+		if err := db.writeParams(`ALTER TABLE users ADD COLUMN auth_revision INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return nil, err
+		}
 	}
 	hasEncryptedSecrets, err := userPasswordSecretsExist(db)
 	if err != nil {
@@ -85,7 +96,7 @@ func (s *UserStore) loadAll() error {
 	s.users = make(map[string]*User)
 	s.byName = make(map[string]*User)
 
-	stmt, err := s.db.prepare(`SELECT id, username, password_hash, password_secret, enabled, created_at FROM users`)
+	stmt, err := s.db.prepare(`SELECT id, username, password_hash, password_secret, enabled, created_at, auth_revision FROM users`)
 	if err != nil {
 		return err
 	}
@@ -106,6 +117,7 @@ func (s *UserStore) loadAll() error {
 			Enabled:        stmt.columnInt(4) != 0,
 			AllowedServers: []string{},
 			CreatedAt:      stmt.columnInt64(5),
+			AuthRevision:   stmt.columnInt64(6),
 		}
 		if _, err := s.passwordPlaintext(user); err != nil {
 			return fmt.Errorf("user %s password secret: %w", user.ID, err)
@@ -345,6 +357,11 @@ func (s *UserStore) Update(id string, username *string, password *string, enable
 func (s *UserStore) UpdateWithServerLimits(id string, username *string, password *string, enabled *bool, allowedServers *[]string, limits ServerGrantLimits) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.updateWithServerLimitsLocked(id, username, password, enabled, allowedServers, limits, nil)
+}
+
+// after runs SQL only inside this transaction, with participating stores locked.
+func (s *UserStore) updateWithServerLimitsLocked(id string, username *string, password *string, enabled *bool, allowedServers *[]string, limits ServerGrantLimits, after func() error) error {
 
 	user, ok := s.users[id]
 	if !ok {
@@ -392,6 +409,10 @@ func (s *UserStore) UpdateWithServerLimits(id string, username *string, password
 		}
 	}
 
+	// Repeated grant/enabled fields do not create a new authorization generation.
+	authorizationChanged := password != nil || (enabled != nil && *enabled != user.Enabled) ||
+		len(addedServers) > 0 || len(removedServers) > 0
+
 	hashed := ""
 	secret := ""
 	if password != nil {
@@ -435,9 +456,20 @@ func (s *UserStore) UpdateWithServerLimits(id string, username *string, password
 				}
 			}
 		}
+		if authorizationChanged {
+			if err := s.db.execParams(`UPDATE users SET auth_revision = auth_revision + 1 WHERE id = ?`, id); err != nil {
+				return err
+			}
+		}
+		if after != nil {
+			return after()
+		}
 		return nil
 	}); err != nil {
 		return err
+	}
+	if authorizationChanged {
+		user.AuthRevision++
 	}
 
 	// Applied only after the transaction committed, so a failed write cannot leave the
@@ -517,7 +549,12 @@ func (s *UserStore) RemoveServerGrants(serverID string) ([]string, error) {
 	defer s.mu.Unlock()
 
 	if s.db != nil {
-		if err := s.db.execParams(`DELETE FROM user_servers WHERE server_id = ?`, serverID); err != nil {
+		if err := s.db.withWriteTx(func() error {
+			if err := s.db.execParams(`UPDATE users SET auth_revision = auth_revision + 1 WHERE id IN (SELECT user_id FROM user_servers WHERE server_id = ?)`, serverID); err != nil {
+				return err
+			}
+			return s.db.execParams(`DELETE FROM user_servers WHERE server_id = ?`, serverID)
+		}); err != nil {
 			return nil, err
 		}
 	}
@@ -535,6 +572,7 @@ func (s *UserStore) RemoveServerGrants(serverID string) ([]string, error) {
 		}
 		if removed {
 			affectedUserIDs = append(affectedUserIDs, user.ID)
+			user.AuthRevision++
 		}
 		user.AllowedServers = kept
 	}
@@ -602,5 +640,6 @@ func (s *UserStore) copyUser(user *User) *User {
 		Enabled:        user.Enabled,
 		AllowedServers: append([]string{}, user.AllowedServers...),
 		CreatedAt:      user.CreatedAt,
+		AuthRevision:   user.AuthRevision,
 	}
 }

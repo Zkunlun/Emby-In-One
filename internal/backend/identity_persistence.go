@@ -13,6 +13,8 @@ import (
 type persistedCapturedHeaders struct {
 	Headers    http.Header `json:"headers"`
 	CapturedAt string      `json:"capturedAt"`
+	OwnerUserID string `json:"ownerUserId,omitempty"`
+	OwnerServerID string `json:"ownerServerId,omitempty"`
 }
 
 type identityPersistenceSnapshot struct {
@@ -52,6 +54,7 @@ func newIdentityPersistenceFromDetectedConfig() *IdentityPersistence {
 }
 
 func StableUpstreamKey(upstream UpstreamConfig) string {
+	if upstream.ID != "" { return "id:" + upstream.ID }
 	baseURL := strings.TrimRight(strings.TrimSpace(upstream.URL), "/")
 	name := strings.TrimSpace(upstream.Name)
 	spoofClient := strings.TrimSpace(upstream.SpoofClient)

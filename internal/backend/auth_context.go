@@ -51,7 +51,7 @@ func (a *App) withContext(next http.HandlerFunc) http.HandlerFunc {
 
 func (a *App) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if reqCtx := requestContextFrom(r.Context()); reqCtx == nil || reqCtx.ProxyUser == nil {
+		if reqCtx := requestContextFrom(r.Context()); !a.currentRequestAuthorized(reqCtx) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"message": "Authentication required"})
 			return
 		}
@@ -62,7 +62,7 @@ func (a *App) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 func (a *App) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqCtx := requestContextFrom(r.Context())
-		if reqCtx == nil || reqCtx.ProxyUser == nil {
+		if !a.currentRequestAuthorized(reqCtx) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"message": "Authentication required"})
 			return
 		}
@@ -92,42 +92,29 @@ func playbackDeviceID(reqCtx *RequestContext) string {
 // allowedClients returns only the online upstream clients that the
 // current user is permitted to access. Admin users see all online servers.
 func (a *App) allowedClients(reqCtx *RequestContext) []*UpstreamClient {
-	all := a.Upstream.OnlineClients()
-	if reqCtx == nil || reqCtx.ProxyUser == nil {
-		return nil
+	a.watchLifecycleMu.RLock()
+	defer a.watchLifecycleMu.RUnlock()
+	scope := a.mediaAccessScopeLocked(reqCtx)
+	clients := make([]*UpstreamClient, 0, len(scope.onlineServerIDs))
+	if a.Upstream == nil {
+		return clients
 	}
-	if reqCtx.ProxyUser.Role == "admin" {
-		return all
-	}
-	allowed := make(map[string]bool, len(reqCtx.ProxyUser.AllowedServers))
-	for _, id := range reqCtx.ProxyUser.AllowedServers {
-		allowed[id] = true
-	}
-	filtered := make([]*UpstreamClient, 0, len(all))
-	for _, c := range all {
-		if allowed[c.ID] {
-			filtered = append(filtered, c)
+	// Preserve configured source order for aggregation and default selection.
+	for _, client := range a.Upstream.OnlineClients() {
+		if scope.allows(client.ID) {
+			clients = append(clients, client)
 		}
 	}
-	return filtered
+	return clients
 }
 
 // isServerAllowed checks whether the current user is allowed to access the
 // upstream server with the given ID. Admin users may access every server;
 // regular users may access only servers explicitly listed in AllowedServers.
 func (a *App) isServerAllowed(reqCtx *RequestContext, serverID string) bool {
-	if reqCtx == nil || reqCtx.ProxyUser == nil {
-		return false
-	}
-	if reqCtx.ProxyUser.Role == "admin" {
-		return true
-	}
-	for _, id := range reqCtx.ProxyUser.AllowedServers {
-		if id == serverID {
-			return true
-		}
-	}
-	return false
+	a.watchLifecycleMu.RLock()
+	defer a.watchLifecycleMu.RUnlock()
+	return a.mediaAccessScopeLocked(reqCtx).allows(serverID)
 }
 
 // requireServerAccess writes a 403 response and returns false when the current

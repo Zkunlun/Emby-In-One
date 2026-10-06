@@ -24,8 +24,10 @@ func TestPhase5ISessionRoutingFollowsSelectedMediaSource(t *testing.T) {
 		ProxyUser:        &tokenInfo{UserID: "user-1", Role: "user"},
 		PlaybackDeviceID: "xbox-001",
 	}
+	seedPhase5RouteScope(app, reqCtx)
 	owner := playbackRouteOwner(reqCtx)
 	app.playbackRoutes.RememberMediaSource(owner, mediaSourceB, "server-b", "play-b", playSessionA)
+	app.playbackRoutes.RememberMediaSourceItem(owner, mediaSourceB, item, "server-b")
 
 	body := map[string]any{
 		"ItemId":        item,
@@ -59,6 +61,7 @@ func TestPhase5ISessionRoutingUsesRequestScopedActiveRouteWithoutMediaSource(t *
 	store.AssociateAdditionalInstance(item, "item-b", "server-b")
 	playSessionA := store.GetOrCreateVirtualID("play-a", "server-a")
 	reqCtx := &RequestContext{ProxyToken: "token-user", ProxyUser: &tokenInfo{UserID: "user-1", Role: "user"}}
+	seedPhase5RouteScope(app, reqCtx)
 	app.playbackRoutes.Activate(playbackRouteOwner(reqCtx), item, "server-b", "play-b", playSessionA)
 
 	body := map[string]any{"ItemId": item, "PlaySessionId": playSessionA}

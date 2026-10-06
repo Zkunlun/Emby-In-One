@@ -1,6 +1,6 @@
 # Emby-In-One
 
-> **Version: V1.5.1**
+> **Version: V1.6.0**
 
 [![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -19,7 +19,9 @@ This repository is actively developed and maintained on top of [ArizeSky/Emby-In
 
 The current repository continues that work with compatibility fixes, stability improvements, feature development, and ongoing releases. Future maintenance, bug fixes, and releases are tracked here.
 
-The current stable release is **V1.5.1**. The active codebase is primarily implemented in Go; the original Node.js V1.2.1 implementation is retained under [`legacy/`](legacy/) for historical reference and is not part of current builds or installations.
+The current stable release is **V1.6.0**. The active codebase is primarily implemented in Go; the original Node.js V1.2.1 implementation is retained under [`legacy/`](legacy/) for historical reference and is not part of current builds or installations.
+
+> **V1.6.0** adds media library counts, improves upstream client identity and watch-state handling, and keeps movie and episode versions together under the revised merge rules. The business source has been deployed and accepted by the user. See the [changelog](Update.md) and [release validation notes](docs/release-v1.6.0-validation.md) for scope and evidence.
 
 ## Table of Contents
 
@@ -30,6 +32,7 @@ The current stable release is **V1.5.1**. The active codebase is primarily imple
 - [Configuration Reference](#configuration-reference)
 - [Multi-User Management](#multi-user-management)
 - [Advanced Config & Core Principles](#advanced-config--core-principles)
+- [Media Library Counts](#media-library-counts)
 - [Health Check](#health-check)
 - [Security Hardening](#security-hardening)
 - [Logging System](#logging-system)
@@ -51,11 +54,12 @@ The current stable release is **V1.5.1**. The active codebase is primarily imple
 | --- | --- |
 | **Multi-Upstream Aggregation** | Combines media libraries, search results, and media items from multiple Emby servers behind one endpoint. Concurrent fan-out plus configurable grace periods reduce the impact of slow upstreams, while previously aggregated content can fall back to other online `OtherInstances`. |
 | **Media Merging & ID Virtualization** | Deduplicates movies, series, seasons, and episodes across servers while retaining multiple MediaSources for the same title. Clients see persistent Virtual IDs, while metadata priority rules select the preferred display metadata. |
-| **Multi-User & Independent Watch State** | Supports regular users with independent playback progress, played state, favorites, Resume, and NextUp. `IsFavorite`, `IsPlayed`, `IsResumable`, and `IsUnplayed` filters are also evaluated from the current user's local state, while admins keep upstream-account semantics. |
+| **Multi-User & Independent Watch State** | Keeps playback progress, played state, favorites, Resume, and NextUp independent between regular users, with shared state for one user's merged cross-upstream film, with automatic played marking when qualified playback reports reach 90%. `IsFavorite`, `IsPlayed`, `IsResumable`, and `IsUnplayed` filters are also evaluated from the current user's local state, while admins keep upstream-account semantics. |
 | **Access Control & Library Visibility** | Admins have access to all upstreams and management features; regular users can be restricted to selected servers. Libraries or entire servers can also be hidden from a user's Emby home screen without affecting search, Latest, or Resume content. |
 | **Proxy & Direct Playback** | Supports `proxy` and `redirect` playback modes plus ordered multi-line streaming. Proxy can fail over on transport errors or 502/503/504 responses; Redirect skips known-dead lines and performs bounded recovery probing when every line is unavailable. |
-| **Upstream Authentication & Client Identity** | Upstreams can authenticate with username/password or API Key. Client identity supports `none`, `passthrough`, `infuse`, and `custom` modes, including passthrough/custom Emby identity headers and automatic upstream re-login after session failure. |
+| **Upstream Authentication & Client Identity** | Upstreams can authenticate with username/password or API Key. Client identity supports `none`, `passthrough`, `infuse`, `hills`, `capyplayer`, and `custom` modes, including passthrough/custom Emby identity headers and automatic upstream re-login after session failure. |
 | **Network Proxies & Health Checks** | Upstreams in Proxy playback mode can use per-upstream HTTP/HTTPS proxies with connectivity testing; Redirect direct playback cannot use a server-side HTTP proxy. Background checks cover both upstream API reachability and multi-line stream liveness. |
+| **Media Library Counts** | Sums official movie, series, and episode counts over currently authorized online servers. Hourly background refresh and cache-only client reads; no deduplication or full scan; an online server without a complete snapshot makes the whole response 503. |
 | **Authorization Capacity & Single-Device Playback** | `maxConcurrent` caps regular-user grants per upstream. Separate per-user/per-upstream playback leases enforce active-device ownership, heartbeat expiry, exact Stop, and old-session protection. |
 | **Web Admin & SSH CLI** | Includes a Web admin panel, REST management API, and SSH management menu for upstreams, users, network proxies, global settings, logs, updates, and service lifecycle operations. |
 | **Logging & Security** | Includes persistent leveled logs with rotation, login-failure rate limiting, scrypt password storage, protected config/token file permissions, request-body limits, SSRF protections, and a CSP for the admin panel. |
@@ -220,7 +224,7 @@ upstream:
     url: "https://emby-b.example.com"
     apiKey: "your-api-key"
     playbackMode: "redirect"                   # Overrides global playback mode
-    spoofClient: "infuse"                      # none | passthrough | infuse | custom
+    spoofClient: "infuse"                      # none | passthrough | infuse | hills | capyplayer | custom
     streamingUrls:                               # Streaming lines (optional, ordered; a single one can also be written as streamingUrl: "...")
       - "https://cdn.example.com"                # 1st entry is the primary line
       - "https://backup.example.com"             # the rest are fallbacks
@@ -238,6 +242,16 @@ upstream:
     customClientVersion: "7.7.1"
     customDeviceName: "iPhone"
     customDeviceId: "your-custom-device-id"
+
+  - name: "Server D (Hills preset)"
+    url: "https://emby-d.example.com"
+    apiKey: "your-api-key"
+    spoofClient: "hills"
+
+  - name: "Server E (CapyPlayer preset)"
+    url: "https://emby-e.example.com"
+    apiKey: "your-api-key"
+    spoofClient: "capyplayer"
 ```
 
 Settings modified in the admin panel take effect hotly, no service restart required. The one exception is the global default playback mode, which is only the initial value for a new upstream — see Playback Modes.
@@ -302,7 +316,7 @@ V1.4 adds multi-user support, allowing admins to create multiple regular users, 
 
 ### Independent Watch History
 
-Because all distributed users share the same upstream Emby account, watch progress, played state, and favorites are naturally shared on the upstream side. Real state changes from a regular user are still written upstream and are also written to that EIO user's WatchStore; reads use the **local record as authoritative state**, so one regular user's changes to the shared upstream account do not overwrite what another regular user sees:
+Because all distributed users share the same upstream Emby account, watch progress, played state, and favorites are naturally shared on the upstream side. Playback reports and explicit user operations are forwarded through their existing upstream interfaces while EIO maintains that regular user's WatchStore. Automatic completion updates only local state without an extra upstream played-state mutation; reads use the **local record as authoritative state**, so one regular user's changes to the shared upstream account do not overwrite what another regular user sees:
 
 | Feature | Admin | Regular User |
 |---------|-------|--------------|
@@ -323,15 +337,63 @@ Because all distributed users share the same upstream Emby account, watch progre
 
 **Paging:** the aggregated list without a `ParentId` (`GET /Users/{id}/Items` with no container) is paged by the proxy **after** merging and deduplicating, so `TotalRecordCount` is the merged total and `StartIndex` counts in merged order. Local filtering works the same way: the candidate set is fetched first, then sorted and paged locally.
 
-> One more trade-off: both of those paths fetch a **candidate set** from the upstream (rather than letting it filter and return one page), capped at 5000 items per request; past the cap the reported total is only a lower bound and the tail of the list may be unreachable, which is logged.
+> One more trade-off: both of those paths fetch a **candidate set** from the upstream (rather than letting it filter and return one page), capped at 5000 raw candidate items per upstream per request (neither a merged total nor a version count); past the cap the reported total is only a lower bound and the tail of the list may be unreachable, which is logged.
 
 **Working Principle:**
 
-- Playing/Progress report upstream first and write regular-user local progress only after 2xx confirmation; failure keeps the previous local state
-- Stopped saves the client-observed terminal state even when upstream is unavailable; reaching 90% of a known positive runtime marks the item played
-- Mark played / favorite and other user operations are also dual written
-- When a user is deleted, their local watch data is automatically cleared
-- Upon first playback of an item, the system automatically fetches metadata from upstream (series name, seasons, episodes) to support NextUp calculations
+- Playing/Progress report upstream first and write regular-user local progress only after 2xx confirmation; failure keeps the previous local state.
+- Valid Progress marks an item played at 90% of its matching runtime, with Stopped providing a final check. Playing establishes context without marking completion from its starting position.
+- Modern Stopped preserves the client-observed terminal state and exact device/session lease cleanup. Legacy stop routes also record a local terminal event once a target is selected; when no target can be selected, their existing response is retained.
+- Explicit played, unplayed, and favorite operations keep their existing interface behavior. Deleting a user clears their local watch data.
+- Item type, series, season, and episode metadata are fetched when needed for local state and NextUp.
+
+**Automatic Played State:**
+
+For regular users, a Movie / Episode with a valid Progress or Stopped position at **90% or more of a qualified runtime (including exactly 90%)** is stored locally as `Played=true` with its resume position set to zero. Browsing an item, obtaining a playback URL, video GET/HEAD/Range requests, and a disconnected stream do not trigger this decision. Seeking to 90% followed by a valid report also qualifies; this measures position, not accumulated viewing time or end credits.
+
+Runtime comes first from the current valid report, then a matching cache scoped to the user, real device, session, and media source, and finally metadata for the selected upstream item/source. Multiple versions require the actual MediaSourceId; EIO does not choose the first source or assume a historical row's runtime belongs to the current version. Unknown source, type, or runtime leaves completion undecided while preserving confirmed progress. Live playback and a stop with `Failed=true` do not create completion. Metadata requests have time and retry limits; normal reports with sufficient information do not repeatedly fetch metadata.
+
+A Stopped event with an omitted/null position can use only the last valid position from a fully matching session. Explicit zero and invalid values are never replaced by cached progress. Missing session/source identity without proof of a unique source does not allow borrowing another playback's position. The cache has capacity and expiry limits and does not survive a restart.
+
+Played persists through ordinary reports, low-position stops, and replay. Replay does not automatically re-enter Resume; an explicit unplayed action clears Played. Manual Played or position changes invalidate old session cache evidence, while a new valid report reaching the threshold can complete the item again. Reads use local Played, resume position, completion percentage, and last-played time. Completed items leave Resume; NextUp follows the existing episode rules, and favorites are preserved.
+
+Modern Sessions Playing / Progress / Stopped and legacy PlayingItems start / Progress / DELETE stop / POST Delete routes share the decision. Direct, proxy, and STRM/HTTP Path video delivery stays unchanged. Without sufficient control reports to EIO, completion cannot be guaranteed. Admins retain upstream-account state. Local automatic completion makes no extra upstream PlayedItems call; original playback reports and explicit user operations are still forwarded through their existing interfaces.
+
+
+### Shared State Across Upstreams and Binding Changes
+
+A regular user's watch state is keyed by the local user and an already merged Virtual ID. Confirmed A / B instances share that user's progress, played state, and favorites; different local users remain independent. The recorded server is a resource locator, not the sole source of history visibility.
+
+| Action or condition | Watch history and playback source |
+| --- | --- |
+| Unbind A while a matching B remains bound | Keep shared state; obtain available resources and versions from B and resume at the saved position |
+| Unbind every relevant source | Hide that film's local history, UserData, and watch-filter results while retaining the row; rebinding the same existing server ID restores access |
+| A is offline but still bound; B is online | Keep history, play and update shared state through B; A reads the latest state when it returns |
+| Every authorized instance is offline | Keep history; Resume / NextUp omit entries whose required online metadata cannot be obtained |
+| Delete A while the merged film still has an existing B instance | Keep the Virtual ID and shared state, migrate locators, and remove A's instances, grants, caches, and related hidden-library settings |
+| Delete A with no remaining instance of the film | Remove orphan mappings and watch rows; late requests cannot recreate deleted history |
+| Re-add A at the same address after deletion | The new server has a new ID and does not recover A-only history or identity caches; merging with an existing B uses B's retained shared state |
+| Delete a regular user | Remove that user's local watch/favorite data, grants, hidden libraries, tokens, and related caches without changing other users' state |
+
+Visibility depends on current grants and confirmed instances. Filtering precedes grouping, sorting, pagination, and counts; watch rows do not acquire a permanent hidden flag. Hiding a home-library entry does not unbind its server or change watch-state authorization.
+
+Version selection exposes only authorized sources. B's versions use B's actual item, media source, and session. An old A version that loses authorization is rejected; A's raw version ID is never silently routed to B. Runtime caches remain source/version-specific, and A's runtime is not stored as B's version runtime. Shared state follows confirmed merge relationships; new associations follow the media merge strategy below, without adding edit/cut content fingerprints or cross-runtime progress conversion.
+
+### Shared Progress Write Boundaries
+
+The latest successful Started with confirmed identity owns shared writes. Progress / Stopped must match its real user, device, session, source/version, and generation. Older events cannot overwrite a newer committed position or manual state. Backward seeks store the valid reported position rather than the historical maximum. Manual Played / position changes invalidate old contexts; favorite-only changes retain the playback context.
+
+Missing real-device, session, or version-membership proof skips local shared automatic writes; EIO does not guess the latest session. Restart or cache eviction requires a new valid Started to establish ownership. If a client fully reuses the same device/source/film/version/session IDs, the protocol has no additional generation field, so not every late newly arriving packet can be distinguished.
+
+Inheritance after deleting A applies only to **valid in-flight reports authenticated and admitted before deletion**. Final checks still require an enabled user, authorized B, a surviving merged identity, version evidence, and a valid write generation that has not been superseded by playback or manual state. Only the shared row and B locator are updated; A's raw IDs are not sent to B. Newly arriving requests with revoked tokens remain rejected. Missing authorized survivors or evidence causes the report to be discarded.
+
+### Management Changes and Recovery
+
+Grant, enabled-state, or password updates advance authorization revisions and revoke that user's old tokens; subsequent control requests may require sign-in. Removing a binding clears only that user's affected-source routes, caches, and leases, retaining their B lease and other users' data. Disabling a user or changing their password clears that user's playback contexts. Cleanup cannot immediately recall direct URLs already handed to clients or media transfers already underway.
+
+Destructive management changes fail if persistent stores or the cleanup journal are unavailable. Token / identity-file cleanup failures after a database commit report `cleanupPending` and are not complete success. Once server removal is durable in configuration, restoring A's config is not used as a pretend rollback. Regular-user access pauses while cleanup is pending; admins can retry a management operation. Startup recovers cleanup before upstream login or HTTP serving and stops if recovery fails. There is no background retry worker; successful cleanup removes the journal.
+
+Legacy users and tokens start at authorization revision 0. Watch uniqueness stays unchanged, and unbinding does not wipe history. Passthrough last-success caches use stable server IDs. Legacy address keys migrate only with a unique confirmed current owner; related captures with unknown ownership are conservatively removed during cleanup and may require a new client sign-in. See the [Task 4 acceptance matrix](docs/task4-acceptance.md); all cases await unified validation.
 
 ### Creating Regular Users
 
@@ -373,7 +435,7 @@ Playing/Progress write local progress and refresh the owning device's lease only
 | Deadline / network timeout | 504 `UPSTREAM_SESSION_TIMEOUT` |
 | HTTP non-2xx, including upstream 401/403 | 502 `UPSTREAM_SESSION_REJECTED` |
 
-Stopped preserves the client-observed terminal state: success, ordinary upstream failure, offline, and missing-client outcomes still save local progress and attempt exact lease release, returning 204. Preparation errors retain their original 400/503 response while finalizing locally. Missing DeviceID saves progress and returns 400 without forwarding upstream or releasing a lease. Reaching 90% of a known positive runtime can mark the item played. Public errors and lifecycle diagnostics omit upstream bodies, URLs, and credentials.
+Stopped preserves terminal response behavior: success, ordinary upstream failure, offline, and missing-client outcomes attempt to save progress qualified by current session, version, and write-ownership proof and finalize the exact lease, returning 204. Preparation errors retain their original 400/503 response. Missing DeviceID returns 400 without forwarding upstream or releasing a lease; missing identity proof cannot authorize a shared automatic progress write. Valid Movie / Episode Progress or Stopped reports reaching 90% of a qualified runtime follow the automatic-played rules above. Playing, unknown source/runtime, live playback, and Failed stops do not create completion. Public errors and lifecycle diagnostics omit upstream bodies, URLs, and credentials.
 
 ---
 
@@ -428,7 +490,18 @@ Controls what client identity the proxy communicates with the upstream server. A
 | `none` | Proxy default identity | `Emby Aggregator` | Most servers — no client restrictions |
 | `passthrough` | Real client UA | Real client value | Servers with client allowlists; if no real identity has been captured yet, the initial upstream login is deferred until a real client connects |
 | `infuse` | `Infuse/7.7.1 (iPhone; iOS 17.4.1; Scale/3.00)` | `Infuse` | Servers strictly allowing Infuse |
+| `hills` | `Hills/1.9.1 (android; 16)` | `Hills` | Use the fixed Hills 1.9.1 identity profile |
+| `capyplayer` | `CapyPlayer/1.1.6` | `CapyPlayer` | Use the fixed CapyPlayer 1.1.6 identity profile |
 | `custom` | Custom value | Custom value | Servers needing complete control over client markings |
+
+The Hills and CapyPlayer presets use UA values captured from real client logins and fixed identity profiles:
+
+| Preset | ClientVersion | DeviceName | Spoofed DeviceId |
+|--------|---------------|------------|------------------|
+| `hills` | `1.9.1` | `fuxi` | `hills-spoof-id` |
+| `capyplayer` | `1.1.6` | `2211133C` | `capyplayer-spoof-id` |
+
+The original UA values are preserved; no platform information is added to the CapyPlayer UA. DeviceId uses an EIO-defined fixed spoofed value rather than a real client device ID. A preset applies only when selected for that upstream; existing configurations are not switched automatically, and later client logins do not update the profile. HTTP UA, identity headers, and query fields within the supported endpoint scope use the same profile. Internal real-device identification and session limits retain their existing behavior. Playback requests made directly by the client after a 302 redirect can still carry the client's own UA.
 
 > **Note**: The `official` mode from V1.2 has been automatically migrated to `custom` in V1.3, using the original Emby Web official client's default values.
 >
@@ -463,15 +536,25 @@ This priority solely affects which metadata to display—all servers' MediaSourc
 
 ### Media Merge Strategy
 
-| Content Type | Dedup Criterion | Behavior |
-|--------------|-----------------|----------|
-| **Movies** | TMDB ID, or Title + Year | Merged into a solitary entry containing multiple MediaSources |
-| **Series** | TMDB ID, or Title + Year | Deduplicated at the series layer |
-| **Seasons** | Season Number `IndexNumber` | Deduplication by season number |
-| **Episodes** | Season:Episode number | Deduplicated; greatest metadata grabbed by the priority algorithm above |
-| **Libraries (Views)** | — | Fully preserved, appending server names as suffixes for distinction |
+Merging discovers candidates as requests need them: browsing, search, season/episode and detail paths process encountered candidates. Creating a user or starting the service does not scan every upstream's full library. Candidates retain the existing Round-Robin order; display metadata still follows server priority.
 
-Cross-server entries are initially interleaved (Round-Robin) before duplicated merging.
+| Content Type | Criteria for new merges | Behavior |
+|--------------|-------------------------|----------|
+| **Movies** | Same-type work identity | Keep all known versions of one work in one item |
+| **Series** | Same-type work identity | Merge at the series level |
+| **Seasons** | Proven same parent series plus explicit season `IndexNumber` | Use upstream season numbers |
+| **Episodes** | Same parent series plus explicit season and episode numbers | Keep all known versions of one episode together without correcting numbering |
+| **Libraries (Views)** | — | Preserve all libraries and append server-name suffixes |
+
+Work identity compares TMDB, IMDb and TVDB IDs within the same provider namespace. Any directly comparable ID conflict rejects a new merge, even if another shared ID matches. With no directly comparable valid ID, use the complete name and year, lowercasing ASCII English letters before exact comparison. There is no translated-name, punctuation or whitespace fuzzy matching, or online ID mapping. Missing required names, years or episode numbers keep identities separate. Explicit season zero is valid; episode numbers must be positive integers. Episode titles and years do not replace parent-series identity, and shared episode ID conflicts still reject new associations.
+
+Runtime is not a merge condition or candidate index. Different, unknown or untrusted runtimes do not independently prevent merging. Each version retains its own runtime, quality, codec and audio metadata; no content fingerprint or timeline conversion is added. Different original items on the same upstream can merge under the same identity rules. If A has eight versions of X and B has two, the group retains ten distinct source locators; conflicting works retain their own eight and two versions.
+
+A version is identified by server, original ItemID and MediaSourceID together. Distinct locators are not removed because their names, quality or runtime match. Repeated observations are idempotent; partial responses add versions without pruning known members. Identity can be established before MediaSources arrive, without inventing a concrete playback route.
+
+Saved relationships do not automatically split when metadata changes. Encountered old version groups can coalesce when their membership is proven; old Virtual IDs remain aliases, with historical evidence and watch rows preserved. One regular user's group members share played state, favorites and the raw resume position. Different identities and users remain isolated. Lists, details and PlaybackInfo aggregate currently authorized, actually returned sources; explicit selection always routes to the selected real version.
+
+Existing query scope, the 5000-candidate cap and the absence of a three-source indirect-conflict audit remain. `ParentId` paths retain upstream raw-item `StartIndex/Limit/TotalRecordCount` paging. Raw counts are not globally deduplicated work totals; this revision does not expand pagination or statistics. See the [media merge rules](docs/media-merge.md) and [release validation notes](docs/release-v1.6.0-validation.md).
 
 ### ID Virtualization
 
@@ -480,9 +563,54 @@ Each upstream Item ID is mapped globally to a lone virtual ID — 16 random byte
 - **Storage**: Persistent SQLite storage in WAL mode, backed by an in-memory cache for fast lookups
 - **Mapping**: `virtualId <-> { originalId, serverId }`, with additional `otherInstances` relationships persisted as well; `serverId` is a stable server identity and does not depend on configuration order
 - **Persistence**: Virtual mappings and primary/additional instance relationships survive restarts; legacy `server_index` data is migrated to `server_id`
-- **Upstream deletion**: If a removed primary instance still has another upstream instance available, a remaining instance is promoted while preserving the Virtual ID and regular-user WatchStore state. Only truly orphaned items with no remaining instance lose their mapping and associated watch state
+- **Upstream deletion**: Confirmed instances still present in current configuration preserve the film's Virtual ID and shared watch state whether the deleted source was primary or additional. A survivor is promoted and watch locators migrated when needed. Only orphaned items with no survivor lose mappings and watch rows. Unbinding changes user visibility; see [Shared State Across Upstreams and Binding Changes](#shared-state-across-upstreams-and-binding-changes)
 
 ---
+
+## Media Library Counts
+
+> V1.6.0 provides this counts endpoint, including the accepted Hills language-parameter compatibility fix.
+
+Authenticated clients read `GET /Items/Counts`, also available under `/emby/Items/Counts`.
+A successful response contains only three nonnegative integers: `MovieCount`, `SeriesCount`, and `EpisodeCount`.
+Regular users receive totals for current server bindings intersected with their token grants; admins receive totals for all currently configured servers.
+Only online servers contribute. Libraries hidden from the home screen remain included in their server's counts.
+
+Each server has one shared memory cache, populated from the official Counts endpoint for the configured upstream account's visible media.
+Duplicates on different servers are counted on each server. There is no deduplication, second version-count group, or media-item scan to fill missing counts.
+These totals therefore differ from merged media-list presentation. Six display positions in Hills do not imply six independent count metrics: calls with or without UserId return the same scoped three fields.
+
+Background initialization follows startup preparation, with hourly refreshes thereafter. An actual user binding change registers an extra refresh for the selected online servers.
+Requests for the same server merge, with at most two collection workers overall. Client reads never trigger refresh, login, or probing; there is no manual refresh endpoint.
+A complete new success replaces the old value. Same-account failures and rate limits do not expire a previous success by age.
+Server deletion and account or connection-scope changes isolate old values; restarting begins with an empty cache.
+
+After an ordinary Counts failure, the background collector checks reachability through the same upstream API and identity path.
+It makes at most one further Counts attempt if the check confirms online status. Explicit rate limits or waiting prohibit that further attempt and honor `Retry-After`.
+A 429 without usable waiting information uses backoff. This controls counts collection only; playback and other existing traffic continue independently.
+If any authorized online server lacks a complete current snapshot, the entire response is 503.
+
+| State | Client result |
+| --- | --- |
+| All authorized online servers have complete current snapshots | 200 with three per-server sums |
+| No bindings, or all authorized servers are explicitly offline | 200 with three zero values |
+| Any authorized online server lacks a complete snapshot | 503 `COUNTS_UNAVAILABLE`, without partial counts |
+| Lifecycle cleanup or recovery is pending | 503 `COUNTS_LIFECYCLE_PENDING` |
+| Missing/invalid token, or a deleted/disabled user | 401 |
+| Another user or a real upstream UserId is requested | 403 `COUNTS_USER_FORBIDDEN` |
+| Malformed/duplicate parameters or an empty UserId | 400 `INVALID_COUNTS_QUERY` |
+| Unsupported filters or server selection parameters | 400 `COUNTS_FILTER_UNSUPPORTED` |
+
+Omit `UserId` or use the current local user ID / compatible legacy alias. The legacy alias still denotes the current token's user.
+Parameter names are case-insensitive; duplicates in the same normalized family are rejected even with identical values.
+Explicit `IsFavorite=true`, `false`, or an empty value is unsupported, as are watched/resumable filters, library selection, pagination, and other extra parameters.
+Unsupported filters are never silently replaced with whole-library totals. Allowed identity metadata, including Hills' `X-Emby-Language`, is consumed locally, without forwarding or changing scope.
+
+`HEAD` performs the same validation and returns the status and corresponding JSON length without a body.
+Other methods, including OPTIONS, return authenticated 405 with `Allow: GET, HEAD`.
+All counts responses use `Cache-Control: private, no-store`, omit ETag/Last-Modified, and do not return conditional 304.
+Responses expose no upstream credentials, server lists, raw error bodies, or partial totals.
+See the [media library counts API](docs/media-counts.md) and [release validation notes](docs/release-v1.6.0-validation.md).
 
 ## Health Check
 
@@ -613,9 +741,9 @@ Runtime directories:
 
 - `config/` — Stores config file `config.yaml`
 - `data/` — Stores runtime data:
-  - `mappings.db` — Virtual ID mappings, additional instances interactions, user data (UserStore), and watch history (WatchStore)
-  - `tokens.json` — Proxy layer token storage
-  - `captured-headers.json` — Passthrough client headers persistence
+  - `mappings.db` — Virtual/additional-instance mappings, users/authorization revisions, watch history, and the internal pending-cleanup journal; completed cleanup removes journal entries
+  - `tokens.json` — Proxy tokens and authorization revisions; authentication still checks current user existence, enabled state, and revision
+  - `captured-headers.json` — Passthrough identity cache; last-success entries use stable server IDs and record known user/server ownership
   - `emby-in-one.log` — Log file
 
 The actual location of `data/` can be changed with the top-level [`dataDir`](#data-directory-datadir) key in the config file.
@@ -667,16 +795,11 @@ On a fresh installation with no real client identity captured yet, a username/pa
 - These values can only tighten the timeout below `timeouts.api`; raise `api` as well to allow longer probes
 - `Timeouts are now enforced` in the startup log means your config carries values below `api`
 
-### Only Admin Login Can Capture Client UA
+### Client UA Capture and Cleanup
 
-In passthrough mode, the proxy needs to capture the real client's UA / Device and other Emby identity headers. **Only when logging in with the admin account will the proxy capture and store these client header information**. Regular user logins do not trigger UA capture.
+Successful sign-in from a real Emby client with usable identity headers can create token-scoped UA / Device captures for both admins and regular users. Admin-panel login may not provide these fields. Capture grants no extra upstream access and does not replace a selected fixed spoofing preset.
 
-Reason: The admin is the only role that maps directly to the upstream Emby account. Only the admin's login session needs to maintain a real client identity to pass through to upstream servers. Regular users' requests are sent by the proxy using the admin's previously captured client identity.
-
-If your passthrough upstream consistently fails to auto-login, please verify:
-1. You have logged into Emby-in-One using a real Emby client (Infuse, Emby iOS, etc.) with the **admin** account
-2. Check the admin panel "Captured Client Info" page to confirm records exist
-3. To change the captured client identity, log in once with the desired client using the admin account
+Sign in to EIO with the desired client and inspect "Captured Client Info" in the admin panel. Passthrough last-success entries are separated by stable server ID. Binding changes, deletion, disabling, or password changes clean related captures and fence late asynchronous publication. Related legacy data with unknown ownership is conservatively removed and may require another client sign-in.
 
 ### Playback 403 / 401
 
@@ -744,6 +867,7 @@ Emby-In-One/
 │   ├── auth_manager.go             # Upstream auth management (login/session/API Key)
 │   ├── identity.go                 # Client identity capture & Passthrough 5-level resolution
 │   ├── identity_persistence.go     # Per-upstream client identity persistence
+│   ├── identity_lifecycle.go       # Identity ownership, migration & publication fences
 │   ├── user_store.go               # Multi-user storage (CRUD, password hashing, memory index + SQLite)
 │   ├── handlers_admin.go           # Admin API handlers (upstream server CRUD)
 │   ├── handlers_system.go          # System info endpoints (/System/Info)
@@ -754,6 +878,8 @@ Emby-In-One/
 │   ├── query_ids.go                # Batch query ID resolution
 │   ├── media.go                    # Media aggregation, dedup, metadata priority selection
 │   ├── aggregation.go              # Common aggregation framework (grace period + background backfill)
+│   ├── media_access.go             # Current authorized instances & watch-query scopes
+│   ├── media_request_access.go     # Request-scoped source, version & membership checks
 │   ├── media_items.go              # Media item queries (multi-upstream fan-out merge)
 │   ├── media_resume.go             # Resume Items proxy & multi-upstream merge
 │   ├── media_nextup.go             # Next Up proxy & multi-upstream merge
@@ -763,7 +889,18 @@ Emby-In-One/
 │   ├── series_userdata.go          # Series-level watch history isolation (Resume/NextUp)
 │   ├── session_userdata.go         # Sessions/Playing progress reporting
 │   ├── watch_store.go              # Per-user watch progress storage & persistence
+│   ├── watch_visible_store.go      # Batched watch queries with authorization filtering
+│   ├── watch_lifecycle.go          # Management transactions, journal & startup recovery
+│   ├── watch_lifecycle_runtime.go  # Exact cleanup & inheritance after deletion
+│   ├── watch_lifecycle_requests.go # Request auth & asynchronous state publication guards
+│   ├── watch_playback_store.go     # Atomic playback-event watch-state merge
+│   ├── playback_watch_state.go     # Playback fields, source matching & completion
+│   ├── playback_watch_cache.go     # Bounded session runtime/position & terminal state
+│   ├── playback_watch_owner.go     # Shared user/film write ownership & generations
+│   ├── playback_watch_events.go    # Playback reports, metadata & manual resets
+│   ├── playback_watch_legacy.go    # Legacy PlayingItems report compatibility
 │   ├── playback_limiter.go         # Per-user/per-upstream single-device lease (revision, heartbeat, exact Stop)
+│   ├── playback_routes.go          # User-owned playback routes & media-source sessions
 │   ├── login_limiter.go            # Per-IP login failure limiter (evicts instead of blocking)
 │   ├── streamproxy.go              # HTTP stream proxy (backpressure, HLS relative path rewriting)
 │   ├── fallback_proxy.go           # Fallback route: scan URL/Query for virtual IDs

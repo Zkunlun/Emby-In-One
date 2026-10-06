@@ -57,6 +57,9 @@ func phase7BSeedSessionState(t *testing.T, app *App, handler http.Handler) (stri
 	}); err != nil {
 		t.Fatalf("seed watch progress: %v", err)
 	}
+	// This fixture represents a previously confirmed, version-qualified Started.
+	seedPhase5WatchOwner(t, app, info.UserID, itemID, "server-a", "item-a", "xbox-001", "play-a", "ms-a", 1000)
+	app.IDStore.GetOrCreateVirtualID("ms-a", "server-a")
 	reserved := app.PlaybackLimiter.Reserve(info.UserID, "server-a", "xbox-001", itemID, "play-a")
 	if !reserved.Allowed || !reserved.Created {
 		t.Fatalf("seed playback lease = %+v, want created lease", reserved)
@@ -71,6 +74,8 @@ func phase7BPostSession(t *testing.T, handler http.Handler, path, token, itemID 
 	return phase1ESessionPost(t, handler, path, token, "xbox-001", map[string]any{
 		"ItemId":        itemID,
 		"PositionTicks": bodyPosition,
+		"PlaySessionId": "play-a",
+		"MediaSourceId": "ms-a",
 		"RunTimeTicks":  int64(1000),
 	})
 }
