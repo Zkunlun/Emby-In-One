@@ -64,7 +64,7 @@ jobs:
         run: go vet ./...
 
       # 发布与默认 CI 执行普通全量回归；完整 race 仅保留手动可选项。
-      # V1.5.1 本轮按用户决定不运行全量 race，不宣称完整 race 通过。
+      # V1.4.8 本轮按用户决定不运行全量 race，不宣称完整 race 通过。
       - name: Test
         run: go test -timeout 15m ./...
 

@@ -1,6 +1,6 @@
 # Emby-In-One
 
-> **Version: V1.5.1**
+> **Version: V1.4.8**
 
 [![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -19,7 +19,7 @@ Emby-In-One 是一个面向标准 Emby 客户端的多上游聚合代理，将�
 
 当前仓库在原项目基础上继续进行兼容性修复、稳定性优化、功能完善与版本发布，后续维护、Bug 修复和 Release 以本仓库为准。
 
-当前稳定版为 **V1.5.1**。现行主线以 Go 实现为主；原项目的 Node.js V1.2.1 实现保留在 [`legacy/`](legacy/) 中用于历史参考，不参与现行版本的构建与安装。
+当前稳定版为 **V1.4.8**。现行主线以 Go 实现为主；原项目的 Node.js V1.2.1 实现保留在 [`legacy/`](legacy/) 中用于历史参考，不参与现行版本的构建与安装。
 
 ## 目录
 

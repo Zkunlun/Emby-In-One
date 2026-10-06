@@ -1,8 +1,8 @@
 # Emby-In-One Update Plan
 
-当前稳定版：**V1.5.1**
+当前稳定版：**V1.4.8**
 
-## V1.5.1：授权容量、单设备播放与会话一致性（2026-10-02）
+## V1.4.8：授权容量、单设备播放与会话一致性（2026-10-02）
 
 - 已完成授权容量、独立单设备 lease、DeviceID 来源及 Session 状态一致性改进。
 - 管理面板使用“同播数量限制”，显示已授权人数；空授权明确提交 `[]`；容量 409 保留表单并刷新观察值；媒体库作用域与异步响应保护同步。
@@ -69,7 +69,7 @@ V1.4.4 已具备普通用户独立 WatchStore；V1.4.5 在该基础上补全读�
   ```
   三个附带发现：**(a)** `release-install.sh` 本身从未作为 Release 资产上传（清单里只有 admin.html / admin.js / emby-in-one-cli.sh / docker 归档 / 各架构二进制），所以 CLI 在线更新"按 tag 取 Release 里的脚本"这条主路径对现有 Release 会 404，实际走的是同 tag 的仓库快照兜底（仍是版本锁定，不跟随 main）；把它也上传为资产即可让主路径生效。注意**没有任何消费方校验安装器脚本本身**——即使上传了 `.sha256`，CLI 拉取它时也不做校验，如需闭环要在 CLI 侧补一步。**(b)** `install.sh` 的源码 tarball 路径仍无校验：实测 `codeload` 的 `ETag` 既不是归档字节的哈希也不是 tar 载荷的哈希（三个值互不相同），GitHub 不提供源码归档的 digest，且浮动分支无法预先发布哈希。可行的做法是把源码安装改成**下载 Release 自带的 `Emby-In-One-docker-<tag>.tar.gz` 并复用现有 `verify_sha256`**（约 5 行），前提是发布侧为它产出 `.sha256`；这同时意味着源码安装从"跟随 main"变为"固定到最新 Release"——是一个需要维护者拍板的产品决策，因此没有擅自改。**(c)** CLI 的 Docker 模式在线更新原本也拉 main tarball 且无校验，V1.4.5 验收时已改为下载最新 Release 的 docker 归档并走 `verify_download` 校验（与菜单 [15] 同一代码路径）；`release-install.sh` 中 admin.html / admin.js / cli.sh 的"main 分支无校验回退"也已在验收时移除（Release 缺产物时回退内嵌面板 / 保留磁盘旧副本）。
 - **演示站密码轮换**：README 中原演示站凭据（凭据文本已从本文件脱敏）已永久留在 git 历史与所有 fork 里，仅从正文移除不够。**必须在演示站侧轮换该密码**，并确认它没有被复用到其他部署；README 现在承诺"经 Issues 发放定期轮换的临时账号"，轮换机制需要真正落地。
-- **Sessions/Playing 与 Progress 上游失败时的本地记录**（审查清单 P3 最后一项）：**已在 V1.5.1 完成开发、普通回归及用户实机验收**。Playing/Progress 仅在上游 2xx 确认后提交本地进度/心跳；失败返回稳定 502/503/504。Stopped 保存客户端终态并只释放精确匹配 lease，preparation error 保留原响应；未新增双状态数据库 schema。V1.5.0 及更早发布版本不据此宣称已具备该行为。
+- **Sessions/Playing 与 Progress 上游失败时的本地记录**（审查清单 P3 最后一项）：**已在 V1.4.8 完成开发、普通回归及用户实机验收**。Playing/Progress 仅在上游 2xx 确认后提交本地进度/心跳；失败返回稳定 502/503/504。Stopped 保存客户端终态并只释放精确匹配 lease，preparation error 保留原响应；未新增双状态数据库 schema。V1.4.7 及更早发布版本不据此宣称已具备该行为。
 - **图片端点免认证的收紧**：`/Items/{id}/Images/{type}` 依赖"128 位随机虚拟 ID 即能力 URL"，任何拿到 URL 的人都能取图。如需更强控制，可改为短时效签名 URL。
 
 ---
