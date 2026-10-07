@@ -1,5 +1,7 @@
 # 媒体合并规则 / Media merge rules
 
+[项目主页](../README.md) · [文档索引](README.md) · [English](en/media-merge.md)
+
 适用版本：V1.4.9。合并在浏览、搜索、季集列表和详情等请求遇到候选时进行；启动或创建用户不扫描所有上游的全库。
 
 | 对象 | 判定依据 |
@@ -29,10 +31,32 @@
 
 部分聚合/本地筛选路径每上游每请求最多获取5000个原始候选，不是5000个去重作品或版本。`ParentId`路径仍按上游原始条目分页；不新增全库索引、全局去重分页或三来源间接冲突审计。媒体库统计继续逐源累计官方Counts，口径与合并列表不同。
 
+## 展示元数据优先级
+
+当同一影片/集出现在多台服务器上时，代理需要选择一台服务器的元数据（标题、简介、图片）作为"主要"版本。选择规则如下：
+
+| 优先级 | 规则 | 原因 |
+|--------|------|------|
+| 1 | `priorityMetadata: true` 的服务器 | 手动指定的首选元数据源 |
+| 2 | 简介 (Overview) 包含中文字符 | 优先使用中文本地化元数据 |
+| 3 | 简介文本更长 | 更完整的描述优先 |
+| 4 | 服务器索引更小（配置中排序靠前） | 稳定的兜底规则 |
+
+此优先级仅影响显示哪个元数据——所有服务器的 MediaSource 版本始终保留，用户可自由选择。
+
+## ID 虚拟化与持久化
+
+每个上游 Item ID 被映射为全局唯一的虚拟 ID——由 `crypto/rand` 生成的 16 字节（128 位）随机数构成，对外表现为 32 位小写十六进制字符串（不带连字符）。客户端看到的所有 ID 都是虚拟的。
+
+- **存储**：SQLite（WAL 模式）持久化，配合内存缓存加速访问
+- **映射关系**：`virtualId <-> { originalId, serverId }`，并额外持久化附加实例关系 `otherInstances`；`serverId` 是稳定服务器身份，不依赖配置中的排列顺序
+- **持久化**：重启后无需重新建立映射；主实例与附加实例关系都会恢复，旧版 `server_index` 数据会迁移到 `server_id`
+- **删除上游**：在当前配置中仍有已确认实例时，删除主实例或次实例均保留影片 Virtual ID 与共享观看状态，必要时提升幸存实例并迁移观看定位；只有没有剩余实例的孤立条目才会清理映射和观看行。解绑只改变用户授权可见性，详见[跨上游共享状态与改绑](users-and-permissions.md#跨上游共享状态与改绑)
+
+媒体库入口全部保留并追加服务器名后缀。聚合候选沿原有交错顺序（Round-Robin）组合；合并和版本保留不改变当前授权范围。
+
+[发布验证范围](release-v1.4.9-validation.md) · [用户观看状态](users-and-permissions.md)
+
 ## English summary
 
-V1.4.9 merges on demand. Movies and series compare valid TMDB, IMDb or TVDB identifiers in the same namespace; any shared-provider conflict blocks a new merge. If no valid identifier can be directly compared, complete name and year are required, with ASCII case folding only. Seasons and episodes require a proven shared parent series and valid matching numbers.
-
-Runtime never gates identity. All distinct server/item/source locators are retained, including multiple versions from one upstream. Partial responses add rather than prune known members. Old virtual IDs remain aliases when proven groups coalesce. One regular user's merged group shares played state, favorites and the raw resume position.
-
-Source visibility still depends on current authorization and actual upstream responses. Explicit selection routes to the chosen version. The existing 5000-candidate cap and upstream raw-item paging remain; no full-library scan or timeline conversion is added.
+Read the [full English documentation](en/media-merge.md) for complete instructions, behavior and limits.

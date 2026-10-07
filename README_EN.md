@@ -1,977 +1,143 @@
 # Emby-In-One
 
-> **Version: V1.4.9**
+A multi-upstream aggregation proxy for Emby clients: one entry point for multiple Emby servers, with media merging, user access control, independent watch state and playback management.
 
-[![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
-[![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![Docker](https://img.shields.io/badge/Docker-20.10+-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![GitHub Release](https://img.shields.io/github/v/release/Zkunlun/Emby-In-One?color=green)](https://github.com/Zkunlun/Emby-In-One/releases)
-[![GitHub Stars](https://img.shields.io/github/stars/Zkunlun/Emby-In-One?style=social)](https://github.com/Zkunlun/Emby-In-One)
+[![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 
-[Changelog](Update.md) | [中文文档](README.md) | [Security Policy](SECURITY.md) | [Update Plan](Update%20Plan.md) | [V1.2.1 Legacy Docs](README_V1.2.1.md) | [GitHub](https://github.com/Zkunlun/Emby-In-One)
+[Quick start](#quick-start) · [Documentation](docs/en/README.md) · [Changelog (Chinese)](Update.md) · [Security](SECURITY.md#english-security-policy) · [简体中文](README.md)
 
-Emby-In-One is a multi-upstream aggregation proxy for standard Emby clients. It combines multiple Emby servers behind one endpoint and provides media aggregation, per-user isolation, playback proxying, access control, and unified administration and operations.
+This project continues development and maintenance of [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One).
 
-## About This Project
+## Who this is for
 
-This repository is actively developed and maintained on top of [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One). Many thanks to the original author, [ArizeSky](https://github.com/ArizeSky), for creating Emby-In-One and establishing its early architecture and core functionality.
+- You have access to several Emby servers and want to browse, search and choose playback sources through one client entry point.
+- You want to assign upstream access to different people and keep each regular user's progress, played state and favorites separate.
+- You want a Web panel to manage upstreams, stream routes, users and everyday operation.
 
-The current repository continues that work with compatibility fixes, stability improvements, feature development, and ongoing releases. Future maintenance, bug fixes, and releases are tracked here.
+You need reachable Emby upstreams and their account credentials or API Keys, plus an environment to run EIO. EIO aggregates existing resources; it does not include a media library.
 
-The current stable release is **V1.4.9**. The active codebase is primarily implemented in Go; the original Node.js V1.2.1 implementation is retained under [`legacy/`](legacy/) for historical reference and is not part of current builds or installations.
+## Features
 
-> **V1.4.9** adds media library counts, improves upstream client identity and watch-state handling, and keeps movie and episode versions together under the revised merge rules. The business source has been deployed and accepted by the user. See the [changelog](Update.md) and [release validation notes](docs/release-v1.4.9-validation.md) for scope and evidence.
-
-## Table of Contents
-
-- [About This Project](#about-this-project)
-- [Features Overview](#features-overview)
-- [Quick Installation](#quick-installation)
-- [System Requirements](#system-requirements)
-- [Configuration Reference](#configuration-reference)
-- [Multi-User Management](#multi-user-management)
-- [Advanced Config & Core Principles](#advanced-config--core-principles)
-- [Media Library Counts](#media-library-counts)
-- [Health Check](#health-check)
-- [Security Hardening](#security-hardening)
-- [Logging System](#logging-system)
-- [Admin Panel](#admin-panel)
-- [SSH Management Menu](#ssh-management-menu)
-- [Data Directory Description](#data-directory-description)
-- [FAQ](#faq)
-- [Disclaimer](#disclaimer)
-- [Project Architecture](#project-architecture-developer-reference)
-- [Development & Contributions](#development--contributions)
-- [Relationship to the Original Project](#relationship-to-the-original-project)
-- [Credits](#credits)
-- [Star History](#star-history)
-- [License](#license)
-
-## Features Overview
-
-| Area | Description |
+| Capability | Description |
 | --- | --- |
-| **Multi-Upstream Aggregation** | Combines media libraries, search results, and media items from multiple Emby servers behind one endpoint. Concurrent fan-out plus configurable grace periods reduce the impact of slow upstreams, while previously aggregated content can fall back to other online `OtherInstances`. |
-| **Media Merging & ID Virtualization** | Deduplicates movies, series, seasons, and episodes across servers while retaining multiple MediaSources for the same title. Clients see persistent Virtual IDs, while metadata priority rules select the preferred display metadata. |
-| **Multi-User & Independent Watch State** | Keeps playback progress, played state, favorites, Resume, and NextUp independent between regular users, with shared state for one user's merged cross-upstream film, with automatic played marking when qualified playback reports reach 90%. `IsFavorite`, `IsPlayed`, `IsResumable`, and `IsUnplayed` filters are also evaluated from the current user's local state, while admins keep upstream-account semantics. |
-| **Access Control & Library Visibility** | Admins have access to all upstreams and management features; regular users can be restricted to selected servers. Libraries or entire servers can also be hidden from a user's Emby home screen without affecting search, Latest, or Resume content. |
-| **Proxy & Direct Playback** | Supports `proxy` and `redirect` playback modes plus ordered multi-line streaming. Proxy can fail over on transport errors or 502/503/504 responses; Redirect skips known-dead lines and performs bounded recovery probing when every line is unavailable. |
-| **Upstream Authentication & Client Identity** | Upstreams can authenticate with username/password or API Key. Client identity supports `none`, `passthrough`, `infuse`, `hills`, `capyplayer`, and `custom` modes, including passthrough/custom Emby identity headers and automatic upstream re-login after session failure. |
-| **Network Proxies & Health Checks** | Upstreams in Proxy playback mode can use per-upstream HTTP/HTTPS proxies with connectivity testing; Redirect direct playback cannot use a server-side HTTP proxy. Background checks cover both upstream API reachability and multi-line stream liveness. |
-| **Media Library Counts** | Sums official movie, series, and episode counts over currently authorized online servers. Hourly background refresh and cache-only client reads; no deduplication or full scan; an online server without a complete snapshot makes the whole response 503. |
-| **Authorization Capacity & Single-Device Playback** | `maxConcurrent` caps regular-user grants per upstream. Separate per-user/per-upstream playback leases enforce active-device ownership, heartbeat expiry, exact Stop, and old-session protection. |
-| **Web Admin & SSH CLI** | Includes a Web admin panel, REST management API, and SSH management menu for upstreams, users, network proxies, global settings, logs, updates, and service lifecycle operations. |
-| **Logging & Security** | Includes persistent leveled logs with rotation, login-failure rate limiting, scrypt password storage, protected config/token file permissions, request-body limits, SSRF protections, and a CSP for the admin panel. |
-| **Multiple Deployment Options** | Supports GitHub Release binaries with systemd, Docker / Docker Compose, and running from Go source. Releases provide static builds for amd64, arm64, arm, mips, mipsle, and riscv64 with SHA256 checksums. |
+| **Aggregation and media merging** | Combine libraries/search results, group movies, series and episodes by work identity, and retain selectable versions. |
+| **User access and watch state** | Assign sources to regular users and isolate progress, played state and favorites. Merged versions share the same user's state; authorization capacity and device limits are also available. |
+| **Playback modes and stream routes** | Proxy/direct modes, ordered backup routes and mode-specific handling of recoverable failures before media transmission. |
+| **Upstream access and client identity** | Username/password or API Key, passthrough, Infuse/Hills/CapyPlayer presets and custom identity. |
+| **Web administration and library counts** | Manage sources, users, proxies, settings and logs, with movie, series and episode counts. |
+| **Deployment and operations** | Release binaries, Docker source builds and Go source execution, with an SSH menu, log rotation and status checks. |
 
-> `redirect` mode places upstream access credentials in the client-visible direct URL. Use it only when that security trade-off is acceptable; see [Playback Mode Explained](#playback-mode-explained) for details.
+## Interface preview
 
----
+The panel brings upstreams, users, network proxies, settings and logs together.
 
-## Quick Installation
+### System overview
 
-> **Notice for Legacy Node.js Deployment**: If you wish to deploy the V1.2.1 stable Node.js version, please use the original project's [Releases page](https://github.com/ArizeSky/Emby-In-One/releases) to download the V1.2.1 Source code archive, extract it, and run `bash install.sh`. The `legacy/` directory in this repository keeps the V1.2.1 Node.js source **for reference only** (the Go ID virtualization was written against it); it takes part in no build, image or install of the Go version — see `legacy/README.md`.
+![System overview showing upstream count, online nodes, ID mappings and storage engine](docs/images/system-overview.png)
 
-This project primarily recommends using Release binaries for V1.4.6 directly on Linux servers (no local Go build required); Docker deployment is suitable for scenarios where you want to build the image yourself.
+System overview: upstream and runtime status. Chinese UI from a running instance; sensitive fields redacted and image scaled for display.
 
-### Method 1: Release Binary One-Click Install (Primary Recommendation)
+### Upstream management
+
+![Upstream list showing source order, assigned-user counts, capacity limits, status and actions](docs/images/upstream-management.png)
+
+Upstream management: Chinese UI from a running instance; server names and addresses redacted and image scaled for display.
+
+View source status and assigned-user counts, reorder sources, and open authentication, playback-mode and stream-route settings.
+
+### Users and permissions
+
+![User list showing authorized sources, user status, creation times and edit actions](docs/images/user-permissions.png)
+
+User management: Chinese UI from a running instance; usernames and server names redacted and image scaled for display.
+
+View regular-user status and assigned sources, then use edit actions to configure accessible upstreams and home-library entry visibility. Hiding entries does not revoke access. See [first use](docs/en/getting-started.md).
+
+## Quick start
+
+**Recommended: Linux Release binary + systemd, with no local Go build environment required.**
+
+Prepare Linux/systemd, root/sudo access, Bash, curl, grep, sed, sha256sum and other script utilities, plus connectivity to the GitHub API and Release downloads. Full architecture/deployment requirements are in [installation](docs/en/installation.md).
+
+First installation of the latest formal release:
 
 ```bash
-curl -fsSL -o release-install.sh https://raw.githubusercontent.com/Zkunlun/Emby-In-One/main/release-install.sh
+curl -fsSL -o release-install.sh https://github.com/Zkunlun/Emby-In-One/releases/latest/download/release-install.sh
 sudo bash release-install.sh
 ```
 
-Optional: install a specific version.
+The script installs and starts the service, using `/opt/emby-in-one` by default. First initialization creates the local administrator `admin`; save the random password printed at the end.
 
-```bash
-sudo bash release-install.sh V1.4.6
-```
-
-This script will automatically:
-- Download the matching Release binary based on your CPU architecture (no local Go compilation needed)
-- Initialize `/opt/emby-in-one/{config,data,log}` and generate a random admin password on the first run
-- Fetch companion resources `admin.html`, `admin.js` and `emby-in-one-cli.sh` (the binary already embeds the whole admin panel, including the frontend dependencies under `public/vendor/`; any file missing from disk falls back to the embedded copy, so the external files are only an optional override)
-- Install and start the `systemd` service (`emby-in-one`), supporting auto-start on boot
-- Auto-backup and perform a rollback-safe upgrade if an older version is detected
-
-### Method 2: Source Repo One-Click Install Script (Recommended for developers / local image build)
-
-```bash
-git clone https://github.com/Zkunlun/Emby-In-One.git
-cd Emby-In-One
-bash install.sh
-```
-
-The script will automatically install the Docker environment, assign a random admin password, build the Go version image, and start the service. To manage your server later, type `emby-in-one` via SSH to call up the management menu.
-
-> **Note**: The source-repo install script copies `cmd/`, `internal/`, `third_party/`, and `public/` into the builder stage for Go compilation. If you customize the `Dockerfile` or copy files manually, make sure the `public/` directory is also present in the build context, otherwise the build may fail with `package emby-in-one/public is not in std`.
-
-### Method 3: Manual Docker Compose Deployment
-
-1. Create project directories and hand them to the container user (the container runs as uid 1000; unwritable mounts make startup fail when the server cannot write `tokens.json` / `mappings.db`):
-```bash
-mkdir -p /opt/emby-in-one/{config,data}
-chown -R 1000:1000 /opt/emby-in-one/config /opt/emby-in-one/data
-cd /opt/emby-in-one
-```
-2. Copy all core files from this repository (including `go.mod`, `cmd/`, `internal/`, `public/`, `Dockerfile`, `docker-compose.yml`, etc.) to this directory.
-3. Create the initial configuration `config/config.yaml`:
-```yaml
-server:
-  port: 8096
-  name: "Emby-In-One"
-  # trustProxy: true        # Set to true when deployed behind a reverse proxy (Nginx/Caddy etc.)
-
-admin:
-  username: "admin"
-  password: "your-strong-password" # Automatically encrypted after first boot
-
-playback:
-  mode: "proxy"
-
-timeouts:
-  api: 30000
-  global: 15000
-  login: 30000
-  healthCheck: 30000
-  healthInterval: 60000
-
-proxies: []
-upstream: []
-```
-4. Build and start:
-```bash
-docker compose build
-docker compose up -d
-```
-
-### Method 4: Direct Go Source Run (For Developers)
-
-Requirements: Go 1.23+ and a C toolchain (Debian/Ubuntu run `apt install build-essential`).
-```bash
-mkdir -p config data
-# Create config.yaml in the config folder as instructed in Method 3
-go test ./...
-go run ./cmd/emby-in-one
-```
-
-**Default Access URLs**:
-- Emby Client Connection Address: `http://Server_IP:8096`
-- Admin Panel: `http://Server_IP:8096/admin`
-
----
-
-## System Requirements
-
-**Release Binary Deployment (Recommended):**
-- Linux (amd64 / arm64 / arm / mips / mipsle / riscv64)
-- No Go compilation environment needed, directly run pre-compiled binaries
-
-**Docker Deployment:**
-- Docker 20.10+, Docker Compose v2
-- Linux: Debian 11/12/13, Ubuntu 22/24 (recommended), other distros need self-verification
-- Windows / macOS can also run (for dev and testing)
-
-**Go Source Build:**
-- Go 1.23+
-- C Toolchain (CGO used for SQLite): Debian/Ubuntu run `apt install build-essential`
-
----
-
-## Configuration Reference
-
-The config file is located at `config/config.yaml` (mounted into the container at `/app/config/config.yaml` when using Docker).
-
-```yaml
-# dataDir: "/opt/emby-in-one/data"    # Runtime data directory (top-level key; defaults are in "Data Directory" below)
-
-server:
-  port: 8096
-  name: "Emby-In-One"
-  # id: Auto-generated on first boot, do not modify manually
-  # trustProxy: true        # Set to true when behind a reverse proxy (see below)
-
-admin:
-  username: "admin"
-  password: "your-strong-password"    # Automatically encrypted after first boot
-
-playback:
-  mode: "proxy"          # "proxy" or "redirect", global default
-
-timeouts:
-  api: 30000             # Single upstream API request timeout (ms)
-  global: 15000          # Aggregation request max total timeout — waiting for all servers (ms)
-  login: 30000           # Upstream login timeout (ms) — applies to login and API-key validation; exceeding it fails the login
-  healthCheck: 30000     # Health check timeout (ms) — applies to reconnect probes of offline servers
-  healthInterval: 60000  # Health check interval (ms)
-  searchGracePeriod: 3000     # Search aggregation grace period — wait for other servers after first result (ms), 0 disables it
-  metadataGracePeriod: 3000   # Metadata fetch grace period (ms), 0 disables it
-  latestGracePeriod: 0        # "Latest Added" grace period — 0 means wait for all servers (ms)
-
-proxies: []
-  # - id: "abc123"
-  #   name: "Japan Proxy"
-  #   url: "http://user:pass@ip:port"
-
-upstream:
-  - name: "Server A"
-    url: "https://emby-a.example.com"
-    username: "user"
-    password: "pass"
-
-  - name: "Server B"
-    url: "https://emby-b.example.com"
-    apiKey: "your-api-key"
-    playbackMode: "redirect"                   # Overrides global playback mode
-    spoofClient: "infuse"                      # none | passthrough | infuse | hills | capyplayer | custom
-    streamingUrls:                               # Streaming lines (optional, ordered; a single one can also be written as streamingUrl: "...")
-      - "https://cdn.example.com"                # 1st entry is the primary line
-      - "https://backup.example.com"             # the rest are fallbacks
-    followRedirects: true                      # Follow upstream 301/302/303/307/308 (default true; when false the redirect is reported as an upstream error instead of being forwarded to the client)
-    proxyId: null                              # Associate with proxy ID from proxy pool
-    priorityMetadata: false                    # Prefer using this server's metadata when merging
-    maxConcurrent: 3                           # Regular-user authorization capacity; 0 unlimited; admins use no slots
-
-  - name: "Server C (custom spoof example)"
-    url: "https://emby-c.example.com"
-    apiKey: "your-api-key"
-    spoofClient: "custom"
-    customUserAgent: "Infuse/7.7.1 (iPhone; iOS 17.4.1; Scale/3.00)"
-    customClient: "Infuse"
-    customClientVersion: "7.7.1"
-    customDeviceName: "iPhone"
-    customDeviceId: "your-custom-device-id"
-
-  - name: "Server D (Hills preset)"
-    url: "https://emby-d.example.com"
-    apiKey: "your-api-key"
-    spoofClient: "hills"
-
-  - name: "Server E (CapyPlayer preset)"
-    url: "https://emby-e.example.com"
-    apiKey: "your-api-key"
-    spoofClient: "capyplayer"
-```
-
-Settings modified in the admin panel take effect hotly, no service restart required. The one exception is the global default playback mode, which is only the initial value for a new upstream — see Playback Modes.
-
-### Reverse Proxy Trust (`trustProxy`)
-
-| Value | Behavior | Applicable Scenario |
-|-------|----------|--------------------|
-| `false` (default) | Login rate limiting uses the TCP connection IP (`RemoteAddr`) | Directly exposed to the internet, no reverse proxy |
-| `true` | Login rate limiting trusts `X-Real-IP` / `X-Forwarded-For` headers | Deployed behind Nginx / Caddy or other reverse proxies |
-
-> **Important**: If your Emby-In-One instance is behind a reverse proxy (Nginx, Caddy, Cloudflare, etc.), you **must** add `trustProxy: true` under the `server` section in `config.yaml`. Otherwise all client requests will appear to come from the same IP, and after 5 failed login attempts all users will be rate-limited for 15 minutes.
-
-> **Precondition: the reverse proxy must _overwrite_ these headers.** This program prefers `X-Real-IP` and otherwise takes the **first** entry of `X-Forwarded-For`. Nginx's most common form, `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`, **appends** — whatever the client sent stays first, so anyone can forge an IP: rotate fake IPs to bypass the login rate limit, or aim one at a victim to lock that IP out for 15 minutes.
->
-> Overwrite instead:
-> ```nginx
-> proxy_set_header X-Real-IP $remote_addr;
-> proxy_set_header X-Forwarded-For $remote_addr;
-> ```
-> As long as the proxy sets `X-Real-IP` (preferred here, and not forgeable by appending), the rate limit can be trusted.
->
-> **Conversely: when there is no trusted reverse proxy in front, it must stay `false`.** `trustProxy: true` makes the server take `X-Real-IP` / `X-Forwarded-For` on faith, with no check of where the request came from. If the instance is directly exposed to the internet (or nothing along the path overwrites those headers), anyone can supply an arbitrary IP: rotate a fake IP on every failed login to bypass the failure counter and the 15-minute lockout on `POST /Users/AuthenticateByName`, or put someone else's IP there to lock that IP out.
->
-> The test is simple: **enable it only when the last hop that can reach this service is certain to be your own reverse proxy.** If you are not sure, leave it off.
-
-### Data Directory (`dataDir`)
-
-`dataDir` is a **top-level key** in the config file (a sibling of `server`, `admin` and `playback`) that decides where runtime data is written.
-
-| Item | Value |
-|------|-------|
-| Default | `/app/data` when that directory exists (the official Docker image creates it); otherwise `data/` under the process working directory |
-| Contents | `mappings.db` (virtual ID mappings, user data, watch history), `tokens.json` (proxy-layer tokens), `captured-headers.json` (passthrough client headers), `emby-in-one.log` (log file) |
-
-> **This key has nothing to do with the config file itself.** `config.yaml` always lives at `config/config.yaml` (`/app/config/config.yaml` inside the Docker container) and does not move with `dataDir`. See [Data Directory Description](#data-directory-description) for what each file holds.
-
-**When to change it**:
-
-- **Binary / source deployments**: `data/` is resolved against the **process working directory**. If the service starts from a directory other than the project directory (for example a systemd `WorkingDirectory` of `/opt/emby-in-one`) and you want the data pinned to an absolute path, or mounted separately from `config/`, set `dataDir` explicitly.
-- **Docker deployments**: the container already defaults to `/app/data`, and `docker-compose.yml` mounts the host's `./data` there, so you normally **do not** need to change it; only a custom mount point would require it.
-- **Migrating / reusing existing data**: point `dataDir` at the directory that already holds your data — no need to move files by hand.
-
-**Notes**:
-
-- Setting it in the config file is enough (`dataDir: "/opt/emby-in-one/data"`); the admin panel does not expose it, and a **service restart** is required;
-- Prefer an **absolute path** in production — a relative path follows the startup working directory and can look like data loss when it is really just a different directory being read and written;
-- The directory must be readable and writable by the process user.
-
----
-
-## Multi-User Management
-
-V1.4 adds multi-user support, allowing admins to create multiple regular users, each independently configurable with accessible upstream servers.
-
-### Role Descriptions
-
-| Role | Permissions |
-|------|-------------|
-| Admin (admin) | Can access all servers, the admin panel, and management APIs; watch state is read directly from the upstream Emby account |
-| Regular User (user) | Can only access permitted servers; client-visible playback progress, played state, favorites, Resume, and NextUp are isolated through the local WatchStore |
-
-### Independent Watch History
-
-Because all distributed users share the same upstream Emby account, watch progress, played state, and favorites are naturally shared on the upstream side. Playback reports and explicit user operations are forwarded through their existing upstream interfaces while EIO maintains that regular user's WatchStore. Automatic completion updates only local state without an extra upstream played-state mutation; reads use the **local record as authoritative state**, so one regular user's changes to the shared upstream account do not overwrite what another regular user sees:
-
-| Feature | Admin | Regular User |
-|---------|-------|--------------|
-| Resume (Continue Watching) | Upstream server data | Local independent data |
-| Next Up | Upstream server data | Calculated based on local progress |
-| Played Status | Upstream server data | Local independent record |
-| Favorite | Upstream server data | Local independent record |
-| UserData in browsing pages | Direct passthrough from upstream | Overlay local state over it |
-| List filtering (favorites / played / unplayed / resumable) | Upstream server filtering | Local record filtering |
-
-**List filtering (local since V1.4.4; `IsUnplayed` completed in V1.4.5):**
-
-- `Filters=IsFavorite`, `IsPlayed`, `IsResumable` and `IsUnplayed` are answered from the **local records**: the proxy fetches the candidate set for that container, evaluates it against the current proxy user's WatchStore state, then sorts, pages and recounts locally. For `IsUnplayed`, an item with no local row is naturally unwatched; only a local row with `Played=true` excludes it. Container constraints such as `ParentId`, `Recursive` and `IncludeItemTypes` are still applied upstream.
-- Sorting: `SortName`, `DateCreated`, `ProductionYear` and `CommunityRating` are sorted locally; any other sort key (e.g. `DatePlayed`) degrades to the local "recently played / favorited" order.
-- Unrecognized filter values (e.g. `IsFolder`) are forwarded upstream untouched, so the client's intent is never silently dropped.
-
-> **Known limitation**: `Likes`, `Dislikes` and `IsFavoriteOrLiked` still use shared upstream semantics because the local WatchStore does not yet record liked/disliked state. These unlocalized filters return the `X-Emby-In-One-Filter-Notice` response header and emit a throttled WARN log.
-
-**Paging:** the aggregated list without a `ParentId` (`GET /Users/{id}/Items` with no container) is paged by the proxy **after** merging and deduplicating, so `TotalRecordCount` is the merged total and `StartIndex` counts in merged order. Local filtering works the same way: the candidate set is fetched first, then sorted and paged locally.
-
-> One more trade-off: both of those paths fetch a **candidate set** from the upstream (rather than letting it filter and return one page), capped at 5000 raw candidate items per upstream per request (neither a merged total nor a version count); past the cap the reported total is only a lower bound and the tail of the list may be unreachable, which is logged.
-
-**Working Principle:**
-
-- Playing/Progress report upstream first and write regular-user local progress only after 2xx confirmation; failure keeps the previous local state.
-- Valid Progress marks an item played at 90% of its matching runtime, with Stopped providing a final check. Playing establishes context without marking completion from its starting position.
-- Modern Stopped preserves the client-observed terminal state and exact device/session lease cleanup. Legacy stop routes also record a local terminal event once a target is selected; when no target can be selected, their existing response is retained.
-- Explicit played, unplayed, and favorite operations keep their existing interface behavior. Deleting a user clears their local watch data.
-- Item type, series, season, and episode metadata are fetched when needed for local state and NextUp.
-
-**Automatic Played State:**
-
-For regular users, a Movie / Episode with a valid Progress or Stopped position at **90% or more of a qualified runtime (including exactly 90%)** is stored locally as `Played=true` with its resume position set to zero. Browsing an item, obtaining a playback URL, video GET/HEAD/Range requests, and a disconnected stream do not trigger this decision. Seeking to 90% followed by a valid report also qualifies; this measures position, not accumulated viewing time or end credits.
-
-Runtime comes first from the current valid report, then a matching cache scoped to the user, real device, session, and media source, and finally metadata for the selected upstream item/source. Multiple versions require the actual MediaSourceId; EIO does not choose the first source or assume a historical row's runtime belongs to the current version. Unknown source, type, or runtime leaves completion undecided while preserving confirmed progress. Live playback and a stop with `Failed=true` do not create completion. Metadata requests have time and retry limits; normal reports with sufficient information do not repeatedly fetch metadata.
-
-A Stopped event with an omitted/null position can use only the last valid position from a fully matching session. Explicit zero and invalid values are never replaced by cached progress. Missing session/source identity without proof of a unique source does not allow borrowing another playback's position. The cache has capacity and expiry limits and does not survive a restart.
-
-Played persists through ordinary reports, low-position stops, and replay. Replay does not automatically re-enter Resume; an explicit unplayed action clears Played. Manual Played or position changes invalidate old session cache evidence, while a new valid report reaching the threshold can complete the item again. Reads use local Played, resume position, completion percentage, and last-played time. Completed items leave Resume; NextUp follows the existing episode rules, and favorites are preserved.
-
-Modern Sessions Playing / Progress / Stopped and legacy PlayingItems start / Progress / DELETE stop / POST Delete routes share the decision. Direct, proxy, and STRM/HTTP Path video delivery stays unchanged. Without sufficient control reports to EIO, completion cannot be guaranteed. Admins retain upstream-account state. Local automatic completion makes no extra upstream PlayedItems call; original playback reports and explicit user operations are still forwarded through their existing interfaces.
-
-
-### Shared State Across Upstreams and Binding Changes
-
-A regular user's watch state is keyed by the local user and an already merged Virtual ID. Confirmed A / B instances share that user's progress, played state, and favorites; different local users remain independent. The recorded server is a resource locator, not the sole source of history visibility.
-
-| Action or condition | Watch history and playback source |
+| Entry | Default address |
 | --- | --- |
-| Unbind A while a matching B remains bound | Keep shared state; obtain available resources and versions from B and resume at the saved position |
-| Unbind every relevant source | Hide that film's local history, UserData, and watch-filter results while retaining the row; rebinding the same existing server ID restores access |
-| A is offline but still bound; B is online | Keep history, play and update shared state through B; A reads the latest state when it returns |
-| Every authorized instance is offline | Keep history; Resume / NextUp omit entries whose required online metadata cannot be obtained |
-| Delete A while the merged film still has an existing B instance | Keep the Virtual ID and shared state, migrate locators, and remove A's instances, grants, caches, and related hidden-library settings |
-| Delete A with no remaining instance of the film | Remove orphan mappings and watch rows; late requests cannot recreate deleted history |
-| Re-add A at the same address after deletion | The new server has a new ID and does not recover A-only history or identity caches; merging with an existing B uses B's retained shared state |
-| Delete a regular user | Remove that user's local watch/favorite data, grants, hidden libraries, tokens, and related caches without changing other users' state |
+| Admin panel | `http://server-ip:8096/admin` |
+| Emby client | `http://server-ip:8096` |
 
-Visibility depends on current grants and confirmed instances. Filtering precedes grouping, sorting, pagination, and counts; watch rows do not acquire a permanent hidden flag. Hiding a home-library entry does not unbind its server or change watch-state authorization.
+Continue with first use below. For pinned versions, Docker/Compose or source execution, see [installation](docs/en/installation.md). Existing instances should first read [upgrades and backups](docs/en/operations.md#version-upgrades).
 
-Version selection exposes only authorized sources. B's versions use B's actual item, media source, and session. An old A version that loses authorization is rejected; A's raw version ID is never silently routed to B. Runtime caches remain source/version-specific, and A's runtime is not stored as B's version runtime. Shared state follows confirmed merge relationships; new associations follow the media merge strategy below, without adding edit/cut content fingerprints or cross-runtime progress conversion.
+## First use
 
-### Shared Progress Write Boundaries
+1. **Log into the panel:** open the admin address with the EIO local administrator from the installation output.
+2. **Add an upstream:** enter its Emby address, choose username/password or API Key, and select identity according to upstream requirements. Check status after saving. Username-authenticated passthrough without a captured identity requires one real Emby-client login as EIO administrator; see [upstream setup](docs/en/getting-started.md#step-2-add-an-upstream).
+3. **Create and authorize a regular user:** create a local account and explicitly select accessible upstreams. Selecting none grants no upstream access.
+4. **Connect a client:** use the EIO client address and that regular user's local account.
+5. **Verify access/playback:** browse authorized media and play an item; choose a specific source for multiple versions. See [troubleshooting](docs/en/troubleshooting.md) for errors.
 
-The latest successful Started with confirmed identity owns shared writes. Progress / Stopped must match its real user, device, session, source/version, and generation. Older events cannot overwrite a newer committed position or manual state. Backward seeks store the valid reported position rather than the historical maximum. Manual Played / position changes invalidate old contexts; favorite-only changes retain the playback context.
+EIO local accounts log into EIO; upstream accounts let EIO connect to sources. Regular users have independent local watch state; administrators retain upstream-account watch semantics. See the [full first-use guide](docs/en/getting-started.md).
 
-Missing real-device, session, or version-membership proof skips local shared automatic writes; EIO does not guess the latest session. Restart or cache eviction requires a new valid Started to establish ownership. If a client fully reuses the same device/source/film/version/session IDs, the protocol has no additional generation field, so not every late newly arriving packet can be distinguished.
+## Playback modes and limits
 
-Inheritance after deleting A applies only to **valid in-flight reports authenticated and admitted before deletion**. Final checks still require an enabled user, authorized B, a surviving merged identity, version evidence, and a valid write generation that has not been superseded by playback or manual state. Only the shared row and B locator are updated; A's raw IDs are not sent to B. Newly arriving requests with revoked tokens remain rejected. Missing authorized survivors or evidence causes the report to be discarded.
+| Mode | Media path | Requirements |
+| --- | --- | --- |
+| `proxy` (default) | EIO forwards upstream media | EIO can reach the stream source; clients connect to EIO. An upstream may use a server-side HTTP network proxy. |
+| `redirect` | EIO redirects clients directly to the upstream stream URL | Clients must reach the stream address. Saves EIO media bandwidth; cannot bind a server-side HTTP network proxy. |
 
-### Management Changes and Recovery
+**Direct-playback credential exposure:** client-visible redirect URLs can contain upstream tokens/API Keys. Their holders may bypass EIO with the shared upstream account's permissions. Use a restricted upstream account, or proxy if this tradeoff is unacceptable. See [upstream access and playback](docs/en/playback-and-upstream.md) for identity and route handling.
 
-Grant, enabled-state, or password updates advance authorization revisions and revoke that user's old tokens; subsequent control requests may require sign-in. Removing a binding clears only that user's affected-source routes, caches, and leases, retaining their B lease and other users' data. Disabling a user or changing their password clears that user's playback contexts. Cleanup cannot immediately recall direct URLs already handed to clients or media transfers already underway.
+- **Access and display differ:** hiding a library entry does not remove authorization; search/playback still follow access rules.
+- **Capacity and active devices differ:** maxConcurrent limits assigned regular users per upstream. A regular user's active devices on that upstream have a separate constraint; see [users and permissions](docs/en/users-and-permissions.md).
+- **Counts and merging differ:** counts sum official data from authorized online sources without cross-source deduplication; see [library counts](docs/en/media-counts.md).
+- **Keep matching upgrade backups:** preserve configuration, database, user-password.key and related files consistently. Installer rollback is not a full data backup; old user databases have version restrictions. See [operations](docs/en/operations.md#version-upgrades).
 
-Destructive management changes fail if persistent stores or the cleanup journal are unavailable. Token / identity-file cleanup failures after a database commit report `cleanupPending` and are not complete success. Once server removal is durable in configuration, restoring A's config is not used as a pretend rollback. Regular-user access pauses while cleanup is pending; admins can retry a management operation. Startup recovers cleanup before upstream login or HTTP serving and stops if recovery fails. There is no background retry worker; successful cleanup removes the journal.
+Merging discovers candidates on demand and retains candidate/pagination limits; see [merge rules](docs/en/media-merge.md). Existing acceptance and untested areas are in [release validation](docs/en/release-v1.4.9-validation.md). Credential storage and risks are in the [security policy](SECURITY.md#english-security-policy).
 
-Legacy users and tokens start at authorization revision 0. Watch uniqueness stays unchanged, and unbinding does not wipe history. Passthrough last-success caches use stable server IDs. Legacy address keys migrate only with a unique confirmed current owner; related captures with unknown ownership are conservatively removed during cleanup and may require a new client sign-in. See the [Task 4 acceptance matrix](docs/task4-acceptance.md); all cases await unified validation.
+## Documentation and FAQ
 
-### Creating Regular Users
-
-Admins can create and manage regular users through the following ways:
-
-1. **Admin Panel** — Visual operations in the "User Management" page
-2. **SSH Menu** — Use the `emby-in-one` command, select "Add Regular User" or "Delete Regular User"
-3. **REST API** — `POST /admin/api/users` (requires admin Token)
-
-### Configuring Accessible Servers
-
-Regular users can access only stable `serverId` values explicitly granted in `allowedServers`. Selecting no servers in the panel means **no upstream access**. For user creation, omitted, `null`, or `[]` grants no servers. For updates, omitted or `null` preserves existing grants, while explicit `[]` revokes all grants. To grant every current server, list every ID explicitly; future servers require a separate grant. Admins always have access to all upstreams.
-
-### Playback Limit Setting and Authorization Capacity
-
-The admin-panel field “同播数量限制” maps to `maxConcurrent`, which counts regular users explicitly authorized for each upstream:
-
-- `0` (default): unlimited authorization capacity; a positive integer caps assigned regular users; negative values are invalid.
-- `assignedUsers` is the current number of regular-user grants for that upstream. Admins can access every upstream and do not consume slots.
-- Slots belong to explicit grants. Stopping playback, an offline upstream, or disabling a user does not revoke a grant. Removing a grant or deleting the user releases its slot.
-- Adding grants beyond capacity: `409 UPSTREAM_CAPACITY_FULL`.
-- Lowering capacity below the assigned count: `409 UPSTREAM_CAPACITY_BELOW_ASSIGNED`.
-- Conflict responses include `code`, `message`, `serverId`, `limit`, and `assigned`. The panel retains the unsaved form and refreshes capacity data; the backend performs the final capacity check.
-
-### Single-Device Playback for Regular Users
-
-Playback leases are isolated by `(UserID, ServerID)`. One active DeviceID holds the lease for a regular user on an upstream. The same user may play on different upstreams simultaneously; admins are exempt. The owning device can switch items or sessions. A different device is rejected while the lease is live with `429 PLAYBACK_DEVICE_LIMIT`.
-
-DeviceID precedence is `X-Emby-Device-Id`, DeviceId in `X-Emby-Authorization`, DeviceId in `Authorization`, then the current validated token's persisted DeviceID. A regular-user lifecycle request without a valid DeviceID returns `400 PLAYBACK_DEVICE_ID_REQUIRED`. A lease with no heartbeat for at least three minutes can be cleaned up or taken over. Stopped releases only the matching device and exact PlaySessionID; an old Stopped event cannot release a newer session.
-
-### Playback Confirmation and Error Responses
-
-Playing/Progress write local progress and refresh the owning device's lease only after an upstream 200—299 confirmation, then return an empty 204. The upstream body need not be JSON. Failure leaves local playback state unchanged:
-
-| Upstream result | Playing / Progress response |
-|---|---|
-| Missing / offline client | 503 `UPSTREAM_SESSION_UNAVAILABLE` |
-| Transport / DNS / TCP / TLS / observable cancellation | 502 `UPSTREAM_SESSION_FAILED` |
-| Deadline / network timeout | 504 `UPSTREAM_SESSION_TIMEOUT` |
-| HTTP non-2xx, including upstream 401/403 | 502 `UPSTREAM_SESSION_REJECTED` |
-
-Stopped preserves terminal response behavior: success, ordinary upstream failure, offline, and missing-client outcomes attempt to save progress qualified by current session, version, and write-ownership proof and finalize the exact lease, returning 204. Preparation errors retain their original 400/503 response. Missing DeviceID returns 400 without forwarding upstream or releasing a lease; missing identity proof cannot authorize a shared automatic progress write. Valid Movie / Episode Progress or Stopped reports reaching 90% of a qualified runtime follow the automatic-played rules above. Playing, unknown source/runtime, live playback, and Failed stops do not create completion. Public errors and lifecycle diagnostics omit upstream bodies, URLs, and credentials.
-
----
-
-## Advanced Config & Core Principles
-
-### Upstream Server Authentication (Complete Mechanism)
-
-Each upstream server supports two authentication methods (choose one):
-
-| Method | Config Fields | Working Principle |
-|--------|--------------|-------------------|
-| Username/Password | `username` + `password` | The proxy calls upstream's `AuthenticateByName` login interface for a Session Token, then reuses the session for future requests |
-| API Key | `apiKey` | Directly carries API Key for requests, no login flow needed (Recommended) |
-
-Authentication decision and fault tolerance logic:
-- If both are configured, `apiKey` takes precedence.
-- When login fails, an error is recorded and affects health check, but does not block concurrent aggregation of other upstreams.
-- Health checking and auto-reconnect reuse the context from the most recent successful authentication for that upstream.
-
-### Playback Mode Explained
-
-`playbackMode` determines how the media stream is delivered to the client.
-
-| Mode | Working Principle | Applicable Scenarios |
-|------|-------------------|----------------------|
-| `proxy` | Traffic is forwarded via the proxy server. Fragment URLs in HLS manifests (`.m3u8`) are rewritten as relative proxy paths. Supports Range requests, subtitles, and attachments. | Upstream lacks public IP; Need to hide upstream address from clients; Requires reverse proxy/public domain compatibility |
-| `redirect` | The client receives a `302` redirect, connecting directly to the upstream stream URL. Traffic does not pass via the proxy after redirection. | Clients can directly connect upstream; Saves proxy server bandwidth |
-
-**Priority**: Single server `playbackMode` > Global `playback.mode` > `"proxy"` (default)
-
-> **The global `playback.mode` is only the initial value for a new upstream.** Once an upstream exists its `playbackMode` has already been written with the value of that moment, so changing the global default later does **not** affect any existing upstream (same for the "default playback mode" field at the top of the panel). To change one upstream's mode, use the playback-mode dropdown in that server's edit dialog — it takes effect immediately.
-
-> ⚠ **Security warning for `redirect` (direct playback) mode**: direct playback places the upstream account credential (`api_key`) in the `302` redirect URL. **Any user who can play can extract that credential** — including users restricted by `AllowedServers` — and bypass EIO with whatever permissions the shared upstream account itself has. If that shared account is an upstream administrator, the leaked credential effectively grants upstream administrator privileges. Therefore:
->
-> - Use a **dedicated, restricted account for that upstream** with only the media-library playback permissions it needs; do not reuse an upstream administrator account or a broadly shared account;
-> - Once leaked, the credential can only be invalidated by changing the upstream password or revoking the API key;
-> - If this risk is unacceptable, keep the default `proxy` mode.
-
-An upstream can configure **multiple streaming lines** (`streamingUrls`, an ordered list): the first entry is the primary line, the rest are fallbacks. All lines must point to the same Emby server (multiple lines are multiple routes to one server, not mirrored servers — transcoding sessions live on the server itself, so switching lines across mirrors causes 404s).
-
-- **Proxy mode**: lines are tried in configuration order, preferring unknown/alive entries. Connection refusal, timeout, TLS and other transport errors, plus HTTP 502/503/504, mark the current line dead and trigger a retry on the next line. Business responses such as 404 or 500 prove that the line is reachable and are returned to the client rather than treated as failover signals. Failover only happens before a usable response is returned; EIO never splices a second line into a response body that has already started.
-- **Redirect mode**: known-dead lines are excluded from 302 selection. Background liveness probes maintain the line state, and time alone never changes dead back to alive. A failed line has a 60-second cooldown before it may be probed/recovered again. If every line is dead, the current Redirect request concurrently probes eligible lines with a request-level cap of 5 seconds; a 302 is returned only after a line is observed alive, otherwise the request returns 502. Once the 302 has been sent, media traffic bypasses EIO, so failures during an already-running stream remain the player's responsibility to retry.
-- **Network-proxy constraint**: Redirect makes the client connect directly to the stream URL, so a server-side HTTP proxy cannot participate in that connection. A Redirect upstream therefore cannot also configure `proxyId`; the admin panel disables/clears that choice and the backend rejects the invalid combination. Proxy mode is unaffected.
-- When left empty the stream base equals `url` (the front-end address), same as a single `streamingUrl`; the legacy single-value `streamingUrl` setting remains supported.
-
-### UA Spoofing Explained (`spoofClient`)
-
-Controls what client identity the proxy communicates with the upstream server. Affects login, API requests, health checks, and stream proxying.
-
-| Value | User-Agent | X-Emby-Client | Usage Scenario |
-|-------|------------|---------------|----------------|
-| `none` | Proxy default identity | `Emby Aggregator` | Most servers — no client restrictions |
-| `passthrough` | Real client UA | Real client value | Servers with client allowlists; if no real identity has been captured yet, the initial upstream login is deferred until a real client connects |
-| `infuse` | `Infuse/7.7.1 (iPhone; iOS 17.4.1; Scale/3.00)` | `Infuse` | Servers strictly allowing Infuse |
-| `hills` | `Hills/1.9.1 (android; 16)` | `Hills` | Use the fixed Hills 1.9.1 identity profile |
-| `capyplayer` | `CapyPlayer/1.1.6` | `CapyPlayer` | Use the fixed CapyPlayer 1.1.6 identity profile |
-| `custom` | Custom value | Custom value | Servers needing complete control over client markings |
-
-The Hills and CapyPlayer presets use UA values captured from real client logins and fixed identity profiles:
-
-| Preset | ClientVersion | DeviceName | Spoofed DeviceId |
-|--------|---------------|------------|------------------|
-| `hills` | `1.9.1` | `fuxi` | `hills-spoof-id` |
-| `capyplayer` | `1.1.6` | `2211133C` | `capyplayer-spoof-id` |
-
-The original UA values are preserved; no platform information is added to the CapyPlayer UA. DeviceId uses an EIO-defined fixed spoofed value rather than a real client device ID. A preset applies only when selected for that upstream; existing configurations are not switched automatically, and later client logins do not update the profile. HTTP UA, identity headers, and query fields within the supported endpoint scope use the same profile. Internal real-device identification and session limits retain their existing behavior. Playback requests made directly by the client after a 302 redirect can still carry the client's own UA.
-
-> **Note**: The `official` mode from V1.2 has been automatically migrated to `custom` in V1.3, using the original Emby Web official client's default values.
->
-> **Current behavior**: In `custom` mode, the configured `User-Agent`, `X-Emby-Client`, `X-Emby-Client-Version`, `X-Emby-Device-Name`, and `X-Emby-Device-Id` are applied to upstream login, normal API requests, health checks, image proxying, and stream proxying. After saving in the admin panel, these values are persisted to the config file and correctly restored when editing the upstream again.
-
-#### Passthrough Mode Principles
-
-Passthrough resolves request-level client identity through five fallback levels. One important exception applies at first startup: if only level 5 (`infuse-fallback`) is available and no real client identity has been captured, username/password passthrough upstreams defer their initial login and admin-side connectivity validation instead of forcing a login with the fallback identity:
-
-1. **Live Request Header** — If the current request carries the `X-Emby-Client` header (a genuine Emby client), direct usage.
-2. **Current Token Captured Header** — When a real client (Infuse, Emby iOS, etc.) logs in to Emby-in-One, the proxy captures and stores the client's `User-Agent`, `X-Emby-Client`, `X-Emby-Device-Name`, etc. based on the proxy Token; future requests heavily tied to the same Token will reuse these.
-3. **Server's Last Successful Login Header** — Every time a passthrough server successfully logs in, the complete headers used are remembered and persisted. Will be used straight after reboot, without waiting for users to re-login.
-4. **Most Recent Captured Header** — If the current request lacks a Token and the server has no historical successful records, it uses the lastly captured header from any Token.
-5. **Infuse Fallback** — If there are entirely no captured client headers (e.g. freshly installed first boot), the Infuse identity acts as a safe default.
-
-Captured headers overlay the basic Infuse profile, ensuring even if the client hasn't sent all Emby header fields (like certain third-party Apps), a fully fleshed client identity can still be presented.
-
-When a client logs in, offline passthrough upstreams automatically retry with the newly captured identity. Headers used for a successful upstream login are persisted per server, so health checks and reconnects can reuse that server's last successful identity after a restart. When a proxy token is revoked — for example through logout, an admin password change/reset, or user deletion — its token-scoped captured identity is removed as well. Proxy tokens do not expire automatically based on time.
-
-### Metadata Priority (`priorityMetadata`)
-
-When the exact same movie/episode appears on multiple servers, the proxy needs to pick one server's metadata (title, summary, picture) as the "primary" version. The rules are:
-
-| Priority | Rule | Reason |
-|----------|------|--------|
-| 1 | Server styled with `priorityMetadata: true` | Manually designated preferred metadata source |
-| 2 | Overview contains Chinese characters | Prioritize using Chinese localized metadata |
-| 3 | Overview text is longer | A more complete description prioritized |
-| 4 | Smaller server index (ordered ahead in config) | Stable fallback rule |
-
-This priority solely affects which metadata to display—all servers' MediaSource versions are uniformly retained and clients can pick flexibly.
-
-### Media Merge Strategy
-
-Merging discovers candidates as requests need them: browsing, search, season/episode and detail paths process encountered candidates. Creating a user or starting the service does not scan every upstream's full library. Candidates retain the existing Round-Robin order; display metadata still follows server priority.
-
-| Content Type | Criteria for new merges | Behavior |
-|--------------|-------------------------|----------|
-| **Movies** | Same-type work identity | Keep all known versions of one work in one item |
-| **Series** | Same-type work identity | Merge at the series level |
-| **Seasons** | Proven same parent series plus explicit season `IndexNumber` | Use upstream season numbers |
-| **Episodes** | Same parent series plus explicit season and episode numbers | Keep all known versions of one episode together without correcting numbering |
-| **Libraries (Views)** | — | Preserve all libraries and append server-name suffixes |
-
-Work identity compares TMDB, IMDb and TVDB IDs within the same provider namespace. Any directly comparable ID conflict rejects a new merge, even if another shared ID matches. With no directly comparable valid ID, use the complete name and year, lowercasing ASCII English letters before exact comparison. There is no translated-name, punctuation or whitespace fuzzy matching, or online ID mapping. Missing required names, years or episode numbers keep identities separate. Explicit season zero is valid; episode numbers must be positive integers. Episode titles and years do not replace parent-series identity, and shared episode ID conflicts still reject new associations.
-
-Runtime is not a merge condition or candidate index. Different, unknown or untrusted runtimes do not independently prevent merging. Each version retains its own runtime, quality, codec and audio metadata; no content fingerprint or timeline conversion is added. Different original items on the same upstream can merge under the same identity rules. If A has eight versions of X and B has two, the group retains ten distinct source locators; conflicting works retain their own eight and two versions.
-
-A version is identified by server, original ItemID and MediaSourceID together. Distinct locators are not removed because their names, quality or runtime match. Repeated observations are idempotent; partial responses add versions without pruning known members. Identity can be established before MediaSources arrive, without inventing a concrete playback route.
-
-Saved relationships do not automatically split when metadata changes. Encountered old version groups can coalesce when their membership is proven; old Virtual IDs remain aliases, with historical evidence and watch rows preserved. One regular user's group members share played state, favorites and the raw resume position. Different identities and users remain isolated. Lists, details and PlaybackInfo aggregate currently authorized, actually returned sources; explicit selection always routes to the selected real version.
-
-Existing query scope, the 5000-candidate cap and the absence of a three-source indirect-conflict audit remain. `ParentId` paths retain upstream raw-item `StartIndex/Limit/TotalRecordCount` paging. Raw counts are not globally deduplicated work totals; this revision does not expand pagination or statistics. See the [media merge rules](docs/media-merge.md) and [release validation notes](docs/release-v1.4.9-validation.md).
-
-### ID Virtualization
-
-Each upstream Item ID is mapped globally to a lone virtual ID — 16 random bytes (128 bits) from `crypto/rand`, rendered as a 32-character lowercase hex string with no dashes. Any IDs visible to clients are virtual.
-
-- **Storage**: Persistent SQLite storage in WAL mode, backed by an in-memory cache for fast lookups
-- **Mapping**: `virtualId <-> { originalId, serverId }`, with additional `otherInstances` relationships persisted as well; `serverId` is a stable server identity and does not depend on configuration order
-- **Persistence**: Virtual mappings and primary/additional instance relationships survive restarts; legacy `server_index` data is migrated to `server_id`
-- **Upstream deletion**: Confirmed instances still present in current configuration preserve the film's Virtual ID and shared watch state whether the deleted source was primary or additional. A survivor is promoted and watch locators migrated when needed. Only orphaned items with no survivor lose mappings and watch rows. Unbinding changes user visibility; see [Shared State Across Upstreams and Binding Changes](#shared-state-across-upstreams-and-binding-changes)
-
----
-
-## Media Library Counts
-
-> V1.4.9 provides this counts endpoint, including the accepted Hills language-parameter compatibility fix.
-
-Authenticated clients read `GET /Items/Counts`, also available under `/emby/Items/Counts`.
-A successful response contains only three nonnegative integers: `MovieCount`, `SeriesCount`, and `EpisodeCount`.
-Regular users receive totals for current server bindings intersected with their token grants; admins receive totals for all currently configured servers.
-Only online servers contribute. Libraries hidden from the home screen remain included in their server's counts.
-
-Each server has one shared memory cache, populated from the official Counts endpoint for the configured upstream account's visible media.
-Duplicates on different servers are counted on each server. There is no deduplication, second version-count group, or media-item scan to fill missing counts.
-These totals therefore differ from merged media-list presentation. Six display positions in Hills do not imply six independent count metrics: calls with or without UserId return the same scoped three fields.
-
-Background initialization follows startup preparation, with hourly refreshes thereafter. An actual user binding change registers an extra refresh for the selected online servers.
-Requests for the same server merge, with at most two collection workers overall. Client reads never trigger refresh, login, or probing; there is no manual refresh endpoint.
-A complete new success replaces the old value. Same-account failures and rate limits do not expire a previous success by age.
-Server deletion and account or connection-scope changes isolate old values; restarting begins with an empty cache.
-
-After an ordinary Counts failure, the background collector checks reachability through the same upstream API and identity path.
-It makes at most one further Counts attempt if the check confirms online status. Explicit rate limits or waiting prohibit that further attempt and honor `Retry-After`.
-A 429 without usable waiting information uses backoff. This controls counts collection only; playback and other existing traffic continue independently.
-If any authorized online server lacks a complete current snapshot, the entire response is 503.
-
-| State | Client result |
+| Task | Guides |
 | --- | --- |
-| All authorized online servers have complete current snapshots | 200 with three per-server sums |
-| No bindings, or all authorized servers are explicitly offline | 200 with three zero values |
-| Any authorized online server lacks a complete snapshot | 503 `COUNTS_UNAVAILABLE`, without partial counts |
-| Lifecycle cleanup or recovery is pending | 503 `COUNTS_LIFECYCLE_PENDING` |
-| Missing/invalid token, or a deleted/disabled user | 401 |
-| Another user or a real upstream UserId is requested | 403 `COUNTS_USER_FORBIDDEN` |
-| Malformed/duplicate parameters or an empty UserId | 400 `INVALID_COUNTS_QUERY` |
-| Unsupported filters or server selection parameters | 400 `COUNTS_FILTER_UNSUPPORTED` |
+| Install and get started | [Installation](docs/en/installation.md) · [First use](docs/en/getting-started.md) |
+| Configure users and playback | [Configuration](docs/en/configuration.md) · [Permissions](docs/en/users-and-permissions.md) · [Upstreams/playback](docs/en/playback-and-upstream.md) |
+| Back up, update and troubleshoot | [Operations](docs/en/operations.md) · [Troubleshooting](docs/en/troubleshooting.md) |
+| Understand merging and counts | [Media merging](docs/en/media-merge.md) · [Library counts](docs/en/media-counts.md) |
+| All documentation and development | [Documentation index](docs/en/README.md) · [Development](docs/en/development.md) |
 
-Omit `UserId` or use the current local user ID / compatible legacy alias. The legacy alias still denotes the current token's user.
-Parameter names are case-insensitive; duplicates in the same normalized family are rejected even with identical values.
-Explicit `IsFavorite=true`, `false`, or an empty value is unsupported, as are watched/resumable filters, library selection, pagination, and other extra parameters.
-Unsupported filters are never silently replaced with whole-library totals. Allowed identity metadata, including Hills' `X-Emby-Language`, is consumed locally, without forwarding or changing scope.
+### Why is there no media after installation?
 
-`HEAD` performs the same validation and returns the status and corresponding JSON length without a body.
-Other methods, including OPTIONS, return authenticated 405 with `Allow: GET, HEAD`.
-All counts responses use `Cache-Control: private, no-store`, omit ETag/Last-Modified, and do not return conditional 304.
-Responses expose no upstream credentials, server lists, raw error bodies, or partial totals.
-See the [media library counts API](docs/media-counts.md) and [release validation notes](docs/release-v1.4.9-validation.md).
+Initial configuration has no upstream. Add a reachable Emby source and grant regular-user access; follow [first use](docs/en/getting-started.md).
 
-## Health Check
+### Which address and account should clients use?
 
-- Runs `GET /System/Info/Public` **in parallel** across all upstreams every 60 seconds (configurable via `timeouts.healthInterval`) to maintain API-level ONLINE / OFFLINE state
-- With multiple `streamingUrls`, EIO also maintains independent per-line stream health; transport errors and 502/503/504 mark a stream line unavailable, while reachable HTTP responses such as 404/500 still count as alive
-- Stream-line health is separate from API health: an Emby API can be online while one dedicated streaming route is dead and excluded from playback candidates
-- Passthrough servers preferentially apply the server's prior successful login headers (persisted storage), falling back to the most recently captured headers to avoid nginx/client-allowlist rejections
-- API online/offline transitions are logged; configuration Reload preserves health for unchanged streaming URLs instead of resetting known-dead lines to unknown
-- Health-check timers are cleared during graceful shutdown
+Connect to EIO's client address, default `http://server-ip:8096`, with an EIO local account. The panel is at /admin; upstream credentials are for source access. See [account roles](docs/en/getting-started.md#distinguish-the-three-accounts).
 
----
+### Why do counts differ from merged lists?
 
-## Security Hardening
+Counts sum official movie, series and episode totals per source, including repeated works. Lists group by work identity. Cache/error behavior is documented in [library counts](docs/en/media-counts.md).
 
-- **Admin plaintext password auto-hashed on startup**: The Go backend automatically migrates plaintext `admin.password` to scrypt hash format on service startup, without waiting for the first login
-- **CLI password reset support**:
+### What if I forget the administrator password?
 
-```bash
-emby-in-one --reset-password <new-password|-> [--force]
-# Or use the SSH menu option "Change Admin Password" (the menu stops the service, resets, then starts it again)
-```
+Its irreversible hash cannot reveal the original password. Reset through the SSH menu or the binary CLI with the service stopped, then log clients in again. See [password reset](docs/en/operations.md#administrator-password-reset).
 
-  - A password of `-` is **read from stdin**, so it never shows up in the process list (`ps`) or the shell history — this is the form the install and management scripts use: `printf '%s' "$pass" | emby-in-one --reset-password -`
-  - By default it first probes `127.0.0.1:<port from config.yaml>/System/Info/Public` and **refuses to run while the service is still up**, telling you to `systemctl stop emby-in-one` first (see below for why)
-  - `--force` skips that probe; use it only when you are sure you need it
-  - The reset clears `tokens.json` with an **atomic write** (keeping `_proxyUserId`), so a truncated file can no longer stop the service from booting; **every issued proxy token is invalidated** and clients must sign in again
+## Contributing
 
-  > **Why a running instance must be refused**: a live instance keeps the tokens in memory and writes the whole `tokens.json` back on its next login or logout — restoring every token this command just cleared, making the reset a no-op. The CLI therefore errors out rather than silently "resetting" nothing. For Docker deployments use the SSH menu, or run the command it prints on failure (`docker compose ... run --rm -T emby-in-one /app/emby-in-one --reset-password - --force`).
+Report issues and compatibility feedback through [Issues](https://github.com/Zkunlun/Emby-In-One/issues), or contribute through [Pull Requests](https://github.com/Zkunlun/Emby-In-One/pulls). Include EIO/client versions, authentication/playback mode, reproduction steps and redacted logs.
 
-- **Stricter `data/tokens.json` permissions**: Written with `0600` permissions on Unix/Linux
-- **Secure `config.yaml` writes**: Atomic replacement + `0600` permissions, reducing corruption risk and preventing other users from reading passwords
-- **Request body size limit**: All API request bodies limited to 2MB (`http.MaxBytesReader`), preventing malicious large requests from consuming memory
-- **Login rate limiting**: After 5 consecutive login failures from the same IP, locked for 15 minutes with `429 Too Many Requests`; atomic operations prevent TOCTOU race conditions; supports real IP detection behind reverse proxies (`X-Real-IP` / `X-Forwarded-For` / IPv6)
-- **`trustProxy` only behind a trusted reverse proxy**: login rate limiting counts by IP, and with `server.trustProxy: true` the server takes the first entry of `X-Real-IP` / `X-Forwarded-For` **without checking where it came from**. Enabling it with no trusted reverse proxy in front hands the rate-limit key to the client — an attacker can rotate forged IPs to bypass the 5-failure lockout, or aim one at a victim to lock that IP out. See [Reverse Proxy Trust](#reverse-proxy-trust-trustproxy) for the configuration details
-- **Unauthenticated image endpoint (a known trade-off, not an oversight)**: `GET /Items/{itemId}/Images/{imageType}` **does not require a token**. Clients embed image URLs in their UI and cache them for a long time, so requiring auth would leave posters broken across the board once a token rotates or a cache entry expires. Its safety rests on the **virtual ID being a capability URL**: the `itemId` in the path is a 128-bit `crypto/rand` value that only a user who actually fetched that item's metadata can know. Two consequences worth stating plainly: (1) **anyone who obtains that URL can fetch that image**, even without a token — so an unauthenticated request skips the `AllowedServers` check (authenticated requests are still checked as usual); (2) the fetch goes upstream under that upstream's shared identity. If per-user, revocable image access is needed, this can move to short-lived signed URLs
-- **Graceful shutdown**: On receiving `SIGINT` / `SIGTERM`, drains active connections (up to 10 seconds) before closing the HTTP server and health check timers
-- **Admin panel CSP**: the admin panel returns a strict `Content-Security-Policy` - `default-src 'self'`, with no third-party origin and no `'unsafe-inline'` in `script-src` / `style-src` / `font-src` / `connect-src`. Vue, lucide, the compiled Tailwind CSS and the Inter font are all self-hosted under `public/vendor/`, so the panel loads nothing from and connects to nothing on an external origin. Only `'unsafe-eval'` remains, which Vue needs to compile its in-DOM template at runtime
-- **Stream URL cache auto-eviction**: `IDStore` stream URL cache entries expire after 4 hours, cleaned every 30 minutes, preventing unbounded memory growth during long-running operation
-- **Proxy connectivity test SSRF protection**: The admin panel's proxy test endpoint includes DNS rebinding protection, blocking connections to private/reserved IP addresses (`127.x`, `10.x`, `172.16-31.x`, `192.168.x`, etc.)
-- **YAML comment-safe parsing**: Config file parsing correctly handles `#` characters inside quotes, no longer incorrectly truncating values containing `#`
+See [development](docs/en/development.md) for builds and verification. Report vulnerabilities privately under the [security policy](SECURITY.md#reporting-a-vulnerability-in-english).
 
----
+## Credits and license
 
-## Logging System
+Thanks to [ArizeSky](https://github.com/ArizeSky) for the original project, early architecture and core features, and to contributors, issue reporters and client testers in both repositories. Original code, design and historical contributions belong to their respective authors/contributors. This repository continues developing, maintaining and releasing the current Go mainline.
 
-### Log Levels
+Original Node.js V1.2.1 remains a [historical reference](legacy/README.md), excluded from current Go builds. [Old documentation](README_EN_V1.2.1.md) remains separate. See [GitHub Contributors](https://github.com/Zkunlun/Emby-In-One/graphs/contributors) for contributions.
 
-| Level | Output | Content |
-|-------|--------|---------|
-| DEBUG | File   | All request details, ID resolution, header info |
-| INFO  | File + Console | Logins, server status changes, config changes |
-| WARN  | File + Console | 401/403 responses, server disconnections |
-| ERROR | File + Console | Request failures, login failures, exceptions |
-
-### Log Files
-
-- Path: `data/emby-in-one.log` (Release sets `data/` at `/opt/emby-in-one/data/`)
-- Docker path: `/app/data/emby-in-one.log`
-- Up to 10MB per file, retaining 3 rotated backups (`emby-in-one.log.1` ~ `.3`), auto-rotation
-- Capable of being downloaded and cleared inside the admin panel (clearing also deletes the backups)
-
-### Log Configuration
-
-Default log level is `info`. Enable full debug logging via environment variables when troubleshooting:
-
-```bash
-LOG_LEVEL=debug FILE_LOG_LEVEL=debug
-```
-
-In Docker Compose:
-
-```yaml
-environment:
-  - LOG_LEVEL=debug
-  - FILE_LOG_LEVEL=debug
-  - LOG_MAX_SIZE_MB=10   # per-file size limit (MB), default 10
-  - LOG_KEEP=3           # rotated backups to keep, default 3
-```
-
----
-
-## Admin Panel
-
-Access `http://your-ip:8096/admin`, logging in with the admin credentials from the config file.
-
-| Page | Functions |
-|------|-----------|
-| **System Overview** | Online server count, ID mapping count, storage engine (SQLite) |
-| **Upstream Nodes** | Add / edit / delete / reconnect servers, drag-and-drop ordering; Shows assigned regular users and configures authorization capacity (`maxConcurrent`, labeled “同播数量限制”) |
-| **User Mgmt** | Create, edit, enable/disable, delete regular users; Visually configure accessible servers |
-| **Network Proxies** | HTTP/HTTPS proxy pool management, supports one-click connectivity testing |
-| **Global Settings** | System name, default playback mode, admin account, timeout & grace period configuration |
-| **Runtime Logs** | Real-time log viewing, supports level filtering (ERROR/WARN/INFO/DEBUG), keyword search, downloading raw log files, and clearing logs |
-
-> The admin panel sidebar displays the current running version number. For adding/editing `spoofClient: passthrough` upstreams, if there is no captured client identity available, the admin API will still save the configuration but return a warning, keeping the upstream as offline until a real client logs in and triggers automatic retry.
-
-### Admin API
-
-All management APIs require authentication (`X-Emby-Token` header or `api_key` query parameter). For security reasons, `/admin/api/*` is exposed only with same-origin CORS behavior and does not grant arbitrary cross-origin access.
-
----
-
-## SSH Management Menu
-
-After installation, use:
-
-```bash
-emby-in-one
-```
-
-Available commands:
-
-- Start / restart / stop service
-- Online update (latest version) / download specific version
-- View service status, public IP
-- View admin credentials, modify admin username / password
-- View user list, add regular user, delete regular user
-- View logs
-- Uninstall service (supports preserving config and data)
-
-> The SSH menu auto-detects the current deployment method (Binary / Docker), dispatching all operations to the corresponding systemd or Docker Compose commands. Docker mode updates use a source-rebuild workflow. There is no separate "check version" entry — the current version is shown directly in the menu title bar (e.g. `Emby In One 管理菜单 v1.4.6`).
-
----
-
-## Data Directory Description
-
-Runtime directories:
-
-- `config/` — Stores config file `config.yaml`
-- `data/` — Stores runtime data:
-  - `mappings.db` — Virtual/additional-instance mappings, users/authorization revisions, watch history, and the internal pending-cleanup journal; completed cleanup removes journal entries
-  - `tokens.json` — Proxy tokens and authorization revisions; authentication still checks current user existence, enabled state, and revision
-  - `captured-headers.json` — Passthrough identity cache; last-success entries use stable server IDs and record known user/server ownership
-  - `emby-in-one.log` — Log file
-
-The actual location of `data/` can be changed with the top-level [`dataDir`](#data-directory-datadir) key in the config file.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/admin/api/status` | System status |
-| GET | `/admin/api/upstream` | List upstream servers |
-| POST | `/admin/api/upstream` | Add upstream server |
-| PUT | `/admin/api/upstream/:id` | Modify upstream server (stable `serverId`; legacy index lookup remains compatible) |
-| DELETE | `/admin/api/upstream/:id` | Delete upstream server; preserve Virtual IDs that still have other instances and remove only truly orphaned mappings/state |
-| POST | `/admin/api/upstream/:id/reconnect` | Reconnect upstream server |
-| POST | `/admin/api/upstream/reorder` | Adjust server ordering |
-| GET | `/admin/api/proxies` | List proxies |
-| POST | `/admin/api/proxies` | Add proxy |
-| POST | `/admin/api/proxies/test` | Test proxy connectivity |
-| DELETE | `/admin/api/proxies/:id` | Delete proxy |
-| GET | `/admin/api/settings` | Retrieve global settings |
-| PUT | `/admin/api/settings` | Modify global settings |
-| GET | `/admin/api/logs?limit=500` | Fetch in-memory logs |
-| GET | `/admin/api/logs/download` | Download persisted log files |
-| DELETE | `/admin/api/logs` | Clear logs |
-| GET | `/admin/api/client-info` | Get currently captured client information |
-| GET | `/admin/api/users` | List all regular users |
-| POST | `/admin/api/users` | Create regular user |
-| PUT | `/admin/api/users/:id` | Update regular user |
-| DELETE | `/admin/api/users/:id` | Delete regular user (auto-clears watch data) |
-| POST | `/admin/api/logout` | Admin logout |
-
----
-
-## FAQ
-
-### Passthrough Upstream Login Failure (403)
-
-On a fresh installation with no real client identity captured yet, a username/password `passthrough` upstream **skips its initial login and remains offline** until a real client identity becomes available; it does not use the Infuse fallback to force the first upstream login:
-1. Sign in to Emby-In-One with a real Emby client (Infuse, Emby iOS, etc.) using the **admin** account
-2. After the proxy captures the client identity, it automatically retries offline passthrough upstreams
-3. Once login succeeds, the identity used for that server is persisted and can be reused after future restarts
-4. Identity-source information in the logs can help with diagnosis; for example, `last-success` means that server's previously successful identity. `infuse-fallback` remains the final internal fallback for identity resolution, but initial login/admin validation is deferred when that is the only available source
-5. If the captured client identity is still rejected upstream, sign in again as admin using a client that the upstream accepts
-
-### Upstream Shows Offline / Login Timeout
-
-`timeouts.login` (30s default) and `timeouts.healthCheck` (30s default) used to have no effect — every request inherited `timeouts.api`. Both are enforced now, and this is the most likely reason an upstream goes offline right after an upgrade:
-
-- A login that takes longer than `timeouts.login` fails → the server shows offline. Raise it in "Global Settings" for upstreams that need 10–30s to log in
-- Health-check probes only run for **offline** servers and are bounded by `timeouts.healthCheck`; a timeout merely means that round did not recover, and the next round retries — online servers are never marked offline by it
-- These values can only tighten the timeout below `timeouts.api`; raise `api` as well to allow longer probes
-- `Timeouts are now enforced` in the startup log means your config carries values below `api`
-
-### Client UA Capture and Cleanup
-
-Successful sign-in from a real Emby client with usable identity headers can create token-scoped UA / Device captures for both admins and regular users. Admin-panel login may not provide these fields. Capture grants no extra upstream access and does not replace a selected fixed spoofing preset.
-
-Sign in to EIO with the desired client and inspect "Captured Client Info" in the admin panel. Passthrough last-success entries are separated by stable server ID. Binding changes, deletion, disabling, or password changes clean related captures and fence late asynchronous publication. Related legacy data with unknown ownership is conservatively removed and may require another client sign-in.
-
-### Playback 403 / 401
-
-Possible causes:
-- Upstream token expired → Click "Reconnect" in the admin panel
-- Passthrough server headers incomplete → Check the logs querying `Stream headers for [Server Name]` to confirm proper header capture
-- Media merge switching → MediaSourceId translates precisely and points correctly to the mapped upstream
-
-### Loading Delay / Incomplete Library Merging
-
-- Default search grace period is 3 seconds — after the first server responds, up to 3 more seconds are allowed for remaining servers; timed-out server data is silently backfilled in the background
-- If upstream servers have generally high latency, increase `searchGracePeriod` and `metadataGracePeriod` in the admin panel "Global Settings" or `config.yaml` `timeouts` section
-- `latestGracePeriod` defaults to 0 (wait for all servers); set to a positive value if "Latest Added" on the home page loads slowly
-- Check logs for `timeout` or `abort` keywords
-- You can also increase `api` (single request timeout) and `global` (aggregation total timeout) values
-
-### Admin Password Lost
-
-After first boot, the Admin password automatically hashes (scrypt). Recovery methods:
-
-**Method 1: File Modifications**
-1. Edit `config/config.yaml`, swapping the hash after `password:` directly to an explicit plaintext entry 
-2. Execute an application restart—the system natively identifies and hashes the plaintext properly.
-
-**Method 2: Command Line Menu**
-```bash
-emby-in-one
-# Opt maneuvering toward the "Change Password" toggles directly
-```
-
-### Reverse Proxy Users Rate-Limited (429)
-
-If all users receive `429 Too Many Requests` after 5 failed login attempts, `trustProxy` is not enabled:
-1. Add `trustProxy: true` under the `server` section in `config.yaml`
-2. Restart the service
-3. Verify the reverse proxy **overwrites** `X-Real-IP` or `X-Forwarded-For` — with the appending form `$proxy_add_x_forwarded_for` a client can forge its IP (bypassing the limit, or locking someone else out). See [Reverse Proxy Trust](#reverse-proxy-trust-trustproxy)
-
-### Docker Containers Fail to Reach Upstream
-
-- Check if the upstream URL uses `localhost` → Inside a container, `localhost` points to the container itself. Use the host's actual IP or domain.
-- To access host-machine services, use `host.docker.internal` (Docker Desktop) or the actual local IP address.
-
----
-
-## Disclaimer
-
-> **Notice**: This project communicates with upstream servers by simulating and masking Emby client behavior. There resides inherent risk of upstream operators or associated platforms detecting proxies and enforcing bans against your account or API Key. Utilization of this project equates to your self-assumption of these risks. The author bears zero responsibility for account bans, data loss, or other damages resulting from its use.
-
----
-
-## Project Architecture (Developer Reference)
-
-```text
-Emby-In-One/
-├── cmd/emby-in-one/
-│   └── main.go                     # Application entrypoint
-├── internal/backend/
-│   ├── config.go                   # YAML config load/save/validate/atomic write
-│   ├── server.go                   # HTTP server startup & graceful shutdown
-│   ├── routes.go                   # Route registry (URL → Handler mapping)
-│   ├── middleware.go               # HTTP middleware (CORS, logging, status capture, CSP)
-│   ├── ssrf.go                     # SSRF policy and safe dialers (proxy probe / upstreams)
-│   ├── auth.go                     # Proxy token issuance & validation
-│   ├── auth_context.go             # Per-request auth context injection & extraction
-│   ├── auth_manager.go             # Upstream auth management (login/session/API Key)
-│   ├── identity.go                 # Client identity capture & Passthrough 5-level resolution
-│   ├── identity_persistence.go     # Per-upstream client identity persistence
-│   ├── identity_lifecycle.go       # Identity ownership, migration & publication fences
-│   ├── user_store.go               # Multi-user storage (CRUD, password hashing, memory index + SQLite)
-│   ├── handlers_admin.go           # Admin API handlers (upstream server CRUD)
-│   ├── handlers_system.go          # System info endpoints (/System/Info)
-│   ├── handlers_user.go            # User login rate limiting & user-related handlers
-│   ├── admin_validation.go         # Admin input validation & helper utilities
-│   ├── idstore.go                  # SQLite bidirectional ID mapping (virtual ↔ original)
-│   ├── id_rewriter.go              # Recursive ID virtualization/devirtualization rewriting
-│   ├── query_ids.go                # Batch query ID resolution
-│   ├── media.go                    # Media aggregation, dedup, metadata priority selection
-│   ├── aggregation.go              # Common aggregation framework (grace period + background backfill)
-│   ├── media_access.go             # Current authorized instances & watch-query scopes
-│   ├── media_request_access.go     # Request-scoped source, version & membership checks
-│   ├── media_items.go              # Media item queries (multi-upstream fan-out merge)
-│   ├── media_resume.go             # Resume Items proxy & multi-upstream merge
-│   ├── media_nextup.go             # Next Up proxy & multi-upstream merge
-│   ├── media_playback.go           # PlaybackInfo & per-user/per-upstream single-device lease reservation
-│   ├── media_stream.go             # Video/audio stream proxy (virtual ID route resolution)
-│   ├── library_image.go            # Image proxy (cache headers)
-│   ├── series_userdata.go          # Series-level watch history isolation (Resume/NextUp)
-│   ├── session_userdata.go         # Sessions/Playing progress reporting
-│   ├── watch_store.go              # Per-user watch progress storage & persistence
-│   ├── watch_visible_store.go      # Batched watch queries with authorization filtering
-│   ├── watch_lifecycle.go          # Management transactions, journal & startup recovery
-│   ├── watch_lifecycle_runtime.go  # Exact cleanup & inheritance after deletion
-│   ├── watch_lifecycle_requests.go # Request auth & asynchronous state publication guards
-│   ├── watch_playback_store.go     # Atomic playback-event watch-state merge
-│   ├── playback_watch_state.go     # Playback fields, source matching & completion
-│   ├── playback_watch_cache.go     # Bounded session runtime/position & terminal state
-│   ├── playback_watch_owner.go     # Shared user/film write ownership & generations
-│   ├── playback_watch_events.go    # Playback reports, metadata & manual resets
-│   ├── playback_watch_legacy.go    # Legacy PlayingItems report compatibility
-│   ├── playback_limiter.go         # Per-user/per-upstream single-device lease (revision, heartbeat, exact Stop)
-│   ├── playback_routes.go          # User-owned playback routes & media-source sessions
-│   ├── login_limiter.go            # Per-IP login failure limiter (evicts instead of blocking)
-│   ├── streamproxy.go              # HTTP stream proxy (backpressure, HLS relative path rewriting)
-│   ├── fallback_proxy.go           # Fallback route: scan URL/Query for virtual IDs
-│   ├── healthcheck.go              # Parallel health checks
-│   ├── logger.go                   # Leveled logging (Console + File dual output + rotation)
-│   ├── scrypt_local.go             # Admin password scrypt hashing
-│   ├── sqlite_cgo.go               # CGO embedded SQLite compilation & low-level bindings
-│   └── upstream.go                 # Upstream connection pool & concurrent request orchestration
-├── third_party/sqlite/             # SQLite CGO source dependency
-├── public/
-│   ├── embed.go                    # go:embed directive (compiles admin.html, admin.js and vendor/ into binary)
-│   ├── admin.html                  # Vue 3 + Tailwind CSS admin panel template
-│   ├── admin.js                    # Vue 3 application logic (extracted from admin.html)
-│   └── vendor/                     # Self-hosted frontend dependencies: Vue, lucide, Tailwind output, Inter font
-├── assets/panel.css                # Tailwind input (holds the panel styles moved out of admin.html)
-├── tailwind.config.js              # Tailwind content config (run npm run build:panel after editing admin.html/admin.js)
-├── package.json                    # Root package.json keeps only the build:panel script (Node deps moved to legacy/)
-├── Dockerfile                      # Go runtime container build
-├── docker-compose.yml
-├── install.sh                      # Source repo one-click deploy script (Docker)
-├── release-install.sh              # Release binary one-click deploy script (systemd)
-├── emby-in-one-cli.sh              # SSH terminal management menu script
-└── legacy/                         # V1.2.1 Node.js implementation: reference only, built into nothing
-    ├── README.md                   #   Why it is kept, and why it takes part in no build
-    ├── src/                        #   Old Express implementation (the reference for the Go ID virtualization)
-    ├── tests/                      #   Old Node tests (most no longer pass)
-    └── package.json                #   Node dependencies (only used by npm --prefix legacy install)
-```
-
----
-
-## Development & Contributions
-
-The active codebase is implemented in Go. Reproducible bug reports, compatibility feedback, feature requests, and Pull Requests are welcome.
-
-When contributing code, please keep these principles in mind:
-
-- Bug fixes should include regression coverage for the underlying cause whenever practical, rather than patching only one client's visible symptom.
-- Keep changes focused and avoid mixing unrelated architectural refactors or formatting churn into the same PR.
-- Run tests relevant to the changed area before submitting; for shared backend behavior, `go test ./...` is recommended.
-- Changes to the admin panel should also verify frontend assets and embedded resources remain in sync. Changes to installation or release flows should verify versioning, installer behavior, and the Release workflow together.
-- Client compatibility reports are most useful when they include request paths, response differences, logs, or clear reproduction steps.
-
----
-
-## Relationship to the Original Project
-
-Emby-In-One was originally created by [ArizeSky](https://github.com/ArizeSky), with the original repository at [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One). This repository continues development and maintenance on top of that project and retains its core multi-Emby aggregation design.
-
-This repository is not a simple mirror of the original project. Ongoing compatibility fixes, feature maintenance, releases, and the active Go codebase are maintained in [Zkunlun/Emby-In-One](https://github.com/Zkunlun/Emby-In-One). Existing code, design work, and historical contributions from the original project remain attributable to their respective authors and contributors.
-
-The original Node.js V1.2.1 implementation is retained under [`legacy/`](legacy/) for historical reference and is not part of current Go builds, images, or installation flows. For V1.2.1, refer to the original project's historical releases; for currently maintained versions, use this repository's Releases.
-
-This project continues to be distributed under the **GNU General Public License v3.0**. Modifications and redistribution must comply with GPL-3.0.
-
----
-
-## Credits
-
-- Thanks to [ArizeSky](https://github.com/ArizeSky) for creating Emby-In-One and building the project's early architecture and core functionality.
-- Thanks to all contributors to both the original project and this repository, as well as issue reporters and users who helped test client compatibility.
-- Contributions to the maintained repository can be reviewed through [GitHub Contributors](https://github.com/Zkunlun/Emby-In-One/graphs/contributors) and the commit history.
-
----
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=Zkunlun/Emby-In-One&type=Date)](https://star-history.com/#Zkunlun/Emby-In-One&Date)
-
----
-
-## License
-
-GNU General Public License v3.0
+This project is released under the **GNU General Public License v3.0**. Follow [GPL-3.0](LICENSE) when modifying or redistributing.

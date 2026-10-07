@@ -1,975 +1,143 @@
 # Emby-In-One
 
-> **Version: V1.4.9**
+面向 Emby 客户端的多上游聚合代理，将多台 Emby 服务器整合为统一入口，提供媒体合并、用户授权、独立观看状态和播放管理。
 
-[![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
-[![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![Docker](https://img.shields.io/badge/Docker-20.10+-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![GitHub Release](https://img.shields.io/github/v/release/Zkunlun/Emby-In-One?color=green)](https://github.com/Zkunlun/Emby-In-One/releases)
-[![GitHub Stars](https://img.shields.io/github/stars/Zkunlun/Emby-In-One?style=social)](https://github.com/Zkunlun/Emby-In-One)
+[![License: GPL v3](https://img.shields.io/github/license/Zkunlun/Emby-In-One?color=blue)](LICENSE)
 
-[更新日志](Update.md) | [English README](README_EN.md) | [安全策略](SECURITY.md) | [更新计划](Update%20Plan.md) | [V1.2.1 旧版文档](README_V1.2.1.md) | [GitHub](https://github.com/Zkunlun/Emby-In-One)
+[快速开始](#快速开始) · [文档](docs/README.md) · [更新日志](Update.md) · [安全](SECURITY.md) · [English](README_EN.md)
 
-Emby-In-One 是一个面向标准 Emby 客户端的多上游聚合代理，将多台 Emby 服务器整合为统一访问入口，并提供媒体聚合、多用户隔离、播放代理、权限控制以及统一管理与运维能力。
+本项目基于 [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One) 持续开发与维护。
 
-## 关于本项目
+## 适用场景
 
-本仓库基于 [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One) 持续开发与维护。感谢原作者 [ArizeSky](https://github.com/ArizeSky) 创建 Emby-In-One 并完成项目早期架构与核心功能。
+- 有多台可使用的 Emby 服务器，希望在一个客户端入口浏览、搜索和选择播放来源。
+- 为不同使用者分配上游访问权限，并分别保存普通用户的播放进度、已观看和收藏。
+- 通过 Web 面板集中管理上游、播放线路、用户和日常运行状态。
 
-当前仓库在原项目基础上继续进行兼容性修复、稳定性优化、功能完善与版本发布，后续维护、Bug 修复和 Release 以本仓库为准。
+使用前需要可访问的 Emby 上游及相应账户或 API Key，以及运行 EIO 的环境。EIO 聚合已有媒体资源，不附带媒体库。
 
-当前稳定版为 **V1.4.9**。现行主线以 Go 实现为主；原项目的 Node.js V1.2.1 实现保留在 [`legacy/`](legacy/) 中用于历史参考，不参与现行版本的构建与安装。
+## 核心功能
 
-> **V1.4.9** 新增媒体库统计、完善上游客户端身份与观看状态管理，并改进电影和单集合并及多版本保留。业务源码已完成部署和用户验收；更新内容见[更新日志](Update.md)，规则与验证范围见[发布验证说明](docs/release-v1.4.9-validation.md)。
-
-## 目录
-
-- [关于本项目](#关于本项目)
-- [功能概览](#功能概览)
-- [快速安装](#快速安装)
-- [系统要求](#系统要求)
-- [配置文件说明](#配置文件说明)
-- [多用户管理](#多用户管理)
-- [进阶配置与核心原理](#进阶配置与核心原理)
-- [媒体库资源数统计](#媒体库资源数统计)
-- [健康检查](#健康检查)
-- [安全加固](#安全加固)
-- [日志系统](#日志系统)
-- [管理面板](#管理面板)
-- [SSH 管理菜单](#ssh-管理菜单)
-- [数据目录说明](#数据目录说明)
-- [常见问题](#常见问题)
-- [免责声明](#免责声明)
-- [项目架构](#项目架构-供开发者查阅)
-- [开发与贡献](#开发与贡献)
-- [与原项目的关系](#与原项目的关系)
-- [Credits / 致谢](#credits--致谢)
-- [Star History](#star-history)
-- [许可证](#许可证)
-
-## 功能概览
-
-| 功能模块 | 说明 |
+| 能力 | 说明 |
 | --- | --- |
-| **多上游聚合** | 将多台 Emby 服务器的媒体库、搜索结果和媒体条目汇聚到统一入口；使用并发请求与可配置宽恕期降低慢节点对整体响应的影响，并支持已聚合内容通过 `OtherInstances` 回退到其他在线实例。 |
-| **媒体合并与 ID 虚拟化** | 对跨服务器的电影、剧集、季和单集进行去重聚合，相同内容可保留多个 MediaSource；对客户端统一暴露持久化 Virtual ID，并通过元数据优先级选择展示信息。 |
-| **多用户与独立观看状态** | 支持创建普通用户并分配可访问的上游服务器。不同普通用户拥有独立的播放进度、已观看、收藏、Resume 与 NextUp 状态，同一用户的已合并跨上游影片共享状态，支持可靠播放上报达到 90% 后自动标记已播放；`IsFavorite`、`IsPlayed`、`IsResumable`、`IsUnplayed` 等列表筛选同样按本地用户状态计算，管理员保持上游账户语义。 |
-| **权限与媒体库可见性** | 管理员拥有全部上游和管理能力；普通用户只能访问被授权的服务器。可按用户隐藏客户端首页中的指定媒体库或整台服务器的库入口，不影响搜索、最新添加和继续观看等内容访问。 |
-| **播放代理与直连** | 支持 `proxy` 与 `redirect` 两种播放模式及有序多推流线路。Proxy 可在 transport error 或 502/503/504 时自动切换备用线路；Redirect 会避开已知故障线路，并在全部线路不可用时执行有界恢复探测。 |
-| **上游认证与客户端身份** | 上游支持用户名/密码或 API Key 认证；客户端身份支持 `none`、`passthrough`、`infuse`、`hills`、`capyplayer`、`custom` 模式，可透传或自定义 Emby 客户端身份头，并支持上游会话失效后的自动重新登录。 |
-| **网络代理与健康检查** | Proxy 播放模式可为不同上游单独绑定 HTTP/HTTPS 网络代理并测试连通性；Redirect 直连模式禁止绑定服务端 HTTP 代理。后台并行执行上游 API 健康检查与多推流线路存活探测，并记录状态变化。 |
-| **媒体库资源数统计** | 按当前授权在线上游累计官方电影、剧集、集数；后台小时刷新，客户端只读缓存，不做去重或全库遍历，缺在线完整缓存返回 503。 |
-| **授权容量与单设备播放** | `maxConcurrent` 控制每台上游可授权的普通用户数；独立播放 lease 按用户与上游限制活跃设备，支持心跳过期、精确停止及旧会话保护。 |
-| **Web 管理与 SSH CLI** | 提供 Web 管理面板、REST 管理 API 和 SSH 管理菜单，可管理上游、用户、网络代理、系统设置、日志、更新及服务生命周期。 |
-| **日志与安全机制** | 提供持久化分级日志、自动轮转、登录失败限速、scrypt 密码存储、配置与 Token 文件权限保护、请求体限制、SSRF 防护及管理面板 CSP。 |
-| **多种部署方式** | 支持 GitHub Release 预编译二进制 + systemd、Docker / Docker Compose 和 Go 源码运行；Release 提供 amd64、arm64、arm、mips、mipsle、riscv64 多架构构建与 SHA256 校验。 |
+| **多上游聚合与媒体合并** | 汇总媒体库与搜索结果，按作品规则合并电影、剧集和单集，保留可选择的不同版本。 |
+| **用户授权与观看状态** | 按普通用户分配来源，独立保存进度、已观看和收藏；合并作品的版本共享同一用户状态，另有授权容量与设备限制。 |
+| **播放模式与线路管理** | 提供代理与直连播放模式，管理有序备用推流线路，按模式处理播放前可恢复的线路故障。 |
+| **上游接入与客户端身份** | 支持用户名/密码或 API Key，提供身份透传、Infuse/Hills/CapyPlayer 预设和自定义身份。 |
+| **Web 管理与媒体库统计** | 面板管理上游、用户、网络代理、设置和日志，提供电影、剧集与集数统计。 |
+| **部署与日常运维** | 支持 Release 二进制、Docker 源码构建与 Go 源码运行，提供 SSH 菜单、日志轮转和状态检查。 |
 
-> `redirect` 模式会把上游访问凭据带入客户端可见的直连 URL，适合明确接受这一安全取舍的场景；详细说明见[播放模式详解](#播放模式详解)。
+## 界面预览
 
----
+管理面板集中提供上游、用户、网络代理、设置与日志入口。
 
-## 快速安装
+### 系统概览
 
-> **旧版 Node.js 部署说明**：如果您希望部署基于 Node.js 的 V1.2.1 稳定版，请前往原项目的 [Releases 页面](https://github.com/ArizeSky/Emby-In-One/releases) 下载 V1.2.1 的 Source code 源码压缩包，解压后同样运行 `bash install.sh` 即可。 仓库中的 `legacy/` 目录保留了 V1.2.1 的 Node.js 源码，**仅供对照参考**（Go 版的 ID 虚拟化以它为蓝本），它不参与 Go 版的构建、镜像或安装流程，详见 `legacy/README.md`。
+![系统概览界面，展示上游数量、在线节点、ID 映射数和存储引擎](docs/images/system-overview.png)
 
-本项目优先推荐在 Linux 服务器直接使用 Release 二进制部署 V1.4.6（无需本地编译）；Docker 方式适合希望自行构建镜像的场景。
+系统概览：集中查看上游与运行状态。实际运行界面已遮盖敏感字段，并缩放用于展示。
 
-### 方式一：Release 二进制一键安装（首推）
+### 上游管理
+
+![上游节点列表，展示来源排序、授权人数、容量限制、状态和操作入口](docs/images/upstream-management.png)
+
+上游管理：实际运行界面已遮盖服务器名称与地址，并缩放用于展示。
+
+查看各上游的状态与已授权人数，调整来源顺序，并进入认证方式、播放模式与推流线路配置。
+
+### 用户与授权
+
+![用户管理列表，展示授权来源、用户状态、创建时间和编辑入口](docs/images/user-permissions.png)
+
+用户管理：实际运行界面已遮盖用户名与服务器名称，并缩放用于展示。
+
+查看普通用户状态与授权来源，通过编辑入口设置可访问的上游及首页媒体库入口显示；隐藏入口不会取消访问授权。操作步骤见[首次使用](docs/getting-started.md)。
+
+## 快速开始
+
+**推荐：Linux Release 二进制 + systemd，无需本地 Go 编译环境。**
+
+准备 Linux 与 systemd、root/sudo 权限及 Bash、curl、grep、sed、sha256sum 等脚本工具，并确保能访问 GitHub API 和 Release 下载。完整架构与部署要求见[安装指南](docs/installation.md)。
+
+首次安装最新正式版：
 
 ```bash
-curl -fsSL -o release-install.sh https://raw.githubusercontent.com/Zkunlun/Emby-In-One/main/release-install.sh
+curl -fsSL -o release-install.sh https://github.com/Zkunlun/Emby-In-One/releases/latest/download/release-install.sh
 sudo bash release-install.sh
 ```
 
-可选：指定版本安装。
+脚本安装并启动服务，默认项目目录为 `/opt/emby-in-one`。首次初始化时，本地管理员为 `admin`，随机密码在安装输出末尾显示，请保存。
 
-```bash
-sudo bash release-install.sh V1.4.6
-```
-
-该脚本会自动完成：
-- 按 CPU 架构下载对应 Release 二进制（无需本地编译 Go）
-- 初始化 `/opt/emby-in-one/{config,data,log}` 并首次生成随机管理员密码
-- 拉取 `admin.html`、`admin.js` 与 `emby-in-one-cli.sh` 配套资源（二进制已内嵌完整管理面板，含 `public/vendor/` 下的前端依赖；磁盘上缺哪个文件就自动回退到内嵌副本，因此外部文件只是可选覆盖）
-- 安装并启动 `systemd` 服务（`emby-in-one`），支持开机自启
-- 若检测到旧版本，自动备份并执行可回滚升级
-
-### 方式二：源码仓库一键安装脚本（推荐开发者/希望本地构建镜像）
-
-```bash
-git clone https://github.com/Zkunlun/Emby-In-One.git
-cd Emby-In-One
-bash install.sh
-```
-
-脚本将为您自动安装 Docker 环境、分配随机管理员密码、构建 Go 版镜像并启动服务。后续如需管理，通过 SSH 输入 `emby-in-one` 即可呼出管理菜单。
-
-> **说明**：源码仓库安装脚本在 builder 阶段会同时复制 `cmd/`、`internal/`、`third_party/` 和 `public/` 参与 Go 编译。若您自行定制 `Dockerfile` 或手动复制文件，请确保 `public/` 目录也被包含在构建上下文中，否则会在构建时出现 `package emby-in-one/public is not in std` 错误。
-
-### 方式三：手动 Docker Compose 部署
-
-1. 创建项目目录并交给容器运行用户（容器以 uid 1000 运行，挂载目录不可写会导致启动时无法写入 `tokens.json` / `mappings.db` 而失败）：
-```bash
-mkdir -p /opt/emby-in-one/{config,data}
-chown -R 1000:1000 /opt/emby-in-one/config /opt/emby-in-one/data
-cd /opt/emby-in-one
-```
-2. 拷贝本仓库下的所有核心文件（包括 `go.mod`, `cmd/`, `internal/`, `public/`, `Dockerfile`, `docker-compose.yml` 等）至该目录。
-3. 创建初始配置文件 `config/config.yaml`：
-```yaml
-server:
-  port: 8096
-  name: "Emby-In-One"
-  # trustProxy: true        # 部署在反向代理（Nginx/Caddy 等）后面时设为 true
-
-admin:
-  username: "admin"
-  password: "your-strong-password" # 首次启动后自动加密存储
-
-playback:
-  mode: "proxy"
-
-timeouts:
-  api: 30000
-  global: 15000
-  login: 30000
-  healthCheck: 30000
-  healthInterval: 60000
-
-proxies: []
-upstream: []
-```
-4. 构建并启动：
-```bash
-docker compose build
-docker compose up -d
-```
-
-### 方式四：Go 源码直接运行（适合开发者）
-
-环境要求：Go 1.23+ 且具备 C 编译链（Debian/Ubuntu 运行 `apt install build-essential`）。
-```bash
-mkdir -p config data
-# 按方式三的说明在 config 文件夹下创建 config.yaml
-go test ./...
-go run ./cmd/emby-in-one
-```
-
-**默认访问地址**：
-- Emby 客户端连接地址：`http://服务器IP:8096`
-- 管理面板：`http://服务器IP:8096/admin`
-
----
-
-## 系统要求
-
-**Release 二进制部署（推荐）：**
-- Linux（amd64 / arm64 / arm / mips / mipsle / riscv64）
-- 无需 Go 编译环境，直接运行预编译二进制
-
-**Docker 部署：**
-- Docker 20.10+，Docker Compose v2
-- Linux：Debian 11/12/13、Ubuntu 22/24（推荐），其他发行版需自行验证
-- Windows / macOS 也可运行（开发测试用）
-
-**Go 源码编译：**
-- Go 1.23+
-- C 编译链（CGO 用于 SQLite）：Debian/Ubuntu 运行 `apt install build-essential`
-
----
-
-## 配置文件说明
-
-配置文件位于 `config/config.yaml`（Docker 部署时挂载到容器内 `/app/config/config.yaml`）。
-
-```yaml
-# dataDir: "/opt/emby-in-one/data"    # 运行时数据目录（顶层键，默认值见下方「数据目录」说明）
-
-server:
-  port: 8096
-  name: "Emby-In-One"
-  # id: 首次启动自动生成，请勿手动修改
-  # trustProxy: true        # 部署在反向代理后面时设为 true（见下方说明）
-
-admin:
-  username: "admin"
-  password: "your-strong-password"    # 首次启动后自动加密存储
-
-playback:
-  mode: "proxy"          # "proxy" 或 "redirect"，全局默认值
-
-timeouts:
-  api: 30000             # 单次上游 API 请求超时（ms）
-  global: 15000          # 聚合请求总超时——等待所有服务器的最大时长（ms）
-  login: 30000           # 上游登录超时（ms）——作用于登录与 API Key 校验，超过即判为登录失败
-  healthCheck: 30000     # 健康检查超时（ms）——作用于离线服务器的重连探测
-  healthInterval: 60000  # 健康检查间隔（ms）
-  searchGracePeriod: 3000     # 搜索聚合宽恕期——收到首个结果后继续等待其他服务器的时长（ms），0 表示禁用
-  metadataGracePeriod: 3000   # 元数据获取宽恕期（ms），0 表示禁用
-  latestGracePeriod: 0        # "最新添加"宽恕期——0 表示等待全部服务器（ms）
-
-proxies: []
-  # - id: "abc123"
-  #   name: "日本代理"
-  #   url: "http://user:pass@ip:port"
-
-upstream:
-  - name: "服务器A"
-    url: "https://emby-a.example.com"
-    username: "user"
-    password: "pass"
-
-  - name: "服务器B"
-    url: "https://emby-b.example.com"
-    apiKey: "your-api-key"
-    playbackMode: "redirect"                   # 覆盖全局播放模式
-    spoofClient: "infuse"                      # none | passthrough | infuse | hills | capyplayer | custom
-    streamingUrls:                               # 推流线路（可选，有序；单条也可写 streamingUrl: "..."）
-      - "https://cdn.example.com"                # 第 1 条为主线路
-      - "https://backup.example.com"             # 其余为备用线路
-    followRedirects: true                      # 是否跟随上游的 301/302/303/307/308（默认 true；false 时按上游错误处理，不把重定向地址转发给客户端）
-    proxyId: null                              # 关联代理池中的代理 ID
-    priorityMetadata: false                    # 合并时优先使用此服务器的元数据
-    maxConcurrent: 3                           # 同播数量限制：普通用户授权容量，0不限；管理员不占名额
-
-  - name: "服务器C（custom 伪装示例）"
-    url: "https://emby-c.example.com"
-    apiKey: "your-api-key"
-    spoofClient: "custom"
-    customUserAgent: "Infuse/7.7.1 (iPhone; iOS 17.4.1; Scale/3.00)"
-    customClient: "Infuse"
-    customClientVersion: "7.7.1"
-    customDeviceName: "iPhone"
-    customDeviceId: "your-custom-device-id"
-
-  - name: "服务器D（Hills 预设）"
-    url: "https://emby-d.example.com"
-    apiKey: "your-api-key"
-    spoofClient: "hills"
-
-  - name: "服务器E（CapyPlayer 预设）"
-    url: "https://emby-e.example.com"
-    apiKey: "your-api-key"
-    spoofClient: "capyplayer"
-```
-
-在管理面板修改的设置会热生效，无需重启服务。唯一例外是顶部的「默认播放模式」——它只是**新增上游时的初始值**，不影响已存在的上游，详见「播放模式详解」。
-
-### 反向代理信任 (`trustProxy`)
-
-| 配置值 | 行为 | 适用场景 |
-|--------|------|----------|
-| `false`（默认） | 登录限速使用 TCP 直连 IP（`RemoteAddr`） | 直接暴露在公网，无反向代理 |
-| `true` | 登录限速信任 `X-Real-IP` / `X-Forwarded-For` 头 | 部署在 Nginx / Caddy 等反向代理之后 |
-
-> **重要**：如果您的 Emby-In-One 部署在反向代理后面（Nginx、Caddy、Cloudflare 等），**必须**在 `config.yaml` 的 `server` 段添加 `trustProxy: true`，否则所有客户端请求将被视为来自同一 IP，5 次登录失败后所有用户均会被限速 15 分钟。
-
-> **前提：反向代理必须“覆写”这两个头**。本程序优先取 `X-Real-IP`，没有时取 `X-Forwarded-For` 的**第一段**。而 Nginx 最常见的写法 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` 是**追加**语义——客户端自己送的值会留在最前面，于是任何人都能伪造 IP：既可以不断换假 IP 绕过登录限流，也可以反过来把某个 IP 定向锁死 15 分钟。
->
-> 推荐改成覆写：
-> ```nginx
-> proxy_set_header X-Real-IP $remote_addr;
-> proxy_set_header X-Forwarded-For $remote_addr;
-> ```
-> 只要代理写入了 `X-Real-IP`（本程序优先使用，且该头无法靠追加伪造），限流就值得信任。
->
-> **反过来说：前面没有可信反向代理时，必须保持 `false`。** `trustProxy: true` 意味着服务端**无条件**采信请求头里的 `X-Real-IP` / `X-Forwarded-For`，不做任何来源校验。如果实例直接暴露在公网（或链路中没有任何一层会覆写这两个头），任何人都能自行填入任意 IP：每次登录失败换一个假 IP，就能绕过 `POST /Users/AuthenticateByName` 的失败计数与 15 分钟锁定；也可以填上别人的 IP，定向把那个 IP 锁死。
->
-> 判断标准很简单：**只有当「能访问到本服务的最后一道入口必然是您自己的反向代理」时才开启它**；不能确定就不要开。
-
-### 数据目录 (`dataDir`)
-
-`dataDir` 是配置文件里的**顶层键**（与 `server`、`admin`、`playback` 同级），决定运行时数据的落盘位置。
-
-| 项 | 值 |
-|----|-----|
-| 默认值 | 若 `/app/data` 存在（官方 Docker 镜像内置该目录）则用 `/app/data`；否则用进程工作目录下的 `data/` |
-| 落盘内容 | `mappings.db`（虚拟 ID 映射、用户数据、观看历史）、`tokens.json`（代理层 token）、`captured-headers.json`（passthrough 客户端头）、`emby-in-one.log`（日志文件） |
-
-> **该键与配置文件本身无关。** `config.yaml` 始终位于 `config/config.yaml`（Docker 容器内为 `/app/config/config.yaml`），不会随 `dataDir` 移动。各文件的说明见[数据目录说明](#数据目录说明)。
-
-**什么时候需要改**：
-
-- **二进制 / 源码部署**：`data/` 是相对**进程工作目录**解析的。如果服务的启动目录不是项目目录（例如 systemd 的 `WorkingDirectory` 指向 `/opt/emby-in-one`），而你想把数据固定到某个绝对路径、或与 `config/` 分开挂载，就显式指定 `dataDir`。
-- **Docker 部署**：容器内默认即 `/app/data`，而 `docker-compose.yml` 已把宿主的 `./data` 挂载到这里，通常**不需要**改；只有自定义挂载点时才需要。
-- **迁移 / 复用旧数据**：把 `dataDir` 指向已有数据所在目录即可，无需手动搬文件。
-
-**注意事项**：
-
-- 只写在配置文件里即可（`dataDir: "/opt/emby-in-one/data"`），管理面板不提供此项，修改后需**重启服务**生效；
-- 生产环境请使用**绝对路径**——相对路径会随启动时的工作目录变化，可能表现为「数据丢失」（实际是换了个目录读写）；
-- 该目录需要进程用户可读写。
-
----
-
-## 多用户管理
-
-V1.4 新增多用户支持，允许管理员创建多个普通用户，每个用户可独立配置可访问的上游服务器。
-
-### 角色说明
-
-| 角色 | 权限 |
-|------|------|
-| 管理员 (admin) | 可访问所有服务器、管理面板、管理 API；观看状态直接使用上游 Emby 账户数据 |
-| 普通用户 (user) | 仅可访问被分配的服务器；客户端可见的观看进度、已观看、收藏、Resume / NextUp 等状态由本地 WatchStore 隔离 |
-
-### 独立观看历史
-
-由于所有分发用户共享同一个上游 Emby 账户，上游侧的观看进度、已播放状态和收藏天然是共享的。播放上报及显式用户操作仍按原接口转发上游，EIO 同时维护当前普通用户自己的 WatchStore；自动完成只更新本地状态，不额外发送上游已播放变更请求。客户端读取时以**本地记录为权威**，因此不会因为其他普通用户改变了共享上游账户状态而互相覆盖：
-
-| 功能 | 管理员 | 普通用户 |
-|------|--------|----------|
-| 继续观看 (Resume) | 上游服务器数据 | 本地独立数据 |
-| 接下来观看 (NextUp) | 上游服务器数据 | 基于本地进度计算 |
-| 已播放状态 (Played) | 上游服务器数据 | 本地独立记录 |
-| 收藏 (Favorite) | 上游服务器数据 | 本地独立记录 |
-| 浏览页面中的 UserData | 直接透传上游 | 叠加本地状态覆盖 |
-| 列表筛选（只看收藏 / 已观看 / 未观看 / 继续观看中） | 上游服务器筛选 | 本地记录筛选 |
-
-**列表筛选（V1.4.4 起本地化，V1.4.5 补齐 `IsUnplayed`）：**
-
-- `Filters=IsFavorite`、`IsPlayed`、`IsResumable`、`IsUnplayed` 由**本地记录**筛选：代理先向该目录取候选集，再按当前代理用户的 WatchStore 状态判断，随后在本地排序、分页并修正总数。`IsUnplayed` 的本地语义是：没有本地记录的条目天然视为未观看，只有本地记录明确为 `Played=true` 才从未观看集合排除。`ParentId`、`Recursive`、`IncludeItemTypes` 等目录约束仍由上游执行。
-- 排序：`SortName`、`DateCreated`、`ProductionYear`、`CommunityRating` 在本地排序；其余排序键（如 `DatePlayed`）降级为按本地"最近播放 / 收藏时间"排序。
-- 无法识别的筛选值（如 `IsFolder`）原样转发上游，客户端意图不会被静默丢弃。
-
-> **已知限制**：`Likes`、`Dislikes`、`IsFavoriteOrLiked` 仍使用上游共享语义，因为本地 WatchStore 尚未记录“喜欢 / 不喜欢”状态。使用这些未本地化筛选时，代理会返回响应头 `X-Emby-In-One-Filter-Notice` 并写入节流 WARN 日志。
-
-**分页：** 不带 `ParentId` 的聚合列表（`GET /Users/{id}/Items` 不指定目录）由代理在**合并、去重之后**统一切页，因此 `TotalRecordCount` 是合并后的总数、`StartIndex` 也按合并后的顺序生效。本地筛选同样如此（先取候选集，再本地排序分页）。
-
-> 另一个取舍：上述两条路径都要先向上游取**候选集**（而不是让上游筛完返回一页），每个上游单次最多 5000 个原始候选条目（不是合并后的总数，也不是版本数）；超过上限时总数只是下界、列表尾部可能取不到，并在日志中告警。
-
-**工作原理：**
-
-- Playing/Progress 先上报上游，收到 2xx 确认后再写入普通用户本地进度；失败保留原本地状态。
-- 有效 Progress 达到对应媒体总时长的 90% 时自动标记已播放，Stopped 补判；Playing 只建立播放上下文，不单凭开始位置标记完成。
-- 现代 Stopped 保留客户端终态和准确设备/会话的 lease 收尾；已选出目标的旧停止接口也记录本地终态。旧接口无法选出目标时保留原响应。
-- 显式标记已播放、未播放或收藏等操作继续按原接口处理；删除用户时自动清除其本地观看数据。
-- 需要时补齐条目类型、剧名、季数和集数等元数据，以支持本地状态及 NextUp。
-
-**自动标记已播放：**
-
-普通用户的 Movie / Episode 在有效 Progress 或 Stopped 上报位置达到可靠总时长的 **90%（含恰好 90%）** 时，写入本地 `Played=true` 并将续播位置归零。浏览条目、获取播放地址、视频 GET/HEAD/Range 或连接断开均不触发此判定。拖动到 90% 后有效上报同样达标；这里判断位置比例，不计算累计观看时间或识别片尾。
-
-时长依次取本次有效上报、同一用户/真实设备/会话及媒体源的匹配缓存、所选上游条目和媒体源的元数据。多版本按实际 MediaSourceId 匹配，不取列表第一条或直接套用历史记录的时长；无法确认来源、条目类型或总时长时只保留能够确认的进度。直播及 `Failed=true` 的停止不新增完成。补齐请求有时限和重试限制，正常信息齐备的进度上报无需反复请求元数据。
-
-Stopped 省略位置或给出 null 时，仅可使用完整匹配的同会话最后有效位置；明确零位置或非法值不被缓存替换。缺少会话/媒体源身份且无法证明唯一来源时，不借用另一播放的位置。缓存受容量和过期约束，重启后不能依赖之前的会话缓存。
-
-已播放状态在普通上报、低位置停止和重播中保持，重播不会自动重新进入 Resume；需要用户明确标记未播放才能解除。手动修改 Played 或播放位置会清除旧会话缓存依据，之后新的有效达标事件仍可再次完成。读侧按本地状态显示 Played、续播位置、完成百分比和最近播放时间；完成条目从 Resume 排除，NextUp 沿既有剧集规则推进，收藏保持。
-
-现代 Sessions Playing / Progress / Stopped 与旧 PlayingItems 开始 / Progress / DELETE 停止 / POST Delete 兼容入口共用判定。直连、代理和 STRM/HTTP Path 的视频请求方式保持；如果客户端未向 EIO 发送足够的控制上报，无法保证自动识别看完。管理员继续读取上游账户状态；EIO 本地自动完成不会额外调用上游 PlayedItems，原播放上报和显式用户操作仍按原接口转发。
-
-
-### 跨上游共享状态与改绑
-
-同一普通用户的观看状态按“本地用户＋已合并的 Virtual ID”保存。已确认合并的 A / B 影片共享进度、已观看和收藏；不同本地用户继续独立。观看行中的服务器只是资源定位，不能用最后播放来源决定记录是否可见。
-
-| 操作或状态 | 观看记录与播放来源 |
+| 入口 | 默认地址 |
 | --- | --- |
-| 取消绑定 A，仍绑定有同片实例的 B | 保留共享状态；从 B 获取可用资源和版本，续播使用已保存位置 |
-| 取消全部相关绑定 | 隐藏该影片的本地历史、UserData 和观看筛选结果，保留记录；重新绑定同一现存服务器 ID 可恢复 |
-| A 离线但仍绑定，B 在线 | 不删除历史；使用 B 播放并更新共享状态，A 恢复后读取最新状态 |
-| 全部授权实例离线 | 保留历史；需要在线元数据的 Resume / NextUp 暂不输出不可取得的条目 |
-| 删除 A，合并影片仍有现存实例 B | 保留 Virtual ID 和共享状态，迁移资源定位，清除 A 的实例、授权、缓存和相关隐藏库配置 |
-| 删除 A，影片没有剩余实例 | 清除孤立映射和观看记录；迟到请求不能重建已删除记录 |
-| 删除后以相同地址重新添加 A | 新服务器具有新 ID，不恢复 A 独占历史或身份缓存；若再次合并既存 B，则使用 B 保留的共享状态 |
-| 删除普通用户 | 清除其本地观看、收藏、授权、隐藏库、token 及相关缓存，不改变其他用户的共享状态 |
+| 管理面板 | `http://服务器IP:8096/admin` |
+| Emby 客户端 | `http://服务器IP:8096` |
 
-可见性由当前绑定与已确认实例共同决定，先过滤，再分组、排序、分页和计数；不是给观看行添加永久隐藏标记。仅隐藏首页媒体库入口不等于取消绑定，不改变观看状态的授权范围。
+安装后继续完成下方的首次接入。指定版本、Docker/Compose 和源码运行见[安装指南](docs/installation.md)；已有实例先阅读[升级与备份](docs/operations.md#版本升级)。
 
-多版本只展示当前授权来源；选择 B 的版本时始终使用 B 的实际条目、媒体源和会话。旧 A 版本失去授权后被拒绝，不能把 A 的原始版本 ID 静默转发给 B。各源的时长缓存仍按实际版本隔离，不把 A 的时长写成 B 的版本时长。共享状态沿用已确认的合并关系；新增关联遵循下述媒体合并策略，不增加剪辑内容指纹或跨时长进度换算。
+## 首次使用
 
-### 共享进度的写入边界
+1. **登录面板**：打开管理地址，使用安装输出中的 EIO 本地管理员账户。
+2. **添加上游**：填写 Emby 地址，选择用户名/密码或 API Key 一种认证方式，按上游要求选择客户端身份。保存后检查状态；用户名型 `passthrough` 尚无身份时，需用真实 Emby 客户端以 EIO 管理员登录一次完成采集，详见[接入步骤](docs/getting-started.md#第二步添加上游)。
+3. **创建普通用户并授权**：在用户管理中创建本地账户，明确勾选可访问的上游。不勾选任何服务器表示没有上游访问权限。
+4. **连接客户端**：填写 EIO 客户端地址，使用该普通用户的本地账户登录。
+5. **验证访问和播放**：浏览授权范围内媒体，播放一项内容；有多版本时选择具体来源，异常时查看[排障指南](docs/troubleshooting.md)。
 
-最新成功且身份可确认的 Started 上下文取得共享写入权；Progress / Stopped 必须匹配其真实用户、设备、会话、来源/版本和代际。迟到的旧事件不能覆盖较新已提交位置或手动状态；正常向后拖动保存本次有效位置，不取历史最大进度。显式 Played / 位置修改使旧上下文失效，仅修改收藏保留播放上下文。
+EIO 本地账户用于登录 EIO，上游账户用于 EIO 接入来源。普通用户使用本地独立观看状态；管理员保持上游账户的观看状态语义。完整操作见[首次使用指南](docs/getting-started.md)。
 
-缺少真实设备、会话或版本归属证据时，不猜“最新会话”，跳过本地共享自动写入。重启或缓存驱逐后需要新的有效 Started 才能建立写入权。客户端完整重用同一设备/来源/影片/版本/会话 ID 时，协议没有额外世代字段，不能保证区分所有迟到的新入站数据包。
+## 播放模式与使用边界
 
-删除 A 后的继承只处理**删除前已认证、已准入的有效在途上报**：最终仍须确认用户启用、授权 B、幸存合并身份、版本证据和写入代际，且不能被新播放或手动状态淘汰。只更新共享记录与 B 定位，不向 B 发送 A 的原始 ID。删除后新发起的已撤销 token 请求继续按认证拒绝；无授权继承实例或证据不足则丢弃。
+| 模式 | 媒体流路径 | 选择条件 |
+| --- | --- | --- |
+| `proxy`（默认） | EIO 转发上游媒体流 | EIO 能访问推流源，客户端连接 EIO；可为上游绑定服务端 HTTP 网络代理。 |
+| `redirect` | EIO 返回重定向，客户端直连上游流地址 | 客户端必须能访问推流地址，可节省 EIO 媒体带宽；不能绑定服务端 HTTP 网络代理。 |
 
-### 管理变更与恢复
+**直连凭据可见性：** `redirect` 的客户端可见 URL 可包含上游 token/API Key，持有者可能按共享上游账户权限绕过 EIO 访问。使用受限上游账户；不接受这一取舍时使用 `proxy`。线路切换与身份规则见[上游接入与播放](docs/playback-and-upstream.md)。
 
-绑定、启用/禁用或密码更新会更新授权版本并撤销该用户旧 token，后续控制请求可能需要重新登录。绑定移除只清该用户对应来源的路由、缓存和 lease，保留其 B lease 及其他用户数据；禁用/改密码会清该用户播放上下文。已交给客户端的直连地址或已经开始的媒体传输不会因本地清理立即收回。
+- **授权与显示不同**：隐藏库入口不取消访问授权，搜索和播放等仍按授权执行。
+- **授权容量与播放设备限制不同**：`maxConcurrent` 限制每台上游可授权的普通用户数量；同一普通用户在同一上游的活跃设备另有约束，见[用户与权限](docs/users-and-permissions.md)。
+- **统计与合并口径不同**：媒体库统计按授权在线来源的官方数据累加，不做跨来源去重，见[统计说明](docs/media-counts.md)。
+- **升级保留配套备份**：配置、数据库与 `user-password.key` 等文件需一致保存；安装回滚不替代完整数据备份，旧用户库还有版本限制，见[运维指南](docs/operations.md#版本升级)。
 
-持久化数据库或清理日志不可用时，破坏性管理变更会失败。数据库提交后的 token / 身份文件清理失败会报告 `cleanupPending`，不能视为完整成功；服务器配置已经持久移除时，不通过恢复 A 的配置伪装回滚。未完成清理期间普通用户访问暂停，管理员可重试管理操作；启动时先恢复清理，再登录上游并提供服务，恢复失败则停止启动。没有后台自动重试器，成功后清理日志移除。
+合并按请求需要发现，候选数量和分页仍有边界，详见[合并规则](docs/media-merge.md)。已有客户端验收与未覆盖事项见[发布验证说明](docs/release-v1.4.9-validation.md)；凭据存储和使用风险见[安全政策](SECURITY.md)。
 
-旧用户和旧 token 的授权版本默认 0；观看唯一键保持，解绑不清观看库。passthrough 的成功身份缓存使用稳定服务器 ID，历史地址键只在能确认唯一现存归属时迁移；归属不明的相关旧捕获在清理时保守移除，必要时重新登录采集身份。详细验证场景见[任务四验收矩阵](docs/task4-acceptance.md)，当前全部待统一验证。
+## 文档与常见问题
 
-### 创建普通用户
-
-管理员可通过以下方式创建和管理普通用户：
-
-1. **管理面板** — 在「用户管理」页面可视化操作
-2. **SSH 菜单** — 使用 `emby-in-one` 命令，选择「添加普通用户」或「删除普通用户」
-3. **REST API** — `POST /admin/api/users`（需管理员 Token）
-
-### 配置可访问服务器
-
-普通用户只能访问 `allowedServers` 中显式授权的稳定 `serverId`。面板不勾选任何服务器表示**无上游访问权限**。创建用户时省略、`null` 或 `[]` 均不授予服务器；更新用户时省略或 `null` 保留原授权，显式 `[]` 清空授权。要授权全部现有服务器，需要明确列出全部 ID；之后新增服务器仍需单独授权。管理员始终可访问全部上游。
-
-### 同播数量限制与授权容量
-
-管理面板中的“同播数量限制”对应配置字段 `maxConcurrent`，按每台上游已授权的普通用户数量计数：
-
-- `0`（默认）：授权容量不限；正整数：普通用户授权数量上限；负数非法。
-- `assignedUsers` 是该上游当前已授权的普通用户数。管理员可访问全部上游，不占授权名额。
-- 名额由显式授权占用；用户停播、服务器离线或禁用用户不会自动撤销授权。取消授权或删除用户才释放相应名额。
-- 新增授权超出容量：`409 UPSTREAM_CAPACITY_FULL`。
-- 下调容量低于已授权用户数：`409 UPSTREAM_CAPACITY_BELOW_ASSIGNED`。
-- 容量冲突响应包含 `code`、`message`、`serverId`、`limit`、`assigned`。面板保留未保存表单并刷新容量显示，后端负责最终容量校验。
-
-### 普通用户单设备播放
-
-播放 lease 按 `(UserID, ServerID)` 隔离。同一普通用户在同一上游由一个活跃 DeviceID 持有 lease；同一用户可在不同上游同时播放，管理员豁免。同设备切换条目或会话可续用 lease；另一设备在 lease 有效时被拒绝，返回 `429 PLAYBACK_DEVICE_LIMIT`。
-
-DeviceID 来源依次为 `X-Emby-Device-Id`、`X-Emby-Authorization` 中的 DeviceId、`Authorization` 中的 DeviceId、当前已验证 Token 保存的 DeviceID。普通用户播放生命周期缺有效 DeviceID 时返回 `400 PLAYBACK_DEVICE_ID_REQUIRED`。lease 心跳达到 3 分钟未更新时可被清理或接管；Stopped 仅释放匹配设备和精确 PlaySessionID 的 lease，旧 Stopped 不会释放后续新会话。
-
-### 播放事件确认与错误响应
-
-Playing/Progress 收到上游任意 200—299 后才写入本地进度并刷新对应设备的 lease 心跳，成功返回空 204；响应 body 无需为 JSON。失败不更新本地播放状态：
-
-| 上游结果 | Playing / Progress 响应 |
-|---|---|
-| missing / offline client | 503 `UPSTREAM_SESSION_UNAVAILABLE` |
-| transport / DNS / TCP / TLS / 可观测 cancel | 502 `UPSTREAM_SESSION_FAILED` |
-| deadline / net timeout | 504 `UPSTREAM_SESSION_TIMEOUT` |
-| HTTP non-2xx（含上游 401/403） | 502 `UPSTREAM_SESSION_REJECTED` |
-
-Stopped 保留终态响应：成功、普通上游失败、离线或 missing client 时尝试保存符合当前会话、版本与写入权证明的本地进度，并精确收尾对应 lease，返回 204。请求准备错误保留原 400/503 响应；缺 DeviceID 时返回 400，不上报上游、不释放 lease，也不能凭缺失的身份证明写入共享自动进度。Movie / Episode 的有效 Progress 或 Stopped 达到可靠时长的 90% 时按前述自动标记规则处理；Playing、未知来源/时长、直播和 Failed 停止不新增完成。公开错误及生命周期日志省略上游 body、URL 与凭据。
-
----
-
-## 进阶配置与核心原理
-
-### 上游服务器认证（完整机制）
-
-每台上游服务器支持两种认证方式（二选一）：
-
-| 方式 | 配置字段 | 工作原理 |
-|------|---------|---------|
-| 用户名/密码 | `username` + `password` | 代理向上游调用 `AuthenticateByName` 登录接口换取 Session Token，后续请求复用会话 |
-| API Key | `apiKey` | 直接携带 API Key 请求上游，无需登录流程（推荐） |
-
-认证决策与容错逻辑：
-- 同一上游若同时填写，优先使用 `apiKey`。
-- 登录失败时会记录错误并参与健康检查，不影响其他上游并发聚合。
-- 健康检查与自动重连沿用该上游最近一次成功认证上下文。
-
-### 播放模式详解
-
-`playbackMode` 决定媒体流如何交付给客户端。
-
-| 模式 | 工作原理 | 适用场景 |
-|------|---------|---------|
-| `proxy` | 流量经代理服务器转发。HLS 清单（`.m3u8`）中的分片 URL 会被重写为相对代理路径。支持 Range 请求、字幕、附件。 | 上游无公网 IP；需要对客户端隐藏上游地址；需要兼容反向代理/公网域名 |
-| `redirect` | 客户端收到 `302` 重定向，直接连接上游流地址。重定向后流量不经过代理。 | 客户端可直连上游；节省代理带宽 |
-
-**优先级**：单服务器 `playbackMode` > 全局 `playback.mode` > `"proxy"`（默认）。
-
-> **全局 `playback.mode` 只是新增上游时的初始值。** 上游一旦建立，它的 `playbackMode` 就已经被写成了当时的值，此后修改全局默认**不会影响任何已存在的上游**（面板顶部的「默认播放模式」同理）。要改变某台上游的模式，请在该服务器的编辑框里用「播放模式」下拉——它是即时生效的。
-
-> ⚠ **`redirect`（直连播放模式）的安全警告**：直连播放模式会把上游账号凭据（`api_key`）写入 302 跳转链接，**任何能播放的用户都可从中提取凭据**——包括被 `AllowedServers` 限制的用户——并绕过本代理直接获得该共享上游账户本身具备的权限；如果该共享账户是上游管理员账号，泄露后即等同于获得上游管理员权限。因此：
->
-> - 请**为该上游使用专用的受限账号**（只授予所需的媒体库播放权限、不授予管理权限，必要时限制并发），不要复用上游管理员账号或多人共用的账号；
-> - 该凭据一旦泄露，只能在上游侧修改密码或吊销 API Key 才能失效；
-> - 无法接受该风险时，请保持默认的 `proxy` 模式。
-
-上游可以配置**多条推流线路**（`streamingUrls`，有序列表）：第 1 条为主线路，其余为备用。所有线路必须指向同一台 Emby 服务器（多条线路 = 到同一服务器的多条路由，而不是多台镜像服务器——转码会话存在服务器本地，跨镜像切换线路会导致 404）。
-
-- **代理模式**：按配置顺序优先使用 unknown / alive 线路；遇到连接拒绝、超时、TLS 等 transport error，或上游返回 502/503/504 时，将当前线路标记为 dead 并尝试下一条线路。404、500 等业务响应证明线路仍可达，会直接返回客户端而不误切线路。故障切换只发生在拿到可用响应之前，不会在响应 body 已开始传输后跨线路拼接媒体流。
-- **直连模式**：按线路健康状态选择，已知 dead 的线路不会用于 302。后台会对多条推流线路执行轻量存活探测；dead 状态不会仅因为时间经过而自动变回 alive。失败后有 60 秒冷却窗口，冷却到期后线路才允许再次被探测/恢复；当全部线路都 dead 时，当前 Redirect 请求会对符合条件的线路并发执行一次最长 5 秒的受控恢复探测，恢复成功后才重新返回 302，否则返回 502。302 发出后媒体流量不再经过 EIO，因此已开始播放后的链路中断仍由播放器自身重试。
-- **网络代理约束**：Redirect 是客户端直接连接推流地址，服务端 HTTP 网络代理无法参与该连接，因此 Redirect 上游不能同时配置 `proxyId`；管理面板会禁用并清空该选项，后端也会拒绝这种组合。Proxy 模式不受此限制。
-- 留空时与 `url`（前端地址）一致，行为与单条 `streamingUrl` 相同；旧 `streamingUrl` 单值配置继续兼容。
-
-### UA 伪装详解 (`spoofClient`)
-
-控制代理以什么客户端身份与上游服务器通信。影响登录、API 请求、健康检查和流媒体代理。
-
-| 值 | User-Agent | X-Emby-Client | 使用场景 |
-|----|-----------|----------------|---------|
-| `none` | 代理默认身份 | `Emby Aggregator` | 大多数服务器——无客户端限制 |
-| `passthrough` | 真实客户端 UA | 真实客户端值 | 有客户端白名单的服务器；首次无已捕获身份时延迟上游登录，等待真实客户端 |
-| `infuse` | `Infuse/7.7.1 (iPhone; iOS 17.4.1; Scale/3.00)` | `Infuse` | 仅允许 Infuse 的服务器 |
-| `hills` | `Hills/1.9.1 (android; 16)` | `Hills` | 使用 Hills 1.9.1 固定身份档案 |
-| `capyplayer` | `CapyPlayer/1.1.6` | `CapyPlayer` | 使用 CapyPlayer 1.1.6 固定身份档案 |
-| `custom` | 自定义值 | 自定义值 | 需要完全控制客户端标识的服务器 |
-
-Hills、CapyPlayer 预设采用实际客户端登录样本中的 UA 和固定身份档案：
-
-| 预设 | ClientVersion | DeviceName | 伪装 DeviceId |
-|------|---------------|------------|---------------|
-| `hills` | `1.9.1` | `fuxi` | `hills-spoof-id` |
-| `capyplayer` | `1.1.6` | `2211133C` | `capyplayer-spoof-id` |
-
-UA 保留样本原值，CapyPlayer 的 UA 不额外添加平台信息；DeviceId 使用 EIO 的固定伪装值，不复制真实客户端设备 ID。预设仅在对应上游选中后生效，不会自动切换已有配置，也不会随最近一次客户端登录而改变。HTTP UA、身份 Header 和支持端点的身份 Query 参数 由同一档案提供；内部真实设备识别与会话限制保持原行为。直连 302 后由客户端直接发出的播放请求仍可携带自身 UA。
-
-> **注**：V1.2 中的 `official` 模式已在 V1.3 中自动迁移为 `custom`，使用原 Emby Web 官方客户端的默认值。
->
-> **当前行为**：`custom` 模式下配置的 `User-Agent`、`X-Emby-Client`、`X-Emby-Client-Version`、`X-Emby-Device-Name`、`X-Emby-Device-Id` 会同时应用于上游登录认证、常规 API 请求、健康检查、图片代理和流媒体代理；管理面板保存后会持久化到配置文件，并在再次编辑时正确回填。
-
-#### Passthrough 模式工作原理
-
-Passthrough 的请求级客户端身份解析采用五级 fallback。需要注意：如果首次启动时只有第 5 级 `infuse-fallback`、尚未捕获任何真实客户端身份，用户名/密码型 passthrough 上游的初始登录和管理端连通性验证会主动延迟，而不是使用该 fallback 强行登录：
-
-1. **实时请求头** — 如果当前请求携带 `X-Emby-Client` 头（真正的 Emby 客户端），直接使用这些头。
-2. **当前 Token 的已捕获头** — 当真实客户端（Infuse、Emby iOS 等）登录 Emby-in-One 时，代理会按当前代理 Token 捕获并存储客户端的 `User-Agent`、`X-Emby-Client`、`X-Emby-Device-Name` 等头信息；后续仅由同一 Token 的请求复用。
-3. **该服务器上次成功的登录头** — 每台 passthrough 服务器成功登录时，使用的完整 headers 会被记住并持久化。重启后直接使用，无需等待用户重新登录。
-4. **最近捕获头** — 如果当前请求无 Token 且该服务器无历史成功记录，使用最近一次任意 Token 的已捕获头。
-5. **Infuse 兜底** — 如果没有任何已捕获的客户端头（如全新安装首次启动），使用 Infuse 身份作为安全默认值。
-
-捕获的头会叠加在 Infuse 基础 profile 之上，所以即使客户端没有发送所有 Emby 头字段（如某些第三方 App），也能呈现完整的客户端身份。
-
-当客户端登录时，所有离线的 passthrough 服务器会自动使用新捕获的头重新尝试登录。成功登录的 headers 按服务器维度持久化存储，重启后健康检查和重连均使用该服务器上次成功的 headers。代理 Token 被撤销时（例如登出、管理员改密/重置或删除用户触发撤销），其对应的按 Token 捕获头也会一并清理；代理 Token 本身不会按时间自动过期。
-
-### 元数据优先级 (`priorityMetadata`)
-
-当同一影片/集出现在多台服务器上时，代理需要选择一台服务器的元数据（标题、简介、图片）作为"主要"版本。选择规则如下：
-
-| 优先级 | 规则 | 原因 |
-|--------|------|------|
-| 1 | `priorityMetadata: true` 的服务器 | 手动指定的首选元数据源 |
-| 2 | 简介 (Overview) 包含中文字符 | 优先使用中文本地化元数据 |
-| 3 | 简介文本更长 | 更完整的描述优先 |
-| 4 | 服务器索引更小（配置中排序靠前） | 稳定的兜底规则 |
-
-此优先级仅影响显示哪个元数据——所有服务器的 MediaSource 版本始终保留，用户可自由选择。
-
-### 媒体合并策略
-
-合并按请求需要发现：浏览、搜索、季集或详情等请求处理当前遇到的候选，不在创建用户或首次启动时遍历所有服务器的全库。候选按原有交错顺序（Round-Robin）聚合，展示元数据仍遵循服务器优先级。
-
-| 内容类型 | 新合并依据 | 行为 |
-|---------|---------|------|
-| **电影** | 同类型作品身份 | 同一作品的全部已知版本归为一个条目 |
-| **剧集 (Series)** | 同类型作品身份 | 合并剧集层级 |
-| **季 (Seasons)** | 已证明为同一父剧＋明确季号 `IndexNumber` | 按上游季号对应 |
-| **集 (Episodes)** | 同一父剧＋明确季号和集号 | 同一单集的全部已知版本归组，不主动校正不同编排 |
-| **媒体库 (Views)** | — | 全部保留，追加服务器名后缀区分 |
-
-作品身份直接比较同一命名空间的 TMDB、IMDb、TVDB ID。任何共有 ID 冲突都拒绝新合并，即使另一个共有 ID 相同。两侧没有可直接比较的有效 ID 时，按完整名称＋年份兜底；英文 ASCII 字母转小写后精确比较，不做译名、标点、空格模糊匹配或联网 ID 映射。兜底所需名称/年份或季集所需编号缺失则保持独立。明确第 0 季有效，集号须为正整数。单集标题和年份不替代父剧身份，共有单集 ID 冲突仍拒绝新关系。
-
-时长不参与任何归组判断或候选索引；时长不同、未知或不可信均不单独阻止合并。每个版本保留自身的时长、画质、编码和音轨信息，不进行内容指纹或时间轴换算。同一上游的不同原始条目同样可以按身份规则合并：A 的 X 有 8 个版本、B 的 X 有 2 个版本，归组后保留 10 个具体来源定位；若作品身份冲突，各自保留 8 和 2 个版本。
-
-版本由服务器、原始 ItemID、MediaSourceID 共同定位；不同定位不因名称、画质或时长相同而删除。重复返回同一定位幂等，部分响应只补充版本，不删除已知成员。缺少媒体源时可以先确认身份，但不能伪造具体源路由。
-
-已保存关系不会因元数据变化主动拆开。请求遇到并证明归属后，旧拆分组可归并；旧 Virtual ID 保留为别名，历史证明及观看行保留。同一普通用户的同组成员共享已观看、收藏和原始续播位置；不同身份和不同用户隔离。列表、详情及 PlaybackInfo 按当前授权和实际返回来源汇总版本，明确选择始终路由到所选真实版本。
-
-保留既有请求范围、5000 候选上限及不新增三源间接冲突审计的边界。`ParentId` 路径仍按上游原始 item 的 `StartIndex/Limit/TotalRecordCount` 分页，原始计数不等于全局合并后的去重总数，本次没有扩展分页或统计功能。规则详见[媒体合并说明](docs/media-merge.md)，验证范围见[发布验证说明](docs/release-v1.4.9-validation.md)。
-
-### ID 虚拟化
-
-每个上游 Item ID 被映射为全局唯一的虚拟 ID——由 `crypto/rand` 生成的 16 字节（128 位）随机数构成，对外表现为 32 位小写十六进制字符串（不带连字符）。客户端看到的所有 ID 都是虚拟的。
-
-- **存储**：SQLite（WAL 模式）持久化，配合内存缓存加速访问
-- **映射关系**：`virtualId <-> { originalId, serverId }`，并额外持久化附加实例关系 `otherInstances`；`serverId` 是稳定服务器身份，不依赖配置中的排列顺序
-- **持久化**：重启后无需重新建立映射；主实例与附加实例关系都会恢复，旧版 `server_index` 数据会迁移到 `server_id`
-- **删除上游**：在当前配置中仍有已确认实例时，删除主实例或次实例均保留影片 Virtual ID 与共享观看状态，必要时提升幸存实例并迁移观看定位；只有没有剩余实例的孤立条目才会清理映射和观看行。解绑只改变用户授权可见性，详见[跨上游共享状态与改绑](#跨上游共享状态与改绑)
-
----
-
-## 媒体库资源数统计
-
-> V1.4.9 提供以下统计接口；Hills 携带语言参数的请求已完成兼容修复及用户验收。
-
-客户端通过已认证的 `GET /Items/Counts`（兼容 `/emby/Items/Counts`）读取统计。
-成功只返回三个非负整数：`MovieCount`、`SeriesCount`、`EpisodeCount`。
-普通用户按当前仍有效的服务器绑定与 Token 授权交集累计，管理员按全部当前配置服务器累计。
-只有在线服务器参与；首页隐藏的库仍包含在其所属服务器的统计内。
-
-每个服务器共用一份内存缓存，统计来自配置上游账号可见媒体范围的官方 Counts 接口。
-不同服务器上的重复影片逐源累计，不做去重、不输出第二组版本数，也不扫描媒体条目补数。
-这与媒体列表的合并展示口径不同。Hills 的六个显示位置不会让接口产生六种独立统计口径；带或不带 UserId 的请求仍返回同一范围的三个字段。
-
-后台在启动准备后初始化，每小时刷新。用户绑定实际改变会登记当前所选在线服务器的额外刷新；
-同源请求合并，全局最多两个采集 worker。客户端查看只读取缓存，不触发刷新、登录或探测，没有手动刷新接口。
-完整新成功值覆盖旧值；同账号的失败或限流不按缓存年龄清除旧成功值。
-删除服务器、改变账号或连接口径会隔离旧值；重新启动后缓存从空开始。
-
-Counts 普通失败后，后台先用同一上游 API/身份入口检查在线情况；确认在线才最多追加一次 Counts。
-明确限流或等待时不在该轮追加 Counts，并遵守 `Retry-After`；没有有效等待信息的 429 使用退避等待。
-这只约束统计刷新，不暂停客户端播放或其他既有业务；有权在线服务器没有完整当前缓存时返回整份 503。
-
-| 状态 | 客户端结果 |
+| 阅读任务 | 文档 |
 | --- | --- |
-| 有权在线服务器都有完整当前缓存 | 200，三项逐源总数 |
-| 无绑定或全部有权服务器明确离线 | 200，三项均为 0 |
-| 任一有权在线服务器缺完整缓存 | 503 `COUNTS_UNAVAILABLE`，没有部分计数 |
-| 生命周期清理/恢复未完成 | 503 `COUNTS_LIFECYCLE_PENDING` |
-| 未认证、Token 失效、用户删除或禁用 | 401 |
-| 指定其他用户或上游真实 UserId | 403 `COUNTS_USER_FORBIDDEN` |
-| 畸形、重复参数或空 UserId | 400 `INVALID_COUNTS_QUERY` |
-| 任意未支持过滤或选源参数 | 400 `COUNTS_FILTER_UNSUPPORTED` |
+| 安装与首次使用 | [安装](docs/installation.md) · [首次接入](docs/getting-started.md) |
+| 配置、用户与播放 | [配置参考](docs/configuration.md) · [用户与权限](docs/users-and-permissions.md) · [上游与播放](docs/playback-and-upstream.md) |
+| 备份、更新与排障 | [运维](docs/operations.md) · [排障](docs/troubleshooting.md) |
+| 合并规则与统计口径 | [媒体合并](docs/media-merge.md) · [媒体库统计](docs/media-counts.md) |
+| 全部文档与开发参考 | [文档索引](docs/README.md) · [开发与贡献](docs/development.md) |
 
-`UserId` 可以省略，或使用当前本地用户 ID / 兼容旧别名；旧别名仍表示当前 Token 用户。
-参数名大小写不敏感，重复的同族参数即使值相同也拒绝。
-`IsFavorite=true`、`false` 或空值均不支持；已观看、可续播、库选择、分页和任意额外参数也不支持，
-不会悄悄返回总数代替过滤结果。允许的身份元数据（包括 Hills 使用的 `X-Emby-Language`）只作本地消费，不转发或影响统计范围。
+### 安装后为什么还没有媒体？
 
-`HEAD` 执行相同校验并返回对应状态/JSON 长度，响应体为空；其他方法（含 OPTIONS）认证后返回 405，
-`Allow: GET, HEAD`。所有统计结果使用 `Cache-Control: private, no-store`，不发送 ETag/Last-Modified，不返回条件 304。
-本地结果不暴露上游凭据、服务器列表、原始错误正文或部分总数。
-详见[媒体库统计接口说明](docs/media-counts.md)与[发布验证说明](docs/release-v1.4.9-validation.md)。
+首次配置没有上游。添加可访问的 Emby 来源，再为普通用户授予访问权限；按[首次使用指南](docs/getting-started.md)完成接入。
 
-## 健康检查
+### 客户端连接哪个地址、使用哪个账户？
 
-- 每 60 秒（可通过 `timeouts.healthInterval` 配置）对所有上游服务器**并行**执行 `GET /System/Info/Public`，维护 API 上游 ONLINE / OFFLINE 状态
-- 配置多条 `streamingUrls` 时，同时维护独立的推流线路健康状态；transport error 与 502/503/504 视为线路不可用，404/500 等可达 HTTP 响应仍视为存活
-- 推流线路健康状态独立于 API 上游状态：某台 Emby 的 API 可以在线，但某条专用推流入口仍可能被标记为 dead 并从播放候选中排除
-- Passthrough 服务器优先使用该服务器上次成功登录的 headers（持久化存储），其次使用最近捕获的客户端头，避免被 nginx 拒绝
-- API 上游状态变化时记录日志（ONLINE → OFFLINE / OFFLINE → ONLINE）；配置 Reload 会保留未变化推流 URL 的既有健康状态，不会把已知 dead 线路重置为 unknown
-- 健康检查定时器在优雅关机（graceful shutdown）时自动清理
+连接 EIO 的客户端地址，默认 `http://服务器IP:8096`，使用 EIO 本地账户。管理面板位于 `/admin`；上游凭据用于 EIO 接入来源，账户区别见[首次使用](docs/getting-started.md#先分清三个账户)。
 
----
+### 为什么统计数字与合并后的列表不同？
 
-## 安全加固
+统计逐源累计官方电影、剧集和集数，重复作品也会累加；合并列表按作品规则归组。缓存及错误行为见[媒体库统计](docs/media-counts.md)。
 
-- **管理员明文密码启动即哈希化**：Go 后端在服务启动时自动把明文 `admin.password` 迁移为 scrypt 哈希格式，无需等待首次登录
-- **支持 CLI 重置密码**：
+### 忘记管理员密码怎么办？
 
-```bash
-emby-in-one --reset-password <new-password|-> [--force]
-# 或通过 SSH 菜单选择「修改管理员密码」（菜单会自动先停服务、重置、再启动）
-```
+管理员密码保存为不可逆哈希，不能查询原明文。通过 SSH 管理菜单或停服后的二进制 CLI 重置，随后重新登录客户端，操作见[密码重置](docs/operations.md#管理员密码重置)。
 
-  - 密码传 `-` 时**从 stdin 读取**，不进入进程列表（`ps`）也不进入 shell 历史——安装/管理脚本用的就是这个形式：`printf '%s' "$pass" | emby-in-one --reset-password -`
-  - 默认会先探测 `127.0.0.1:<config.yaml 里的 port>/System/Info/Public`：**只要服务还在运行就拒绝执行**，并提示先 `systemctl stop emby-in-one`（原因见下方说明）
-  - `--force` 跳过该探测；仅在明确知道自己在做什么时使用
-  - 重置时 `tokens.json` 以**原子写**方式清空（保留 `_proxyUserId`），不会再出现文件写坏导致服务起不来的情况；**所有已签发的代理 Token 随之失效**，客户端需要重新登录
+## 参与项目
 
-  > **为什么运行中必须拒绝**：运行中的实例把 token 存在内存里，会在下一次登录或登出时把整个 `tokens.json` 写回去——刚清掉的令牌会被原样恢复，重置等于没做。所以 CLI 宁可报错也不静默「重置失败」。Docker 部署请用 SSH 菜单，或按菜单失败时打印的命令手动执行（`docker compose ... run --rm -T emby-in-one /app/emby-in-one --reset-password - --force`）。
+欢迎通过 [Issues](https://github.com/Zkunlun/Emby-In-One/issues) 提交问题和兼容性反馈，通过 [Pull Request](https://github.com/Zkunlun/Emby-In-One/pulls) 参与改进。反馈请提供 EIO 与客户端版本、认证/播放模式、复现步骤和脱敏日志。
 
-- **`data/tokens.json` 权限更严格**：Unix/Linux 上按 `0600` 写入
-- **`config.yaml` 安全写入**：原子替换方式保存 + `0600` 权限，减少配置损坏风险并防止其他用户读取密码
-- **请求体大小限制**：所有 API 请求体限制 2MB（`http.MaxBytesReader`），防止恶意大请求消耗内存
-- **登录速率限制**：同一 IP 连续登录失败 5 次后锁定 15 分钟，返回 `429 Too Many Requests`；原子操作避免 TOCTOU 竞态条件；支持反向代理场景下的真实 IP 识别（`X-Real-IP` / `X-Forwarded-For` / IPv6）
-- **`trustProxy` 只在可信反代之后开启**：登录限流按 IP 计数，而 `server.trustProxy: true` 时服务端对来源**不做任何校验**就采信 `X-Real-IP` / `X-Forwarded-For` 的第一段。前面没有可信反向代理却开启它，等于把限流的键交给客户端——攻击者可以不断伪造 IP 绕过 5 次失败锁定，也可以定向锁死他人 IP。配置细节见[反向代理信任](#反向代理信任-trustproxy)
-- **图片端点免认证（已知取舍，非疏漏）**：`GET /Items/{itemId}/Images/{imageType}` **不要求 token**。原因是客户端会把图片 URL 内嵌进界面并长期缓存，若强制鉴权，token 轮换或缓存失效后客户端会大面积刷不出海报。它的安全性建立在**虚拟 ID 本身就是能力 URL** 之上：URL 里的 `itemId` 是 `crypto/rand` 生成的 128 位随机数，只有真正取到过该媒体元数据的用户才知道它，猜不出来。两点明确含义：(1) **任何拿到该 URL 的人都能取到那张图**，即使他没有 token——因此未认证请求不会经过 `AllowedServers` 白名单校验（已认证请求仍会正常校验）；(2) 取图时使用该上游的共享身份向上游请求。如需按用户签发、可撤销的图片访问控制，可改为短时效签名 URL
-- **优雅关机**：收到 `SIGINT` / `SIGTERM` 信号后，先排空当前活动连接（最多等待 10 秒），再关闭 HTTP 服务器和健康检查定时器
-- **管理面板 CSP**：Admin 面板返回严格的 `Content-Security-Policy`——`default-src 'self'`，且 `script-src` / `style-src` / `font-src` / `connect-src` 中不含任何第三方源、不含 `'unsafe-inline'`。Vue、lucide、Tailwind CSS 产物与 Inter 字体全部自托管于 `public/vendor/`，面板既不加载也不外连任何外部地址。仅保留 `'unsafe-eval'`（Vue 运行时编译 DOM 内模板所需）
-- **流媒体 URL 缓存自动淘汰**：`IDStore` 中的 `streamURLs` 缓存条目 4 小时后自动过期，每 30 分钟清理一次，防止长期运行后内存无限增长
-- **代理连通性测试 SSRF 防护**：管理面板的代理测试接口内置 DNS 重绑定防护，阻止请求连接到私有/保留 IP 地址（`127.x`、`10.x`、`172.16-31.x`、`192.168.x` 等）
-- **YAML 注释安全解析**：配置文件解析时正确处理引号内的 `#` 字符，不再错误截断含 `#` 的值
+开发环境、构建及验证入口见[开发指南](docs/development.md)。安全问题按[安全政策](SECURITY.md#reporting-a-vulnerability)私下报告。
 
----
+## 致谢与许可证
 
-## 日志系统
+感谢 [ArizeSky](https://github.com/ArizeSky) 创建原项目并完成早期架构与核心功能，感谢原项目及当前仓库的贡献者、问题反馈者和客户端测试参与者。原代码、设计与历史贡献归对应作者和贡献者所有；本仓库持续开发、维护和发布当前 Go 主线。
 
-### 日志级别
+原 Node.js V1.2.1 保留为[历史参考](legacy/README.md)，不参与当前 Go 构建；[旧版文档](README_V1.2.1.md)单独保留。贡献记录见 [GitHub Contributors](https://github.com/Zkunlun/Emby-In-One/graphs/contributors)。
 
-| 级别 | 输出位置 | 内容 |
-|------|---------|------|
-| DEBUG | 文件 | 所有请求详情、ID 解析、头信息 |
-| INFO | 文件 + 终端 | 登录、服务器状态、配置变更 |
-| WARN | 文件 + 终端 | 401/403 响应、服务器掉线 |
-| ERROR | 文件 + 终端 | 请求失败、登录失败、异常 |
-
-### 日志文件
-
-- 路径：`data/emby-in-one.log`（Release 部署在 `/opt/emby-in-one/data/`）
-- Docker 路径：`/app/data/emby-in-one.log`
-- 单文件最大 10MB，保留 3 个备份（`emby-in-one.log.1` ~ `.3`），自动轮转
-- 管理面板可下载和清空（清空会连同备份一起删除）
-
-### 日志配置
-
-默认日志级别为 `info`。排查故障时通过环境变量开启完整调试日志：
-
-```bash
-LOG_LEVEL=debug FILE_LOG_LEVEL=debug
-```
-
-Docker Compose 中设置：
-
-```yaml
-environment:
-  - LOG_LEVEL=debug
-  - FILE_LOG_LEVEL=debug
-  - LOG_MAX_SIZE_MB=10   # 单个日志文件上限（MB），默认 10
-  - LOG_KEEP=3           # 保留的轮转备份数，默认 3
-```
-
----
-
-## 管理面板
-
-访问 `http://your-ip:8096/admin`，使用配置文件中的 admin 账户登录。
-
-| 页面 | 功能 |
-|------|------|
-| **系统概览** | 在线服务器数、ID 映射数、存储引擎（SQLite） |
-| **上游节点** | 添加/编辑/删除/重连服务器，拖拽排序；显示已授权普通用户数并配置“同播数量限制” `maxConcurrent` |
-| **用户管理** | 创建、编辑、启用/禁用、删除普通用户，可视化配置可访问服务器 |
-| **网络代理** | HTTP/HTTPS 代理池管理，支持一键连通性测试 |
-| **全局设置** | 系统名称、默认播放模式、管理员账户、超时与宽恕期配置 |
-| **运行日志** | 实时日志查看，支持级别筛选（ERROR/WARN/INFO/DEBUG）、关键词搜索、下载原始日志文件、清空日志 |
-
-> 管理面板侧边栏底部显示当前运行版本号。对于 `spoofClient: passthrough` 的新增/编辑，如果当前没有已捕获的客户端身份，管理 API 仍会保存配置，但会返回 warning，并把该上游保留为 offline，等待真实客户端登录后自动重试。
-
-### 管理 API
-
-所有管理 API 需要认证（`X-Emby-Token` 头或 `api_key` 查询参数）。出于安全考虑，`/admin/api/*` 仅按同源方式开放，不为任意跨域来源返回放行头。
-
----
-
-## SSH 管理菜单
-
-安装脚本执行完成后，可直接使用：
-
-```bash
-emby-in-one
-```
-
-可执行：
-
-- 启动 / 重启 / 停止服务
-- 在线更新（最新版）/ 下载指定版本
-- 查看服务状态、公网 IP
-- 查看管理员凭据、修改管理员用户名 / 密码
-- 查看用户列表、添加普通用户、删除普通用户
-- 查看日志
-- 卸载服务（支持保留配置和数据）
-
-> SSH 菜单自动检测当前部署方式（Binary / Docker），所有操作自动分发到 systemd 或 Docker Compose 对应命令。Docker 模式下更新采用源码重建流程。菜单没有单独的「查看版本」选项——当前版本号直接显示在菜单标题栏上（形如 `Emby In One 管理菜单 v1.4.6`）。
-
----
-
-## 数据目录说明
-
-运行时目录：
-
-- `config/` — 保存配置文件 `config.yaml`
-- `data/` — 保存以下运行时数据：
-  - `mappings.db` — 虚拟 ID / 附加实例、用户 / 授权版本、观看历史与内部待清理日志；日志在清理成功后移除
-  - `tokens.json` — 代理层 token 及授权版本，认证仍核验当前用户存在、启用状态和版本
-  - `captured-headers.json` — passthrough 身份缓存，成功缓存按稳定服务器 ID 分隔并记录可确认的用户/服务器归属
-  - `emby-in-one.log` — 日志文件
-
-`data/` 的实际位置可以通过配置文件顶层的 [`dataDir`](#数据目录-datadir) 键改写。
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/admin/api/status` | 系统状态 |
-| GET | `/admin/api/upstream` | 列出上游服务器 |
-| POST | `/admin/api/upstream` | 添加上游服务器 |
-| PUT | `/admin/api/upstream/:id` | 修改上游服务器（使用稳定 `serverId`；兼容旧索引定位） |
-| DELETE | `/admin/api/upstream/:id` | 删除上游服务器；保留仍有其他实例的 Virtual ID，仅清理真正孤立的映射与关联状态 |
-| POST | `/admin/api/upstream/:id/reconnect` | 重连上游服务器 |
-| POST | `/admin/api/upstream/reorder` | 调整服务器顺序 |
-| GET | `/admin/api/proxies` | 列出代理 |
-| POST | `/admin/api/proxies` | 添加代理 |
-| POST | `/admin/api/proxies/test` | 测试代理连通性 |
-| DELETE | `/admin/api/proxies/:id` | 删除代理 |
-| GET | `/admin/api/settings` | 获取全局设置 |
-| PUT | `/admin/api/settings` | 修改全局设置 |
-| GET | `/admin/api/logs?limit=500` | 获取内存日志 |
-| GET | `/admin/api/logs/download` | 下载持久化日志文件 |
-| DELETE | `/admin/api/logs` | 清空日志 |
-| GET | `/admin/api/client-info` | 获取已捕获的客户端信息 |
-| GET | `/admin/api/users` | 列出所有普通用户 |
-| POST | `/admin/api/users` | 创建普通用户 |
-| PUT | `/admin/api/users/:id` | 修改普通用户 |
-| DELETE | `/admin/api/users/:id` | 删除普通用户（自动清除观看数据） |
-| POST | `/admin/api/logout` | 管理员登出 |
-
----
-
-## 常见问题
-
-### Passthrough 服务器登录失败 (403)
-
-首次安装且没有任何真实客户端身份记录时，使用用户名/密码认证的 `passthrough` 上游会**跳过初始登录并保持 offline**，等待真实客户端身份；不会直接拿 Infuse fallback 去完成首次上游登录：
-1. 用真实 Emby 客户端（Infuse、Emby iOS 等）以 **admin** 身份登录一次 Emby-In-One
-2. 代理捕获客户端身份后，会自动重试离线的 passthrough 上游
-3. 成功登录后，该服务器使用的客户端身份会持久化，后续重启可直接复用
-4. 日志中的身份来源可用于排查，例如 `last-success` 表示该服务器上次成功身份，捕获来源表示真实客户端身份；`infuse-fallback` 仍是内部身份解析的最终兜底，但初始登录/管理端验证在只有该兜底时会主动延迟
-5. 如果捕获的客户端身份仍被上游拒绝，请改用上游允许的客户端重新以 admin 登录一次以更新身份
-
-### 上游服务器显示离线 / 登录超时
-
-`timeouts.login`（默认 30 秒）与 `timeouts.healthCheck`（默认 30 秒）此前未真正生效——所有请求都继承 `timeouts.api`。现在两者已生效，升级后如遇上游突然显示离线，多半是这个原因：
-
-- 上游登录耗时超过 `timeouts.login` 即判为登录失败 → 服务器显示离线。登录较慢（10–30 秒）的上游请在「全局设置」调大该值
-- 健康检查探测只针对**已离线**的服务器，受 `timeouts.healthCheck` 约束；超时只是"本轮未恢复"，下一轮会重试，不会把在线服务器误判为离线
-- 这两个值只能把超时收紧到 `timeouts.api` 以下；若要放宽探测，需同时调大 `api`
-- 启动日志里出现 `Timeouts are now enforced` 即表示你的配置中这两个值小于 `api`
-
-### 客户端 UA 采集与清理
-
-真实 Emby 客户端登录成功且携带可用身份头时，管理员和普通用户都可产生 token 范围的 UA / Device 捕获；管理面板登录未必提供这些身份字段。捕获不会改变用户对上游的授权，也不会覆盖选定的固定伪装预设。
-
-可使用目标客户端登录 EIO，并在管理面板「已捕获的客户端信息」确认记录。passthrough 的成功身份缓存按稳定服务器 ID 分隔；改绑、删除、禁用或改密码会清理相关捕获并阻止旧异步结果重新发布。若旧数据归属无法确认，相关清理会保守移除，需要重新登录采集。
-
-### 播放 403 / 401
-
-可能的原因：
-- 上游 token 过期 → 在管理面板点击「重连」
-- passthrough 服务器的头不完整 → 查看日志中 `Stream headers for [服务器名]` 确认头信息
-- 多合一合并后的版本切换 → MediaSourceId 会自动解析到正确的上游服务器
-
-### 首页加载慢 / 媒体库不全
-
-- 默认搜索宽恕期 3 秒——收到第一个服务器的结果后，最多再等 3 秒让其余服务器响应；超时服务器的数据会在后台静默补全
-- 如果上游服务器网络延迟普遍较高，可在管理面板「全局设置」或 `config.yaml` 的 `timeouts` 中调大 `searchGracePeriod`、`metadataGracePeriod`
-- `latestGracePeriod` 默认为 0（等待全部服务器），如首页"最新添加"加载慢可设为正数
-- 查看日志中 `timeout` 或 `abort` 关键词
-- 也可适当调大 `api`（单次请求超时）和 `global`（聚合总超时）值
-
-### 忘记管理员密码
-
-管理员密码在首次启动后自动加密存储（scrypt 哈希）。重置方法：
-
-**方法一：编辑配置文件**
-1. 编辑 `config/config.yaml`，将 `password:` 后的哈希值改为新的明文密码
-2. 重启服务，系统自动将明文密码转为加密格式
-
-**方法二：SSH 管理菜单**
-```bash
-emby-in-one
-# 选择"修改密码"选项
-```
-
-### 反向代理用户登录被限速 (429)
-
-如果所有用户在 5 次登录失败后都收到 `429 Too Many Requests`，说明 `trustProxy` 未开启：
-1. 在 `config.yaml` 的 `server` 段添加 `trustProxy: true`
-2. 重启服务
-3. 确认反向代理**覆写**了 `X-Real-IP` 或 `X-Forwarded-For` 头——用追加语义的 `$proxy_add_x_forwarded_for` 会让客户端可以伪造 IP（既能绕过限流，也能定向锁死他人），详见[反向代理信任](#反向代理信任-trustproxy)
-
-### Docker 容器无法访问上游服务器
-
-- 检查上游 URL 是否使用了 `localhost` → 容器内 localhost 指向容器本身，应改为宿主机 IP 或域名
-- 如需访问宿主机服务，使用 `host.docker.internal`（Docker Desktop）或宿主机实际 IP
-
----
-
-## 免责声明
-
-> **注意**：本项目通过模拟 Emby 客户端行为与上游服务器通信，存在被上游或相关平台识别并封禁账号/API Key 的风险。使用本项目即表示您已自行承担上述风险，对于因使用不当或上游政策调整导致的封号及数据损失，作者不承担任何责任。
-
----
-
-## 项目架构 (供开发者查阅)
-
-```text
-Emby-In-One/
-├── cmd/emby-in-one/
-│   └── main.go                     # 程序入口
-├── internal/backend/
-│   ├── config.go                   # YAML 配置加载/保存/校验/原子写入
-│   ├── server.go                   # HTTP 服务器启动与优雅关机
-│   ├── routes.go                   # 路由注册总表（URL → Handler 映射）
-│   ├── middleware.go               # HTTP 中间件（CORS、日志、状态码捕获、CSP）
-│   ├── ssrf.go                     # SSRF 防护策略与安全拨号器（代理测试 / 上游连接）
-│   ├── auth.go                     # 代理 Token 签发与校验
-│   ├── auth_context.go             # 请求级认证上下文注入与提取
-│   ├── auth_manager.go             # 上游认证管理（登录/Session/API Key）
-│   ├── identity.go                 # 客户端身份捕获与 Passthrough 五级解析
-│   ├── identity_persistence.go     # 客户端身份按服务器维度持久化
-│   ├── identity_lifecycle.go       # 身份缓存归属、迁移与异步发布栅栏
-│   ├── user_store.go               # 多用户存储（CRUD、密码哈希、内存索引 + SQLite）
-│   ├── handlers_admin.go           # 管理后台 API 处理器（上游服务器增删改查）
-│   ├── handlers_system.go          # 系统信息接口（/System/Info）
-│   ├── handlers_user.go            # 用户登录限速与用户相关接口处理器
-│   ├── admin_validation.go         # 管理后台输入校验与辅助工具
-│   ├── idstore.go                  # SQLite 双向 ID 映射（虚拟 ID ↔ 原始 ID）
-│   ├── id_rewriter.go              # 递归 ID 虚拟化/反虚拟化重写
-│   ├── query_ids.go                # 批量查询 ID 解析
-│   ├── media.go                    # 媒体聚合、去重、元数据优先级选择
-│   ├── aggregation.go              # 通用聚合框架（宽恕期 + 后台静默补全）
-│   ├── media_access.go             # 当前授权实例与观看查询快照
-│   ├── media_request_access.go     # 请求级来源、媒体版本与归属校验
-│   ├── media_items.go              # 媒体条目查询（多上游扇出合并）
-│   ├── media_resume.go             # "继续观看"接口代理与多上游合并
-│   ├── media_nextup.go             # "接下来观看"接口代理与多上游合并
-│   ├── media_playback.go           # PlaybackInfo 与用户/上游单设备 lease 预留
-│   ├── media_stream.go             # 视频/音频流代理（虚拟 ID 路由解析）
-│   ├── library_image.go            # 图片代理（缓存头）
-│   ├── series_userdata.go          # 系列级观看历史隔离（Resume/NextUp）
-│   ├── session_userdata.go         # Sessions/Playing 进度上报
-│   ├── watch_store.go              # 每用户观看进度存储与持久化
-│   ├── watch_visible_store.go      # 授权先过滤的批量观看查询
-│   ├── watch_lifecycle.go          # 管理事务、待清理日志与启动恢复
-│   ├── watch_lifecycle_runtime.go  # 精确缓存/lease清理与删除后继承
-│   ├── watch_lifecycle_requests.go # 认证与异步状态发布的请求守卫
-│   ├── watch_playback_store.go     # 播放事件的原子观看状态合并
-│   ├── playback_watch_state.go     # 播放字段解析、来源匹配与完成判定
-│   ├── playback_watch_cache.go     # 有界会话时长、位置缓存与终止状态
-│   ├── playback_watch_owner.go     # 用户/合并影片共享写入权与代际
-│   ├── playback_watch_events.go    # 播放上报接入、元数据补齐与手动重置
-│   ├── playback_watch_legacy.go    # 旧 PlayingItems 播放上报兼容
-│   ├── playback_limiter.go         # 用户/上游单设备 lease（revision、心跳、exact Stop）
-│   ├── playback_routes.go          # 用户归属的播放路由与媒体源会话
-│   ├── login_limiter.go            # 登录失败限流（按 IP；容量满时逐出最旧记录）
-│   ├── streamproxy.go              # HTTP 流代理（背压、HLS 相对路径重写）
-│   ├── fallback_proxy.go           # 兜底路由：扫描 URL/Query 中的虚拟 ID
-│   ├── healthcheck.go              # 并行健康检查
-│   ├── logger.go                   # 分级日志（Console + File 双输出 + 轮转）
-│   ├── scrypt_local.go             # 管理员密码 scrypt 加密
-│   ├── sqlite_cgo.go               # CGO 嵌入式 SQLite 编译与底层绑定
-│   └── upstream.go                 # 上游连接池 & 并发请求编排
-├── third_party/sqlite/             # SQLite CGO 源码依赖
-├── public/
-│   ├── embed.go                    # go:embed 指令（将 admin.html、admin.js 与 vendor/ 编译进二进制）
-│   ├── admin.html                  # Vue 3 + Tailwind CSS 管理面板模板
-│   ├── admin.js                    # Vue 3 应用逻辑（从 admin.html 拆分）
-│   └── vendor/                     # 自托管前端依赖：Vue、lucide、Tailwind 产物、Inter 字体
-├── assets/panel.css                # Tailwind 输入文件（含从 admin.html 迁出的面板自定义样式）
-├── tailwind.config.js              # Tailwind 扫描配置（改动 admin.html/admin.js 后跑 npm run build:panel）
-├── package.json                    # 根 package.json 仅保留 build:panel 一个脚本（Node 依赖已移至 legacy/）
-├── Dockerfile                      # Go 环境容器构建
-├── docker-compose.yml
-├── install.sh                      # 源码仓库一键部署脚本（Docker）
-├── release-install.sh              # Release 二进制一键部署脚本（systemd）
-├── emby-in-one-cli.sh              # SSH 终端管理面板脚本
-└── legacy/                         # V1.2.1 Node.js 遗留实现：仅供对照参考，不参与构建 / 镜像 / 安装
-    ├── README.md                   #   保留原因与「不参与任何构建」的说明
-    ├── src/                        #   旧 Express 实现（Go 版 ID 虚拟化的对照参考）
-    ├── tests/                      #   旧 Node 测试（多数已失效）
-    └── package.json                #   Node 依赖（只有 npm --prefix legacy install 才会用到）
-```
-
----
-
-## 开发与贡献
-
-当前主线为 Go 实现。欢迎通过 Issues 提交可复现的问题、兼容性反馈和功能建议，也欢迎通过 Pull Request 参与修复与改进。
-
-提交代码时建议遵循以下原则：
-
-- Bug 修复尽量附带能够覆盖根因的回归测试，避免只针对单一客户端现象打补丁。
-- 保持修改范围聚焦，避免在同一个 PR 中混入无关的架构调整或格式化变更。
-- 提交前至少运行与修改范围相关的测试；涉及后端公共行为时建议执行 `go test ./...`。
-- 涉及管理面板时同时检查前端资源构建与内嵌资源是否一致；涉及安装或发布流程时同步核对版本号、安装脚本和 Release workflow。
-- 客户端兼容问题应尽量附带请求路径、响应差异、日志或可复现步骤，便于定位 Emby API 行为差异。
-
----
-
-## 与原项目的关系
-
-Emby-In-One 最初由 [ArizeSky](https://github.com/ArizeSky) 创建，原项目仓库为 [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One)。本仓库在原项目基础上继续开发与维护，并延续其多 Emby 聚合代理的核心设计。
-
-当前仓库不是对原仓库的简单镜像：后续的兼容性修复、功能维护、版本发布和现行 Go 主线以 [Zkunlun/Emby-In-One](https://github.com/Zkunlun/Emby-In-One) 为准。原项目已有代码、设计与历史贡献仍归对应作者和贡献者所有。
-
-原 Node.js V1.2.1 实现保留在 [`legacy/`](legacy/) 中用于历史参考，不参与当前 Go 版本的构建、镜像或安装。需要使用 V1.2.1 时，请参考原项目的历史 Release；当前维护版本请使用本仓库 Releases。
-
-本项目继续按照 **GNU General Public License v3.0** 发布，修改和再分发请遵守 GPL-3.0 的相关要求。
-
----
-
-## Credits / 致谢
-
-- 感谢 [ArizeSky](https://github.com/ArizeSky) 创建 Emby-In-One，并完成项目早期架构与核心功能。
-- 感谢原项目及当前仓库的所有贡献者、Issue 提交者和客户端兼容性测试参与者。
-- 当前仓库的贡献记录可通过 [GitHub Contributors](https://github.com/Zkunlun/Emby-In-One/graphs/contributors) 与提交历史查看。
-
----
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=Zkunlun/Emby-In-One&type=Date)](https://star-history.com/#Zkunlun/Emby-In-One&Date)
-
----
-
-## 许可证
-
-GNU General Public License v3.0
+本项目按 **GNU General Public License v3.0** 发布，修改和再分发请遵守 [GPL-3.0](LICENSE)。
