@@ -1,5 +1,7 @@
 # V1.4.9 验证范围 / Validation scope
 
+[项目主页](../README.md) · [文档索引](README.md) · [English](en/release-v1.4.9-validation.md)
+
 业务源码部署及用户验收日期：2026-10-06。发布准备沿用已验收的262个Go输入，未修改运行逻辑；文档和打包补充在发布前单独核对。
 
 ## 已有证据
@@ -25,6 +27,4 @@
 
 ## English summary
 
-The business source was deployed and accepted on 2026-10-06. Historical ordinary regression, limited race, counts compatibility and isolated HTTP/storage tests establish the stated scope. User acceptance does not expand coverage to untested pagination, recovery or every client.
-
-Go1.23.12 checks account for all 658 top-level tests and 2066 unique test nodes across disjoint completed groups. An initial read-only workspace failure and a later 15-minute timeout were retained as unsuccessful attempts; incomplete roots were rerun in full. Vet, the versioned static amd64 build, 44 panel contracts, stylesheet regeneration, script syntax and Actions configuration checks passed. Ordinary CI and Release tests use a 45-minute package budget. The dynamic development candidate is retained separately. Full race was not run. Counts remain three per-upstream sums; candidate caps, raw ParentId paging and deferred CapyPlayer counts work remain unchanged.
+Read the [full English documentation](en/release-v1.4.9-validation.md) for complete instructions, behavior and limits.
