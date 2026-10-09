@@ -60,6 +60,7 @@ func (a *App) commitPlaybackInfoLease(lease *playbackInfoLeaseReservation, itemI
 }
 
 func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(withSampleSource(r.Context(), sampleSourcePlayback))
 	resolved, routeOK := a.resolveRequestRouteID(w, r, r.PathValue("itemId"))
 	if !routeOK {
 		return
