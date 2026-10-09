@@ -1223,7 +1223,7 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 		return nil, &redactedError{err: doErr}
 	}
 	if sampleSpan != nil && resp.Body != nil {
-		resp.Body = &sampleBodyCapture{ReadCloser: resp.Body, span: sampleSpan, status: resp.StatusCode}
+		resp.Body = &sampleBodyCapture{ReadCloser: resp.Body, span: sampleSpan, status: resp.StatusCode, expected: resp.ContentLength}
 	} else if sampleSpan != nil {
 		sampleSpan.Finish(resp.StatusCode, 0, nil)
 	}
