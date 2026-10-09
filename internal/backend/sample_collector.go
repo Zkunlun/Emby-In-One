@@ -759,6 +759,19 @@ func (a *App) handleAdminSampleStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	body.User = strings.TrimSpace(body.User)
+	if body.User != "" {
+		if a.UserStore == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "sample target user is unavailable"})
+			return
+		}
+		user := a.UserStore.GetByUsername(body.User)
+		if user == nil || !user.Enabled {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "sample target user not found or disabled"})
+			return
+		}
+		body.User = user.Username
+	}
 	status, err := a.SampleCollector.Start(body.Label, body.User)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "status": a.SampleCollector.Status()})
