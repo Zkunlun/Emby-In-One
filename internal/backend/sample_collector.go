@@ -613,6 +613,14 @@ func samplePathClass(path string) string {
 	if len(segments) > 0 && strings.EqualFold(segments[0], "emby") {
 		segments = segments[1:]
 	}
+	// Subtitle/attachment stream routes may carry a MediaSourceId as the segment
+	// immediately after the item id. It is a dynamic identifier even when the
+	// upstream uses a short human-readable value rather than a UUID/hex id.
+	if len(segments) >= 4 &&
+		(strings.EqualFold(segments[0], "Videos") || strings.EqualFold(segments[0], "Audio")) &&
+		(strings.EqualFold(segments[3], "Subtitles") || strings.EqualFold(segments[3], "Attachments")) {
+		segments[2] = "{mediaSourceId}"
+	}
 	for i := range segments {
 		if i == 0 {
 			continue
