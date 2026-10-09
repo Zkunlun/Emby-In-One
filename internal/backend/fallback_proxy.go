@@ -325,7 +325,8 @@ func decodeFallbackBody(r *http.Request) (any, error) {
 
 func (a *App) performUpstreamRequest(r *http.Request, client *UpstreamClient, method, path string, query url.Values, body any) (*http.Response, error) {
 	reqCtx := requestContextFrom(r.Context())
-	return client.doRequest(r.Context(), reqCtx, method, path, query, body, client.requestHeaders(reqCtx, a.Identity), false)
+	ctx := withSampleSource(r.Context(), sampleSourceFallback)
+	return client.doRequest(ctx, reqCtx, method, path, query, body, client.requestHeaders(reqCtx, a.Identity), false)
 }
 
 // playbackLimiterKey reports whether the single-device playback lease applies to
