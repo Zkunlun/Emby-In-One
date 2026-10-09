@@ -58,6 +58,7 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 		if result.CompleteItems == nil {
 			result.CompleteItems = map[string]bool{}
 		}
+		quality := sampleMergeQuality(result.Items)
 		missing := []string{}
 		seen := map[string]bool{}
 		for _, item := range result.Items {
@@ -72,7 +73,9 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 				seen[id] = true
 			}
 		}
-		metadata := a.fetchEncounteredMergeMetadata(ctx, reqCtx, client, missing)
+		quality["need_metadata_hydrate"] = len(missing)
+		quality["metadata_hydrate_batches"] = (len(missing) + maxBatchIDCount - 1) / maxBatchIDCount
+		metadata := a.fetchEncounteredMergeMetadata(withSampleSource(ctx, sampleSourceHydrate), reqCtx, client, missing)
 		for _, item := range result.Items {
 			id, _ := item["Id"].(string)
 			if data := metadata[id]; data != nil {
@@ -111,7 +114,10 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 				missing = append(missing, parentID)
 			}
 		}
-		for id, item := range a.fetchEncounteredMergeMetadata(ctx, reqCtx, client, missing) {
+		quality["need_parent_hydrate"] = len(missing)
+		quality["parent_hydrate_batches"] = (len(missing) + maxBatchIDCount - 1) / maxBatchIDCount
+		a.SampleCollector.RecordMergeQuality(reqCtx, client.Name, quality)
+		for id, item := range a.fetchEncounteredMergeMetadata(withSampleSource(ctx, sampleSourceParentHydrate), reqCtx, client, missing) {
 			if parent := newMergeSeriesEvidence(result.ServerID, item); parent != nil {
 				result.Parents[id] = parent
 			}
