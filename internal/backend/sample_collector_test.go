@@ -196,3 +196,64 @@ func TestSampleCollectorTargetUserIsolation(t *testing.T) {
 		t.Fatalf("targeted peaks = %+v", final)
 	}
 }
+
+
+func TestAdminSampleCaptureControlsValidateTargetUser(t *testing.T) {
+	withTempApp(t, func(app *App, handler http.Handler) {
+		adminToken := loginToken(t, handler, "secret")
+		create := doJSONRequest(t, handler, http.MethodPost, "/admin/api/users", map[string]any{
+			"username": "test",
+			"password": "test-password",
+			"enabled": true,
+			"allowedServers": []string{},
+		}, adminToken)
+		if create.Code != http.StatusCreated && create.Code != http.StatusOK {
+			t.Fatalf("create sample user: status=%d body=%s", create.Code, create.Body.String())
+		}
+
+		bad := doJSONRequest(t, handler, http.MethodPost, "/admin/api/samples/start", map[string]any{
+			"label": "bad-target", "user": "missing-user",
+		}, adminToken)
+		if bad.Code != http.StatusBadRequest {
+			t.Fatalf("missing target start status=%d body=%s", bad.Code, bad.Body.String())
+		}
+
+		start := doJSONRequest(t, handler, http.MethodPost, "/admin/api/samples/start", map[string]any{
+			"label": "test-target", "user": "test",
+		}, adminToken)
+		if start.Code != http.StatusOK {
+			t.Fatalf("sample start status=%d body=%s", start.Code, start.Body.String())
+		}
+		var started sampleStatus
+		if err := json.Unmarshal(start.Body.Bytes(), &started); err != nil {
+			t.Fatal(err)
+		}
+		if !started.Active || started.TargetUser != "test" || started.File == "" {
+			t.Fatalf("start status=%+v", started)
+		}
+
+		statusRR := doJSONRequest(t, handler, http.MethodGet, "/admin/api/samples/status", nil, adminToken)
+		if statusRR.Code != http.StatusOK {
+			t.Fatalf("sample status=%d body=%s", statusRR.Code, statusRR.Body.String())
+		}
+		var status sampleStatus
+		if err := json.Unmarshal(statusRR.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		if !status.Active || status.SessionID != started.SessionID || status.TargetUser != "test" {
+			t.Fatalf("status=%+v started=%+v", status, started)
+		}
+
+		stop := doJSONRequest(t, handler, http.MethodPost, "/admin/api/samples/stop", nil, adminToken)
+		if stop.Code != http.StatusOK {
+			t.Fatalf("sample stop=%d body=%s", stop.Code, stop.Body.String())
+		}
+		var stopped sampleStatus
+		if err := json.Unmarshal(stop.Body.Bytes(), &stopped); err != nil {
+			t.Fatal(err)
+		}
+		if stopped.Active {
+			t.Fatalf("stop status=%+v", stopped)
+		}
+	})
+}
