@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,9 @@ import (
 )
 
 const (
+	sampleCaptureBufferSize = 256 << 10
+	sampleCaptureMaxBytes   = 64 << 20
+
 	sampleSourceClient        = "client"
 	sampleSourceHydrate       = "hydrate"
 	sampleSourceParentHydrate = "parent_hydrate"
@@ -68,13 +72,16 @@ type SampleCollector struct {
 
 	dataDir   string
 	file      *os.File
+	writer    *bufio.Writer
 	filePath  string
 	sessionID string
 	label      string
 	targetUser string
 	startedAt  time.Time
-	events    int64
-	dropped   int64
+	events       int64
+	dropped      int64
+	writtenBytes int64
+	truncated    bool
 
 	inboundActive  int
 	inboundPeak    int
@@ -117,6 +124,8 @@ type sampleStatus struct {
 	File                   string         `json:"file,omitempty"`
 	Events                 int64          `json:"events"`
 	Dropped                int64          `json:"dropped"`
+	Bytes                  int64          `json:"bytes"`
+	Truncated              bool           `json:"truncated"`
 	InboundActive          int            `json:"inboundActive"`
 	InboundPeak            int            `json:"inboundPeak"`
 	OutboundActive         int            `json:"outboundActive"`
@@ -169,9 +178,11 @@ func (c *SampleCollector) Start(label string, targetUsers ...string) (sampleStat
 		return sampleStatus{}, err
 	}
 	if c.file != nil {
+		if c.writer != nil { _ = c.writer.Flush() }
 		_ = c.file.Close()
 	}
 	c.file = file
+	c.writer = bufio.NewWriterSize(file, sampleCaptureBufferSize)
 	c.filePath = path
 	c.sessionID = sessionID
 	c.label = sanitizeSampleLabel(label)
@@ -180,6 +191,8 @@ func (c *SampleCollector) Start(label string, targetUsers ...string) (sampleStat
 	c.startedAt = now
 	c.events = 0
 	c.dropped = 0
+	c.writtenBytes = 0
+	c.truncated = false
 	c.inboundActive = 0
 	c.inboundPeak = 0
 	c.outboundActive = 0
@@ -211,9 +224,13 @@ func (c *SampleCollector) Stop() sampleStatus {
 			SessionID: c.sessionID,
 			Label:     c.label,
 		})
+		if c.writer != nil {
+			if err := c.writer.Flush(); err != nil { c.dropped++; c.truncated = true }
+		}
 		_ = c.file.Sync()
 		_ = c.file.Close()
 		c.file = nil
+		c.writer = nil
 	}
 	c.inboundActive = 0
 	c.outboundActive = 0
@@ -259,6 +276,8 @@ func (c *SampleCollector) statusLocked() sampleStatus {
 		File:                   file,
 		Events:                 c.events,
 		Dropped:                c.dropped,
+		Bytes:                  c.writtenBytes,
+		Truncated:              c.truncated,
 		InboundActive:          c.inboundActive,
 		InboundPeak:            c.inboundPeak,
 		OutboundActive:         c.outboundActive,
@@ -268,7 +287,7 @@ func (c *SampleCollector) statusLocked() sampleStatus {
 }
 
 func (c *SampleCollector) writeEventLocked(event sampleEvent) {
-	if c.file == nil {
+	if c.file == nil || c.writer == nil {
 		return
 	}
 	data, err := json.Marshal(event)
@@ -277,10 +296,17 @@ func (c *SampleCollector) writeEventLocked(event sampleEvent) {
 		return
 	}
 	data = append(data, '\n')
-	if _, err := c.file.Write(data); err != nil {
+	if c.writtenBytes+int64(len(data)) > sampleCaptureMaxBytes {
 		c.dropped++
+		c.truncated = true
 		return
 	}
+	if _, err := c.writer.Write(data); err != nil {
+		c.dropped++
+		c.truncated = true
+		return
+	}
+	c.writtenBytes += int64(len(data))
 	c.events++
 }
 
@@ -306,6 +332,9 @@ func (c *SampleCollector) ExportPath() (string, bool) {
 		return "", false
 	}
 	if c.file != nil {
+		if c.writer != nil {
+			if err := c.writer.Flush(); err != nil { c.dropped++; c.truncated = true }
+		}
 		_ = c.file.Sync()
 	}
 	if _, err := os.Stat(c.filePath); err != nil {
