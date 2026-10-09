@@ -141,8 +141,9 @@ func (c *SampleCollector) Enabled() bool {
 
 func sanitizeSampleLabel(label string) string {
 	label = strings.TrimSpace(label)
-	if len(label) > 64 {
-		label = label[:64]
+	runes := []rune(label)
+	if len(runes) > 64 {
+		label = string(runes[:64])
 	}
 	return label
 }
@@ -191,6 +192,7 @@ func (c *SampleCollector) Start(label string, targetUsers ...string) (sampleStat
 		Event:     "session_start",
 		SessionID: sessionID,
 		Label:     c.label,
+		User:      c.targetUser,
 	})
 	return c.statusLocked(), nil
 }
@@ -361,7 +363,9 @@ func (s *sampleInboundSpan) Finish(status int, responseBytes int64, routePattern
 		return
 	}
 	path := s.path
-	if strings.TrimSpace(routePattern) != "" {
+	routePattern = strings.TrimSpace(routePattern)
+	if routePattern != "" && routePattern != "/" {
+		if _, rest, ok := strings.Cut(routePattern, " "); ok { routePattern = rest }
 		path = routePattern
 	}
 	c.writeEventLocked(sampleEvent{
@@ -577,6 +581,9 @@ func samplePathClass(path string) string {
 	if len(segments) == 0 {
 		return "/"
 	}
+	if len(segments) > 0 && strings.EqualFold(segments[0], "emby") {
+		segments = segments[1:]
+	}
 	for i := range segments {
 		if i == 0 {
 			continue
@@ -598,9 +605,25 @@ func samplePathClass(path string) string {
 			default:
 				segments[i] = "{itemId}"
 			}
+		default:
+			if sampleOpaqueHexID(segments[i]) {
+				segments[i] = "{id}"
+			}
 		}
 	}
 	return "/" + strings.Join(segments, "/")
+}
+
+func sampleOpaqueHexID(value string) bool {
+	if len(value) < 16 {
+		return false
+	}
+	for _, r := range value {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func sampleQueryValue(values url.Values, wanted string) string {
