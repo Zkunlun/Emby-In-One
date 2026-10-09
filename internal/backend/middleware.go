@@ -18,6 +18,7 @@ type statusCapture struct {
 	http.ResponseWriter
 	status int
 	wrote  bool
+	bytes  int64
 }
 
 func (sc *statusCapture) WriteHeader(code int) {
@@ -33,7 +34,9 @@ func (sc *statusCapture) Write(b []byte) (int, error) {
 		sc.status = http.StatusOK
 		sc.wrote = true
 	}
-	return sc.ResponseWriter.Write(b)
+	n, err := sc.ResponseWriter.Write(b)
+	sc.bytes += int64(n)
+	return n, err
 }
 
 func (sc *statusCapture) Flush() {
@@ -88,8 +91,19 @@ func (a *App) loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		tokenSource := identifyTokenSource(r)
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK}
+		var sampleSpan *sampleInboundSpan
+		if a.SampleCollector != nil && a.SampleCollector.Enabled() {
+			traceID := randomHex(8)
+			user := ""
+			if info := a.Auth.ValidateToken(extractToken(r)); info != nil { user = info.Username }
+			sampleSpan = a.SampleCollector.BeginInbound(traceID, user, r.Method, r.URL.Path, r.URL.Query())
+			if sampleSpan != nil {
+				r = r.WithContext(withSampleTrace(r.Context(), traceID))
+			}
+		}
 		a.Logger.Debugf("→ %s %s [auth:%s]", r.Method, r.URL.Path, tokenSource)
 		next.ServeHTTP(sc, r)
+		if sampleSpan != nil { sampleSpan.Finish(sc.status, sc.bytes, r.Pattern) }
 		ms := time.Since(start).Milliseconds()
 		msg := fmt.Sprintf("%s %s → %d (%dms) [auth:%s]", r.Method, r.URL.Path, sc.status, ms, tokenSource)
 		switch {

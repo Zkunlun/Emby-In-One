@@ -84,7 +84,14 @@ func (c *UpstreamClient) probeSelectedStreamBases(ctx context.Context, bases []s
 			default:
 			}
 			generation := c.beginStreamBaseObservation(base)
-			if probeOneStreamBase(ctx, client, strings.TrimRight(base, "/")+streamLivenessProbePath) {
+			var sampleSpan *sampleOutboundSpan
+			if c.sampleCollector != nil && c.sampleCollector.Enabled() {
+				sampleSpan = c.sampleCollector.BeginOutbound("", sampleSourceHealthCheck, "", c.Name,
+					http.MethodGet, streamLivenessProbePath, nil, true)
+			}
+			reachable, status, responseBytes, probeErr := probeOneStreamBaseDetailed(ctx, client, strings.TrimRight(base, "/")+streamLivenessProbePath)
+			if sampleSpan != nil { sampleSpan.Finish(status, responseBytes, probeErr) }
+			if reachable {
 				if c.markStreamBaseAliveObservation(base, generation) && c.logger != nil {
 					c.logger.Debugf("[%s] Stream line alive: %s", c.Name, base)
 				}
@@ -105,15 +112,22 @@ func (c *UpstreamClient) probeSelectedStreamBases(ctx context.Context, bases []s
 // The URL is built from the administrator-configured base plus a fixed path, so
 // it carries no credentials.
 func probeOneStreamBase(ctx context.Context, client *http.Client, probeURL string) bool {
+	reachable, _, _, _ := probeOneStreamBaseDetailed(ctx, client, probeURL)
+	return reachable
+}
+
+func probeOneStreamBaseDetailed(ctx context.Context, client *http.Client, probeURL string) (bool, int, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 	if err != nil {
-		return false
+		return false, 0, 0, err
 	}
 	req.Header.Set("User-Agent", "Emby-In-One-Liveness/1.0")
 	resp, err := client.Do(req) // CodeQL: intentional liveness probe to admin-configured stream base
 	if err != nil {
-		return false
+		return false, 0, 0, err
 	}
+	responseBytes := resp.ContentLength
+	if responseBytes < 0 { responseBytes = 0 }
 	_ = resp.Body.Close()
-	return !isStreamUnavailableStatus(resp.StatusCode)
+	return !isStreamUnavailableStatus(resp.StatusCode), resp.StatusCode, responseBytes, nil
 }
