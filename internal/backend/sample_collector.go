@@ -472,9 +472,10 @@ func (s *sampleOutboundSpan) Finish(status int, responseBytes int64, err error) 
 
 type sampleBodyCapture struct {
 	io.ReadCloser
-	span   *sampleOutboundSpan
-	status int
-	bytes  int64
+	span     *sampleOutboundSpan
+	status   int
+	bytes    int64
+	expected int64
 }
 
 func (b *sampleBodyCapture) Read(p []byte) (int, error) {
@@ -486,7 +487,9 @@ func (b *sampleBodyCapture) Read(p []byte) (int, error) {
 func (b *sampleBodyCapture) Close() error {
 	err := b.ReadCloser.Close()
 	if b.span != nil {
-		b.span.Finish(b.status, b.bytes, nil)
+		bytes := b.bytes
+		if b.expected >= 0 { bytes = b.expected }
+		b.span.Finish(b.status, bytes, nil)
 	}
 	return err
 }
