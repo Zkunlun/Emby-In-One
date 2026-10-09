@@ -558,3 +558,136 @@ func TestPhase1BCollectorDoesNotChangeUpstreamRequestBehavior(t *testing.T) {
 		}
 	})
 }
+
+
+func phase1BHydrationUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	partialEpisode := map[string]any{
+		"Id": "episode-1", "Type": "Episode", "Name": "Episode One", "SeriesId": "series-1",
+	}
+	fullEpisode := map[string]any{
+		"Id": "episode-1", "Type": "Episode", "Name": "Episode One", "SeriesId": "series-1",
+		"ProviderIds": map[string]any{"Tvdb": "2001"},
+		"MediaSources": []any{map[string]any{"Id": "episode-source-1", "ItemId": "episode-1", "Container": "mkv"}},
+	}
+	fullSeries := map[string]any{
+		"Id": "series-1", "Type": "Series", "Name": "Series One", "ProductionYear": 2024,
+		"ProviderIds": map[string]any{"Tvdb": "3001"},
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"AccessToken": "phase1b-hydration-upstream-token",
+				"User": map[string]any{"Id": "user-a"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/System/Info/Public":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "phase1b-hydration-source"})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items/Counts":
+			_ = json.NewEncoder(w).Encode(map[string]any{"MovieCount": 0, "SeriesCount": 1, "EpisodeCount": 1})
+		case r.Method == http.MethodGet && r.URL.Path == "/Users/user-a/Items":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Items": []any{partialEpisode}, "TotalRecordCount": 1, "StartIndex": 0,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			switch r.URL.Query().Get("Ids") {
+			case "episode-1":
+				_ = json.NewEncoder(w).Encode(map[string]any{"Items": []any{fullEpisode}, "TotalRecordCount": 1})
+			case "series-1":
+				_ = json.NewEncoder(w).Encode(map[string]any{"Items": []any{fullSeries}, "TotalRecordCount": 1})
+			default:
+				_ = json.NewEncoder(w).Encode(map[string]any{"Items": []any{}, "TotalRecordCount": 0})
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/Videos/probe":
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func TestPhase1BHydrateAndParentHydrateAreClassifiedAndLinked(t *testing.T) {
+	upstream := phase1BHydrationUpstream(t)
+	defer upstream.Close()
+
+	withTempAppConfig(t, phase1BConfig(upstream.URL), func(app *App, handler http.Handler) {
+		token, userID := phase1BCreateTestUser(t, app, handler)
+		status, err := app.SampleCollector.Start("phase1b-hydration", "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !status.Active {
+			t.Fatalf("sample start=%+v", status)
+		}
+		_ = phase1BUserItemsRequest(t, handler, token, userID)
+		stopped := app.SampleCollector.Stop()
+		samplePath := filepath.Join(app.SampleCollector.dataDir, "samples", stopped.File)
+		events := readSampleEvents(t, samplePath)
+
+		var traceID string
+		for i := range events {
+			event := &events[i]
+			if event.Event == "inbound" && event.User == "test" && event.Path == "/Users/{userId}/Items" {
+				traceID = event.TraceID
+				break
+			}
+		}
+		if traceID == "" {
+			t.Fatalf("missing inbound trace: %+v", events)
+		}
+
+		sources := map[string]*sampleEvent{}
+		var quality *sampleEvent
+		for i := range events {
+			event := &events[i]
+			if event.TraceID != traceID {
+				continue
+			}
+			if event.Event == "outbound" {
+				sources[event.Source] = event
+			}
+			if event.Event == "merge_quality" {
+				quality = event
+			}
+		}
+		for _, source := range []string{sampleSourceClient, sampleSourceHydrate, sampleSourceParentHydrate} {
+			if sources[source] == nil {
+				t.Fatalf("missing %s event for trace %s: %+v", source, traceID, events)
+			}
+		}
+		if sources[sampleSourceHydrate].Path != "/Items" ||
+			fmt.Sprint(sources[sampleSourceHydrate].Query["ids_count"]) != "1" ||
+			sources[sampleSourceHydrate].ReturnedItems == nil ||
+			*sources[sampleSourceHydrate].ReturnedItems != 1 {
+			t.Fatalf("hydrate event=%+v", sources[sampleSourceHydrate])
+		}
+		if sources[sampleSourceParentHydrate].Path != "/Items" ||
+			fmt.Sprint(sources[sampleSourceParentHydrate].Query["ids_count"]) != "1" ||
+			sources[sampleSourceParentHydrate].ReturnedItems == nil ||
+			*sources[sampleSourceParentHydrate].ReturnedItems != 1 {
+			t.Fatalf("parent hydrate event=%+v", sources[sampleSourceParentHydrate])
+		}
+		if quality == nil ||
+			quality.Stats["encountered_items"] != 1 ||
+			quality.Stats["need_metadata_hydrate"] != 1 ||
+			quality.Stats["metadata_hydrate_batches"] != 1 ||
+			quality.Stats["need_parent_hydrate"] != 1 ||
+			quality.Stats["parent_hydrate_batches"] != 1 {
+			t.Fatalf("hydrate quality=%+v", quality)
+		}
+
+		raw, err := os.ReadFile(samplePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(raw)
+		for _, secret := range []string{
+			"episode-1", "series-1", "episode-source-1", "phase1b-hydration-upstream-token",
+		} {
+			if strings.Contains(text, secret) {
+				t.Fatalf("hydrate sample leaked %q: %s", secret, text)
+			}
+		}
+	})
+}
