@@ -362,23 +362,27 @@ upstream:
 `, upstreamURL)
 }
 
-func phase1BCreateTestUser(t *testing.T, app *App, handler http.Handler) (string, string) {
+func phase1BCreateUser(t *testing.T, app *App, handler http.Handler, username, password string) (string, string) {
 	t.Helper()
 	adminToken := loginTokenAs(t, handler, "admin", "secret")
 	create := doJSONRequest(t, handler, http.MethodPost, "/admin/api/users", map[string]any{
-		"username": "test",
-		"password": "phase1b-password",
+		"username": username,
+		"password": password,
 		"allowedServers": []string{"server-a"},
 	}, adminToken)
 	if create.Code != http.StatusCreated {
-		t.Fatalf("create test user: status=%d body=%s", create.Code, create.Body.String())
+		t.Fatalf("create %s user: status=%d body=%s", username, create.Code, create.Body.String())
 	}
-	token := loginTokenAs(t, handler, "test", "phase1b-password")
+	token := loginTokenAs(t, handler, username, password)
 	info := app.Auth.ValidateToken(token)
 	if info == nil {
-		t.Fatal("test token missing")
+		t.Fatalf("%s token missing", username)
 	}
 	return token, info.UserID
+}
+
+func phase1BCreateTestUser(t *testing.T, app *App, handler http.Handler) (string, string) {
+	return phase1BCreateUser(t, app, handler, "test", "phase1b-password")
 }
 
 func phase1BUserItemsRequest(t *testing.T, handler http.Handler, token, userID string) *httptest.ResponseRecorder {
@@ -449,6 +453,7 @@ func TestPhase1BCollectorDoesNotChangeUpstreamRequestBehavior(t *testing.T) {
 
 	withTempAppConfig(t, phase1BConfig(upstream.URL), func(app *App, handler http.Handler) {
 		token, userID := phase1BCreateTestUser(t, app, handler)
+		otherToken, otherUserID := phase1BCreateUser(t, app, handler, "other", "phase1b-other-password")
 
 		beforeOff := recorder.itemListCalls()
 		off := phase1BUserItemsRequest(t, handler, token, userID)
@@ -469,6 +474,10 @@ func TestPhase1BCollectorDoesNotChangeUpstreamRequestBehavior(t *testing.T) {
 		on := phase1BUserItemsRequest(t, handler, token, userID)
 		afterOn := recorder.itemListCalls()
 		onCalls := append([]phase1BRecordedCall(nil), afterOn[len(beforeOn):]...)
+
+		// A real request from another regular user must still reach the upstream,
+		// but it must not enter a capture targeted at test.
+		_ = phase1BUserItemsRequest(t, handler, otherToken, otherUserID)
 		stopped := app.SampleCollector.Stop()
 
 		if len(onCalls) != 1 {
@@ -488,6 +497,9 @@ func TestPhase1BCollectorDoesNotChangeUpstreamRequestBehavior(t *testing.T) {
 		var quality *sampleEvent
 		for i := range events {
 			event := &events[i]
+			if event.User == "other" {
+				t.Fatalf("non-target user leaked into capture: %+v", event)
+			}
 			if event.User != "test" {
 				continue
 			}
