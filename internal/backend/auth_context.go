@@ -12,6 +12,8 @@ type RequestContext struct {
 	Headers    http.Header
 	ProxyToken string
 	ProxyUser  *tokenInfo
+	// TraceID links one client request to all EIO→upstream requests it triggers while sample capture is active.
+	TraceID string
 	// PlaybackDeviceID is the already-resolved playback-device identity consumed by
 	// lifecycle handlers. withContext resolves it once from live headers and the
 	// validated token-scoped fallback.
@@ -39,6 +41,7 @@ func (a *App) withContext(next http.HandlerFunc) http.HandlerFunc {
 		}
 		ctx := context.WithValue(r.Context(), requestContextKey{}, &RequestContext{
 			Headers:           r.Header.Clone(),
+			TraceID:           sampleTraceFromContext(r.Context()),
 			ProxyToken:        token,
 			ProxyUser:         proxyUser,
 			PlaybackDeviceID:  resolvePlaybackDeviceID(r.Header, tokenDeviceID),
