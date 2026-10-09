@@ -26,6 +26,7 @@ type App struct {
 	libraryCache    *upstreamLibraryCache
 	mediaCounts     *mediaCountsService
 	PlaybackLimiter *PlaybackLimiter
+	SampleCollector  *SampleCollector
 	playbackRoutes  *playbackRouteStore
 	watchPlayback   playbackWatchCache
 	loginLimiter    loginRateLimiter
@@ -66,10 +67,11 @@ func NewApp() (*App, error) {
  identity := NewClientIdentityServiceFromDetectedConfig()
  auth, err := NewAuthManager(configStore, identity, logger, users)
  if err != nil { return nil, err }
+ sampleCollector := newSampleCollector(cfg.DataDir)
  app := &App{ConfigStore: configStore, Logger: logger, IDStore: idStore,
   Identity: identity, Auth: auth, UserStore: users, WatchStore: watch,
   HiddenLibraries: hidden, libraryCache: newUpstreamLibraryCache(),
-  PlaybackLimiter: NewPlaybackLimiter(), playbackRoutes: newPlaybackRouteStore()}
+  PlaybackLimiter: NewPlaybackLimiter(), playbackRoutes: newPlaybackRouteStore(), SampleCollector: sampleCollector}
  app.watchLifecycleMu.Lock()
  app.publishConfiguredSourcesLocked(configStore.Snapshot())
  if idStore.DB() != nil { err = app.recoverWatchLifecycleLocked() }
@@ -78,7 +80,7 @@ func NewApp() (*App, error) {
  // Recovery precedes identity migration, upstream login and HTTP authentication.
  if err := identity.migrateSourceOwnership(configStore.Snapshot().Upstream); err != nil { return nil, err }
  app.installIdentityLifecycle()
- app.Upstream = NewUpstreamPool(configStore.Snapshot(), logger)
+ app.Upstream = NewUpstreamPool(configStore.Snapshot(), logger, sampleCollector)
  app.Upstream.LoginAll()
  counts, err := newMediaCountsService(app, realCountsScheduleClock(), nil)
  if err != nil { app.Upstream.stopHealthChecks(); return nil, err }
@@ -102,6 +104,7 @@ func logTimeoutNotice(logger *Logger, timeouts TimeoutsConfig) {
 }
 
 func (a *App) Close() error {
+	if a.SampleCollector != nil { a.SampleCollector.Close() }
 	if a.mediaCounts != nil { a.mediaCounts.close() }
 	if a.Upstream != nil {
 		a.Upstream.stopHealthChecks()
