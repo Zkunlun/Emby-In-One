@@ -154,6 +154,7 @@ func (a *App) handleFallbackProxyWithWatchEvent(w http.ResponseWriter, r *http.R
 			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Invalid upstream JSON"})
 			return
 		}
+		setSampleReturnedItems(resp, payload)
 		if !a.isServerAllowed(reqCtx, serverID) {
 			writeMediaSelectionError(w, errMediaAccessDenied)
 			return
