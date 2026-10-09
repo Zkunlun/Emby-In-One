@@ -3,12 +3,15 @@ package backend
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -254,6 +257,291 @@ func TestAdminSampleCaptureControlsValidateTargetUser(t *testing.T) {
 		}
 		if stopped.Active {
 			t.Fatalf("stop status=%+v", stopped)
+		}
+	})
+}
+
+
+type phase1BRecordedCall struct {
+	Method string
+	Path   string
+	Query  string
+}
+
+type phase1BUpstreamRecorder struct {
+	mu    sync.Mutex
+	calls []phase1BRecordedCall
+}
+
+func (r *phase1BUpstreamRecorder) add(req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, phase1BRecordedCall{
+		Method: req.Method,
+		Path:   req.URL.Path,
+		Query:  req.URL.Query().Encode(),
+	})
+}
+
+func (r *phase1BUpstreamRecorder) itemListCalls() []phase1BRecordedCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []phase1BRecordedCall
+	for _, call := range r.calls {
+		if call.Path == "/Users/user-a/Items" {
+			out = append(out, call)
+		}
+	}
+	return out
+}
+
+func phase1BListUpstream(t *testing.T, recorder *phase1BUpstreamRecorder) *httptest.Server {
+	t.Helper()
+	movies := []any{
+		map[string]any{
+			"Id": "movie-a", "Type": "Movie", "Name": "Sensitive Title One", "ProductionYear": 2024,
+			"ProviderIds": map[string]any{"Tmdb": "1001"},
+			"MediaSources": []any{map[string]any{"Id": "ms-a", "ItemId": "movie-a", "Container": "mkv"}},
+		},
+		map[string]any{
+			"Id": "movie-b", "Type": "Movie", "Name": "Sensitive Title Two", "ProductionYear": 2025,
+			"ProviderIds": map[string]any{"Tmdb": "1002"},
+			"MediaSources": []any{map[string]any{"Id": "ms-b", "ItemId": "movie-b", "Container": "mp4"}},
+		},
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recorder.add(r)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"AccessToken": "phase1b-upstream-token",
+				"User": map[string]any{"Id": "user-a"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/System/Info/Public":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Id": "phase1b-source"})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items/Counts":
+			_ = json.NewEncoder(w).Encode(map[string]any{"MovieCount": 2, "SeriesCount": 0, "EpisodeCount": 0})
+		case r.Method == http.MethodGet && r.URL.Path == "/Users/user-a/Items":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Items": movies, "TotalRecordCount": 2, "StartIndex": 0,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/Videos/probe":
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func phase1BConfig(upstreamURL string) string {
+	return fmt.Sprintf(`server:
+  port: 8096
+  name: "Phase1B"
+  id: "phase1b-server"
+admin:
+  username: "admin"
+  password: "secret"
+playback:
+  mode: "proxy"
+timeouts:
+  api: 30000
+  global: 15000
+  login: 10000
+  healthCheck: 10000
+  healthInterval: 600000
+proxies: []
+upstream:
+  - id: "server-a"
+    name: "A"
+    url: %q
+    username: "u1"
+    password: "p1"
+    maxConcurrent: 0
+`, upstreamURL)
+}
+
+func phase1BCreateTestUser(t *testing.T, app *App, handler http.Handler) (string, string) {
+	t.Helper()
+	adminToken := loginTokenAs(t, handler, "admin", "secret")
+	create := doJSONRequest(t, handler, http.MethodPost, "/admin/api/users", map[string]any{
+		"username": "test",
+		"password": "phase1b-password",
+		"allowedServers": []string{"server-a"},
+	}, adminToken)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create test user: status=%d body=%s", create.Code, create.Body.String())
+	}
+	token := loginTokenAs(t, handler, "test", "phase1b-password")
+	info := app.Auth.ValidateToken(token)
+	if info == nil {
+		t.Fatal("test token missing")
+	}
+	return token, info.UserID
+}
+
+func phase1BUserItemsRequest(t *testing.T, handler http.Handler, token, userID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet,
+		"/Users/"+userID+"/Items?Limit=2&SearchTerm="+url.QueryEscape("Sensitive Title"), nil)
+	req.Header.Set("X-Emby-Token", token)
+	req.Header.Set("X-Emby-Device-Id", "phase1b-device")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("user items status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	return rr
+}
+
+func readSampleEvents(t *testing.T, path string) []sampleEvent {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	var events []sampleEvent
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var event sampleEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
+func TestPhase1BCollectorOffCreatesNoSampleArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	collector := newSampleCollector(dir)
+	if collector.Enabled() {
+		t.Fatal("collector unexpectedly enabled")
+	}
+	if span := collector.BeginInbound("trace", "test", http.MethodGet, "/Items", nil); span != nil {
+		t.Fatal("disabled collector created inbound span")
+	}
+	if span := collector.BeginOutbound("trace", sampleSourceClient, "test", "A", http.MethodGet, "/Items", nil, false); span != nil {
+		t.Fatal("disabled collector created outbound span")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "samples")); !os.IsNotExist(err) {
+		t.Fatalf("disabled collector created sample directory: err=%v", err)
+	}
+	allocs := testing.AllocsPerRun(1000, func() {
+		if collector.BeginInbound("trace", "test", http.MethodGet, "/Items", nil) != nil {
+			panic("disabled collector returned a span")
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("disabled BeginInbound allocations = %v, want 0", allocs)
+	}
+}
+
+func TestPhase1BCollectorDoesNotChangeUpstreamRequestBehavior(t *testing.T) {
+	recorder := &phase1BUpstreamRecorder{}
+	upstream := phase1BListUpstream(t, recorder)
+	defer upstream.Close()
+
+	withTempAppConfig(t, phase1BConfig(upstream.URL), func(app *App, handler http.Handler) {
+		token, userID := phase1BCreateTestUser(t, app, handler)
+
+		beforeOff := recorder.itemListCalls()
+		off := phase1BUserItemsRequest(t, handler, token, userID)
+		afterOff := recorder.itemListCalls()
+		offCalls := append([]phase1BRecordedCall(nil), afterOff[len(beforeOff):]...)
+		if len(offCalls) != 1 {
+			t.Fatalf("collector OFF upstream item-list calls=%d calls=%+v", len(offCalls), offCalls)
+		}
+
+		status, err := app.SampleCollector.Start("phase1b-behavior", "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !status.Active || status.TargetUser != "test" {
+			t.Fatalf("sample start=%+v", status)
+		}
+		beforeOn := recorder.itemListCalls()
+		on := phase1BUserItemsRequest(t, handler, token, userID)
+		afterOn := recorder.itemListCalls()
+		onCalls := append([]phase1BRecordedCall(nil), afterOn[len(beforeOn):]...)
+		stopped := app.SampleCollector.Stop()
+
+		if len(onCalls) != 1 {
+			t.Fatalf("collector ON upstream item-list calls=%d calls=%+v", len(onCalls), onCalls)
+		}
+		if !reflect.DeepEqual(offCalls, onCalls) {
+			t.Fatalf("collector changed upstream request behavior\nOFF=%+v\nON=%+v", offCalls, onCalls)
+		}
+		if off.Body.String() != on.Body.String() {
+			t.Fatalf("collector changed client response\nOFF=%s\nON=%s", off.Body.String(), on.Body.String())
+		}
+
+		samplePath := filepath.Join(app.SampleCollector.dataDir, "samples", stopped.File)
+		events := readSampleEvents(t, samplePath)
+		var inbound *sampleEvent
+		var outbound *sampleEvent
+		var quality *sampleEvent
+		for i := range events {
+			event := &events[i]
+			if event.User != "test" {
+				continue
+			}
+			switch event.Event {
+			case "inbound":
+				if event.Path == "/Users/{userId}/Items" {
+					inbound = event
+				}
+			case "outbound":
+				if event.Path == "/Users/{userId}/Items" {
+					outbound = event
+				}
+			case "merge_quality":
+				quality = event
+			}
+		}
+		if inbound == nil || outbound == nil {
+			t.Fatalf("missing linked sample events: %+v", events)
+		}
+		if inbound.TraceID == "" || inbound.TraceID != outbound.TraceID {
+			t.Fatalf("trace mismatch inbound=%+v outbound=%+v", inbound, outbound)
+		}
+		if outbound.Source != sampleSourceClient || outbound.Upstream != "A" ||
+			outbound.Status != http.StatusOK || outbound.ResponseBytes <= 0 ||
+			outbound.ReturnedItems == nil || *outbound.ReturnedItems != 2 ||
+			outbound.Concurrency < 1 || outbound.UpstreamConcurrency < 1 {
+			t.Fatalf("outbound metrics invalid: %+v", outbound)
+		}
+		if quality == nil || quality.TraceID != inbound.TraceID ||
+			quality.Stats["encountered_items"] != 2 ||
+			quality.Stats["provider_any"] != 2 ||
+			quality.Stats["media_sources_present"] != 2 ||
+			quality.Stats["need_metadata_hydrate"] != 0 ||
+			quality.Stats["need_parent_hydrate"] != 0 {
+			t.Fatalf("merge quality invalid: %+v", quality)
+		}
+
+		raw, err := os.ReadFile(samplePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(raw)
+		for _, secret := range []string{
+			"Sensitive Title",
+			"phase1b-upstream-token",
+			"phase1b-password",
+			"user-a",
+			"movie-a",
+			"movie-b",
+			"ms-a",
+			"ms-b",
+		} {
+			if strings.Contains(text, secret) {
+				t.Fatalf("sample file leaked %q: %s", secret, text)
+			}
 		}
 	})
 }
