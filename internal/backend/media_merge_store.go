@@ -545,6 +545,13 @@ func mergeGroupHasMember(group *mergeStoredGroup, key mergeMemberKey) bool {
 // All writes here run under the existing connection transaction lock. Do not
 // call any public store or publish memory inside this callback.
 func (s *IDStore) writeMergeGroupSQL(group *mergeStoredGroup, absorbed []string) error {
+	workAffected, err := s.workIndexAffectedGroupItemsSQL(append(append([]string(nil), absorbed...), group.VirtualID))
+	if err != nil {
+		return err
+	}
+	for _, member := range group.Members {
+		workAffected[workItemKey{member.Ref.ServerID, member.Ref.ItemID}] = true
+	}
 	for _, id := range append(append([]string(nil), absorbed...), group.VirtualID) {
 		for _, query := range []string{
 			`DELETE FROM media_merge_members WHERE virtual_id = ?`,
@@ -594,7 +601,7 @@ func (s *IDStore) writeMergeGroupSQL(group *mergeStoredGroup, absorbed []string)
 			}
 		}
 	}
-	return nil
+	return s.refreshWorkIdentityItemsSQL(workAffected)
 }
 
 func (s *IDStore) publishMergeGroupLocked(group *mergeStoredGroup, absorbed []string) {
@@ -682,11 +689,20 @@ func (s *IDStore) writeMergeRemovalSQL(changes []*mergeStoredGroup) error {
 			}
 			continue
 		}
+		// A completely removed group has no replacement snapshot. Invalidate
+		// its old source-item keys in the same lifecycle SQL transaction.
+		workAffected, err := s.workIndexAffectedGroupItemsSQL([]string{group.VirtualID})
+		if err != nil {
+			return err
+		}
 		for _, query := range []string{`DELETE FROM media_merge_members WHERE virtual_id = ?`,
 			`DELETE FROM media_merge_aliases WHERE virtual_id = ?`, `DELETE FROM media_merge_groups WHERE virtual_id = ?`} {
 			if err := s.db.execParams(query, group.VirtualID); err != nil {
 				return err
 			}
+		}
+		if err := s.refreshWorkIdentityItemsSQL(workAffected); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -118,6 +118,10 @@ func NewIDStore(dataDir string, logger *Logger, upstreamIDs ...string) (*IDStore
 		_ = closeSQLite(db)
 		return nil, fmt.Errorf("merge schema: %w", err)
 	}
+	if err := store.initWorkIdentitySchema(); err != nil {
+		_ = closeSQLite(db)
+		return nil, fmt.Errorf("work identity schema: %w", err)
+	}
 	// The database holds user password hashes and per-user watch history, and sqlite
 	// creates its files with the process umask. WAL mode adds -wal/-shm siblings.
 	chmodPrivate(dbPath, dbPath+"-wal", dbPath+"-shm")
@@ -193,7 +197,7 @@ func (s *IDStore) load() error {
 		return err
 	}
 	s.rebuildIndexesLocked()
-	return nil
+	return s.rebuildWorkIdentityIndexLocked()
 }
 
 func (s *IDStore) Close() error {
