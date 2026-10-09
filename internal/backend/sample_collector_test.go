@@ -83,8 +83,18 @@ func TestSampleCollectorLifecycleAndEvents(t *testing.T) {
 	if final.Active || final.InboundPeak != 1 || final.OutboundPeak != 1 || final.OutboundPeakByUpstream["终点站"] != 1 {
 		t.Fatalf("final status = %+v", final)
 	}
+	if final.Bytes <= 0 || final.Truncated {
+		t.Fatalf("capture size status = %+v", final)
+	}
 
 	path := filepath.Join(collector.dataDir, "samples", final.File)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != final.Bytes {
+		t.Fatalf("capture file size=%d status bytes=%d", info.Size(), final.Bytes)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
