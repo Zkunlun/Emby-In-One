@@ -112,7 +112,7 @@ func TestSampleCollectorLifecycleAndEvents(t *testing.T) {
 		}
 	}
 	if gotInbound == nil || gotInbound.TraceID != "trace-1" || gotInbound.User != "test" ||
-		gotInbound.ResponseBytes != 456 || gotInbound.Path != "GET /Users/{userId}/Items" {
+		gotInbound.ResponseBytes != 456 || gotInbound.Path != "/Users/{userId}/Items" {
 		t.Fatalf("inbound event = %#v", gotInbound)
 	}
 	if gotOutbound == nil || gotOutbound.TraceID != "trace-1" || gotOutbound.Upstream != "终点站" ||
@@ -155,10 +155,44 @@ func TestSamplePathClass(t *testing.T) {
 		"/Users/123/Items":        "/Users/{userId}/Items",
 		"/Shows/xyz/Episodes":     "/Shows/{seriesId}/Episodes",
 		"/Search/Hints":           "/Search/Hints",
+		"/emby/Items/0123456789abcdef0123456789abcdef/PlaybackInfo": "/Items/{itemId}/PlaybackInfo",
+		"/api/danmu/0123456789abcdef0123456789abcdef": "/api/danmu/{id}",
 	}
 	for input, want := range cases {
 		if got := samplePathClass(input); got != want {
 			t.Fatalf("samplePathClass(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+
+func TestSampleCollectorTargetUserIsolation(t *testing.T) {
+	collector := newSampleCollector(t.TempDir())
+	status, err := collector.Start("targeted", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.TargetUser != "test" {
+		t.Fatalf("target user = %q", status.TargetUser)
+	}
+	if span := collector.BeginInbound("other-trace", "other", http.MethodGet, "/Items", nil); span != nil {
+		t.Fatal("non-target inbound request was sampled")
+	}
+	if span := collector.BeginOutbound("", sampleSourceClient, "other", "终点站", http.MethodGet, "/Items", nil, false); span != nil {
+		t.Fatal("non-target outbound request was sampled")
+	}
+	background := collector.BeginOutbound("", sampleSourceMediaCounts, "", "终点站", http.MethodGet, "/Items/Counts", nil, false)
+	if background == nil {
+		t.Fatal("background request should remain sampled for baseline subtraction")
+	}
+	background.Finish(http.StatusOK, 10, nil)
+	target := collector.BeginInbound("target-trace", "test", http.MethodGet, "/Items", nil)
+	if target == nil {
+		t.Fatal("target request was not sampled")
+	}
+	target.Finish(http.StatusOK, 20, "")
+	final := collector.Stop()
+	if final.InboundPeak != 1 || final.OutboundPeak != 1 {
+		t.Fatalf("targeted peaks = %+v", final)
 	}
 }
