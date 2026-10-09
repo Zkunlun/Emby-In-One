@@ -70,8 +70,9 @@ type SampleCollector struct {
 	file      *os.File
 	filePath  string
 	sessionID string
-	label     string
-	startedAt time.Time
+	label      string
+	targetUser string
+	startedAt  time.Time
 	events    int64
 	dropped   int64
 
@@ -111,6 +112,7 @@ type sampleStatus struct {
 	Active                 bool           `json:"active"`
 	SessionID              string         `json:"sessionId,omitempty"`
 	Label                  string         `json:"label,omitempty"`
+	TargetUser             string         `json:"targetUser,omitempty"`
 	StartedAt              string         `json:"startedAt,omitempty"`
 	File                   string         `json:"file,omitempty"`
 	Events                 int64          `json:"events"`
@@ -145,7 +147,7 @@ func sanitizeSampleLabel(label string) string {
 	return label
 }
 
-func (c *SampleCollector) Start(label string) (sampleStatus, error) {
+func (c *SampleCollector) Start(label string, targetUsers ...string) (sampleStatus, error) {
 	if c == nil {
 		return sampleStatus{}, errors.New("sample collector unavailable")
 	}
@@ -172,6 +174,8 @@ func (c *SampleCollector) Start(label string) (sampleStatus, error) {
 	c.filePath = path
 	c.sessionID = sessionID
 	c.label = sanitizeSampleLabel(label)
+	c.targetUser = ""
+	if len(targetUsers) > 0 { c.targetUser = sanitizeSampleLabel(targetUsers[0]) }
 	c.startedAt = now
 	c.events = 0
 	c.dropped = 0
@@ -248,6 +252,7 @@ func (c *SampleCollector) statusLocked() sampleStatus {
 		Active:                 c.enabled.Load(),
 		SessionID:              c.sessionID,
 		Label:                  c.label,
+		TargetUser:             c.targetUser,
 		StartedAt:              started,
 		File:                   file,
 		Events:                 c.events,
@@ -325,7 +330,7 @@ func (c *SampleCollector) BeginInbound(traceID, user, method, path string, query
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.enabled.Load() || c.file == nil {
+	if !c.enabled.Load() || c.file == nil || (c.targetUser != "" && user != c.targetUser) {
 		return nil
 	}
 	c.inboundActive++
@@ -400,7 +405,7 @@ func (c *SampleCollector) BeginOutbound(traceID, source, user, upstream, method,
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.enabled.Load() || c.file == nil {
+	if !c.enabled.Load() || c.file == nil || (c.targetUser != "" && user != "" && user != c.targetUser) {
 		return nil
 	}
 	c.outboundActive++
@@ -668,6 +673,11 @@ func (c *SampleCollector) RecordMergeQuality(reqCtx *RequestContext, upstream st
 	if c == nil || !c.enabled.Load() || len(stats) == 0 {
 		return
 	}
+	user := sampleProxyUsername(reqCtx)
+	c.mu.Lock()
+	targetUser := c.targetUser
+	c.mu.Unlock()
+	if targetUser != "" && user != targetUser { return }
 	session := c.Status().SessionID
 	if session == "" {
 		return
@@ -678,7 +688,7 @@ func (c *SampleCollector) RecordMergeQuality(reqCtx *RequestContext, upstream st
 		SessionID: session,
 		TraceID:   func() string { if reqCtx != nil { return reqCtx.TraceID }; return "" }(),
 		Source:    sampleSourceClient,
-		User:      sampleProxyUsername(reqCtx),
+		User:      user,
 		Upstream:  upstream,
 		Stats:     stats,
 	})
@@ -718,6 +728,7 @@ func (a *App) handleAdminSampleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Label string `json:"label"`
+		User  string `json:"user"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := decodeJSONBody(r, &body); err != nil {
@@ -725,7 +736,7 @@ func (a *App) handleAdminSampleStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	status, err := a.SampleCollector.Start(body.Label)
+	status, err := a.SampleCollector.Start(body.Label, body.User)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "status": a.SampleCollector.Status()})
 		return
