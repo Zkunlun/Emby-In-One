@@ -171,6 +171,8 @@ func TestSamplePathClass(t *testing.T) {
 		"/Search/Hints":           "/Search/Hints",
 		"/emby/Items/0123456789abcdef0123456789abcdef/PlaybackInfo": "/Items/{itemId}/PlaybackInfo",
 		"/api/danmu/0123456789abcdef0123456789abcdef": "/api/danmu/{id}",
+		"/Videos/movie-secret/ms-readable/Subtitles/0/Stream.srt": "/Videos/{itemId}/{mediaSourceId}/Subtitles/0/Stream.srt",
+		"/Audio/audio-secret/ms-readable/Attachments/2": "/Audio/{itemId}/{mediaSourceId}/Attachments/2",
 	}
 	for input, want := range cases {
 		if got := samplePathClass(input); got != want {
