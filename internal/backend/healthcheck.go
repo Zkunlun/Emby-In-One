@@ -125,6 +125,7 @@ func (p *UpstreamPool) stopHealthChecks() {
 }
 
 func (p *UpstreamPool) runHealthCheckCycle(ctx context.Context) {
+	ctx = withSampleSource(ctx, sampleSourceHealthCheck)
 	p.mu.RLock()
 	clients := append([]*UpstreamClient(nil), p.clients...)
 	logger := p.logger

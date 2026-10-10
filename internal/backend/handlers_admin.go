@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -877,6 +878,11 @@ func (a *App) commitConfigFull(nextCfg Config, reLogin bool) error {
 		if err := a.recoverWatchLifecycleLocked(); err != nil { return err }
 	}
 	previous := a.ConfigStore.Snapshot()
+	// A generic settings save must never bypass durable source cleanup.
+	nextSources := configuredSourceIDs(nextCfg)
+	for source := range configuredSourceIDs(previous) {
+		if !nextSources[source] { return fmt.Errorf("removing upstream %s requires the source lifecycle delete endpoint",source) }
+	}
 	a.ConfigStore.Replace(nextCfg)
 	if err := a.ConfigStore.Save(); err != nil {
 		a.ConfigStore.Replace(previous)

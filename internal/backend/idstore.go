@@ -57,6 +57,7 @@ type IDStore struct {
 	originalIDToVirtual map[string][]string          // originalID → virtual IDs known for it
 	activeStreamServer  map[string]activeStreamEntry // virtualItemID → last-chosen server
 	configuredSources   map[string]bool              // nil for standalone/internal stores; production is explicit.
+	sourceGenerations   map[string]int64             // durable source identity epochs, protected by IDStore.mu.
 	mergeState          mergeStoreState
 	closed              bool
 }
@@ -76,6 +77,7 @@ func NewIDStore(dataDir string, logger *Logger, upstreamIDs ...string) (*IDStore
 		originalIDToVirtual: map[string][]string{},
 		activeStreamServer:  map[string]activeStreamEntry{},
 		mergeState:          emptyMergeStoreState(),
+		sourceGenerations:   map[string]int64{},
 	}
 
 	dbPath := filepath.Join(dataDir, "mappings.db")
@@ -117,6 +119,20 @@ func NewIDStore(dataDir string, logger *Logger, upstreamIDs ...string) (*IDStore
 	if err := store.initMergeSchema(); err != nil {
 		_ = closeSQLite(db)
 		return nil, fmt.Errorf("merge schema: %w", err)
+	}
+	if err := store.initWorkIdentitySchema(); err != nil {
+		_ = closeSQLite(db)
+		return nil, fmt.Errorf("work identity schema: %w", err)
+	}
+	// Scanner control persistence shares the identity DB so upstream deletion
+	// can clear jobs, checkpoints and cursors in the SAME lifecycle transaction.
+	if err := initScannerSchema(db); err != nil {
+		_ = closeSQLite(db)
+		return nil, fmt.Errorf("scanner schema: %w", err)
+	}
+	if err := store.initSourceGenerationSchema(); err != nil {
+		_ = closeSQLite(db)
+		return nil, fmt.Errorf("source generation schema: %w", err)
 	}
 	// The database holds user password hashes and per-user watch history, and sqlite
 	// creates its files with the process umask. WAL mode adds -wal/-shm siblings.
@@ -189,11 +205,17 @@ func (s *IDStore) load() error {
 			s.originalToVirtual[compositeKey(originalID, serverID)] = virtualID
 		}
 	}
+	if err := s.loadSourceGenerationsLocked(); err != nil {
+		return err
+	}
 	if err := s.loadMergeGroupsLocked(); err != nil {
 		return err
 	}
 	s.rebuildIndexesLocked()
-	return nil
+	if err := s.revalidatePersistedMergeGroups(); err != nil {
+		return err
+	}
+	return s.rebuildWorkIdentityIndexLocked()
 }
 
 func (s *IDStore) Close() error {
@@ -484,7 +506,19 @@ func (s *IDStore) RemoveByServerIDPreservingInstances(serverID string) (ServerRe
 			if err := s.db.execParams(`DELETE FROM id_additional_instances WHERE server_id = ?`, serverID); err != nil {
 				return err
 			}
-			return s.writeMergeRemovalSQL(mergeRemoval)
+			if err := s.writeMergeRemovalSQL(mergeRemoval); err != nil {
+				return err
+			}
+			if err := s.db.execParams(`DELETE FROM work_identity_keys WHERE server_id=?`, serverID); err != nil {
+				return err
+			}
+			if err := s.db.execParams(`DELETE FROM work_identity_items WHERE server_id=?`, serverID); err != nil {
+				return err
+			}
+			if err := removeScannerSourceSQL(s.db, serverID); err != nil {
+				return err
+			}
+			return s.advanceSourceGenerationSQL(serverID)
 		}); err != nil {
 			return ServerRemovalResult{}, err
 		}
@@ -516,6 +550,10 @@ func (s *IDStore) RemoveByServerIDPreservingInstances(serverID string) (ServerRe
 			delete(s.activeStreamServer, virtualID)
 		}
 	}
+	if s.sourceGenerations == nil {
+		s.sourceGenerations = map[string]int64{}
+	}
+	s.sourceGenerations[serverID] = s.sourceGenerationLocked(serverID) + 1
 	s.publishMergeRemovalLocked(mergeRemoval)
 	s.rebuildIndexesLocked()
 	return result, nil

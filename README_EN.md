@@ -26,6 +26,7 @@ You need reachable Emby upstreams and their account credentials or API Keys, plu
 | **Playback modes and stream routes** | Proxy/direct modes, ordered backup routes and mode-specific handling of recoverable failures before media transmission. |
 | **Upstream access and client identity** | Username/password or API Key, passthrough, Infuse/Hills/CapyPlayer presets and custom identity. |
 | **Web administration and library counts** | Manage sources, users, proxies, settings and logs, with movie, series and episode counts. |
+| **Library-wide aggregation and optional scanner** | Passive search/known-series discovery pages beyond the former per-source 5,000 limit; opt-in Movie/Series initial and daily delta scans, disabled by default. |
 | **Deployment and operations** | Release binaries, Docker source builds and Go source execution, with an SSH menu, log rotation and status checks. |
 
 ## Interface preview
@@ -100,7 +101,7 @@ EIO local accounts log into EIO; upstream accounts let EIO connect to sources. R
 - **Counts and merging differ:** counts sum official data from authorized online sources without cross-source deduplication; see [library counts](docs/en/media-counts.md).
 - **Keep matching upgrade backups:** preserve configuration, database, user-password.key and related files consistently. Installer rollback is not a full data backup; old user databases have version restrictions. See [operations](docs/en/operations.md#version-upgrades).
 
-Merging discovers candidates on demand and retains candidate/pagination limits; see [merge rules](docs/en/media-merge.md). Existing acceptance and untested areas are in [release validation](docs/en/release-v1.4.9-validation.md). Credential storage and risks are in the [security policy](SECURITY.md#english-security-policy).
+Passive search and mapped-series requests keep paging beyond the former per-source 5,000 cap; the active scanner stays disabled until both global and source grants are enabled. Read [merge rules](docs/en/media-merge.md), [V1.5.0 validation and limitations](docs/en/release-v1.5.0-validation.md) and [security guidance](SECURITY.md#english-security-policy). The scanner is not a cross-source virtual library.
 
 ## Documentation and FAQ
 

@@ -22,13 +22,6 @@ const (
 	filterIsUnplayed  = "isunplayed"
 )
 
-// localFilterScanLimit caps how many upstream items one locally-answered filter may
-// pull. The shared account's filter cannot narrow the candidate set — that is the
-// whole problem — so the proxy asks for the unfiltered set and intersects it
-// locally. Past this many items the page is served from a truncated candidate set,
-// which is logged.
-const localFilterScanLimit = 5000
-
 // filterNoticeHeader carries the "this filter is not isolated per user" hint to
 // callers that can read response headers. Emby clients ignore unknown headers.
 const filterNoticeHeader = "X-Emby-In-One-Filter-Notice"
@@ -153,9 +146,8 @@ func (a *App) prepareLocalUserFilter(w http.ResponseWriter, r *http.Request, val
 		return f, false
 	}
 	f.stripFrom(values)
-	// What comes back is a candidate set, not the answer.
-	values.Set("StartIndex", "0")
-	values.Set("Limit", strconv.Itoa(localFilterScanLimit))
+	// A bounded source window is acquired by the endpoint before applying
+	// local visibility and client pagination; no fixed candidate cap.
 	ensureSortFields(values)
 	return f, true
 }
@@ -272,10 +264,6 @@ func (a *App) filterItemsByLocalUserState(r *http.Request, items []map[string]an
 	reqCtx := requestContextFrom(r.Context())
 	if reqCtx == nil || reqCtx.ProxyUser == nil || a.WatchStore == nil {
 		return items, nil
-	}
-	if len(items) >= localFilterScanLimit && a.Logger != nil {
-		a.Logger.Warnf("local user-state filter scanned %d upstream items (limit %d): the result may be truncated",
-			len(items), localFilterScanLimit)
 	}
 	ids := make([]string, 0, len(items))
 	for _, item := range items {

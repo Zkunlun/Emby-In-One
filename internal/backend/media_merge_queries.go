@@ -52,42 +52,5 @@ func (a *App) filterRequestedMergeItems(query url.Values, items []map[string]any
 // A successful dedicated Shows request proves the type of its existing raw
 // parent locator. It never creates a new cross-source parent relationship.
 func (a *App) observeLegacyShowsParent(reqCtx *RequestContext, server, item string) error {
-	a.watchLifecycleMu.Lock()
-	defer a.watchLifecycleMu.Unlock()
-	if reqCtx != nil && !a.mediaAccessScopeLocked(reqCtx).allows(server) {
-		return errMediaAccessDenied
-	}
-	s := a.IDStore
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.mergeStoreReadyLocked(); err != nil {
-		return err
-	}
-	if !s.sourceAllowedForMergeLocked(server) {
-		return errMediaAccessDenied
-	}
-	id := s.legacyMergeOwnerForItemLocked(server, item)
-	if id == "" {
-		return nil
-	}
-	group := s.legacyMergeGroupLocked(id, "Series")
-	if group == nil || group.Policy != mergePolicyLegacy || (group.MediaType != "" && group.MediaType != "Series") {
-		return nil
-	}
-	for _, member := range group.Members {
-		if member.Ref.ServerID == server && member.Ref.ItemID == item {
-			return nil
-		}
-	}
-	member, err := mergeMemberFromCandidate(newMergeCandidate(server, map[string]any{"Id": item, "Type": "Series"}, nil, false), "")
-	if err != nil {
-		return err
-	}
-	group.MediaType = "Series"
-	group.Members = append(group.Members, member)
-	if err := s.db.withWriteTx(func() error { return s.writeMergeGroupSQL(group, nil) }); err != nil {
-		return err
-	}
-	s.publishMergeGroupLocked(group, nil)
-	return nil
+	return a.mergeDiscovery().observeLegacySeriesParent(reqCtx, server, item)
 }

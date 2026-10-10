@@ -180,8 +180,13 @@ func (a *App) installIdentityLifecycle() {
   defer a.watchLifecycleMu.RUnlock()
   info := a.Auth.ValidateToken(token)
   if info == nil || a.lifecyclePending { return nil }
+  var epochs map[string]int64
+  if a.IDStore!=nil && a.ConfigStore!=nil {
+   epochs=a.IDStore.snapshotSourceGenerations(configuredSourceIDs(a.ConfigStore.Snapshot()))
+  }
   return &RequestContext{Headers: cloneHeader(headers), ProxyToken: token, ProxyUser: info,
-   PlaybackDeviceID: resolvePlaybackDeviceID(headers, info.DeviceID)}
+   PlaybackDeviceID: resolvePlaybackDeviceID(headers, info.DeviceID),
+   SourceGenerations:epochs, SourceGenerationCaptured:true}
  }
  a.Identity.capturePublish = func(token string, publish func(string)) bool {
   a.watchLifecycleMu.RLock()

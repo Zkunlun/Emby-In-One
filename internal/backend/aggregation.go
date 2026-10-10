@@ -103,32 +103,7 @@ func (a *App) drainBackgroundResults(bgCtx context.Context, bgCancel context.Can
 // registerBackgroundIDs creates ID mappings for items from a late-arriving server.
 // This ensures that the next search/detail request can find these items.
 func (a *App) registerBackgroundIDs(result upstreamItemsResult) {
-	if result.RequestScope != nil && !a.isServerAllowed(result.RequestScope, result.ServerID) {
-		return
-	}
-	// Late data only registers independent primary/version members. Response
-	// rewriting would manufacture unproven historical parent/raw-item mappings.
-	for _, item := range result.Items {
-		candidate := mergeResultCandidate(result, item)
-		switch candidate.Identity.Type {
-		case "Series", "Season":
-			_, _ = a.IDStore.RegisterMergeCandidate(candidate, "")
-		case "Movie", "Episode":
-			registered := false
-			for _, version := range candidate.Versions {
-				if _, err := a.IDStore.RegisterMergeCandidate(independentMergeCandidate(candidate), version.Ref.MediaSourceID); err == nil {
-					registered = true
-				}
-			}
-			if !registered {
-				_, _ = a.IDStore.RegisterMergePlaceholder(candidate)
-			}
-		default:
-			if candidate.ItemID != "" {
-				a.IDStore.GetOrCreateVirtualID(candidate.ItemID, result.ServerID)
-			}
-		}
-	}
+	a.mergeDiscovery().observeLate(result)
 }
 
 // upstreamTask represents a single upstream fetch to be run in parallel.

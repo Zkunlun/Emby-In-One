@@ -153,6 +153,118 @@
       </table>
     </div>
 
+    <!-- Active Scanner: independent from Passive Aggregation -->
+    <div v-if="currentPage === 'scanner'" class="space-y-6">
+      <div class="card p-4 md:p-6 space-y-4">
+        <div class="flex flex-wrap justify-between items-center gap-3">
+          <div>
+            <h3 class="font-bold text-lg">主动全库扫描</h3>
+            <p class="text-sm text-slate-500">仅拉取电影 / 剧集轻量目录；不抓取剧集分季、单集、海报或播放地址。</p>
+          </div>
+          <button type="button" @click="refreshScanner" :disabled="scannerLoading || !!scannerBusy"
+            class="bg-white border px-4 py-2 rounded-lg flex items-center space-x-2 disabled:opacity-50">
+            <i data-lucide="refresh-cw" class="w-4 h-4"></i><span>刷新状态</span>
+          </button>
+        </div>
+        <div class="text-sm text-amber-600 bg-amber-50 border border-amber-200 rounded p-3 space-y-2">
+          <p><b>风控提示：</b>主动 Scanner 会实际请求上游 Emby，可能触发流量限制、403 或账号风控。请确认上游允许，并在低峰时操作；限速不能保证零风险。</p>
+          <p><b>与被动聚合不同：</b>客户端搜索或打开媒体详情触发的被动聚合不受本页开关限制。本页只管理主动目录扫描。</p>
+          <p>自动增量计划为每天 05:00（Asia/Shanghai），符合条件才执行；错过不补扫，只有手动授权和操作才可启动即时任务。</p>
+        </div>
+        <div v-if="scannerLoadError" role="alert" class="text-sm text-red-600 bg-red-50 border rounded p-3">状态读取失败：{{ scannerLoadError }}。为安全起见已禁用控制操作。</div>
+        <div v-if="scannerActionError" role="alert" class="text-sm text-red-600 bg-red-50 border rounded p-3">操作未确认成功：{{ scannerActionError }}。请依据刷新后的状态重试。</div>
+        <div v-if="scannerLoading && !scannerStatus" class="text-sm text-slate-500">正在读取扫描状态…</div>
+        <div v-if="scannerStatus" class="space-y-3">
+          <div class="flex flex-wrap justify-between items-center gap-3">
+            <div>
+              <span class="text-sm font-medium">全局主动扫描权限：</span>
+              <span class="px-2 py-1 rounded text-xs font-bold" :class="scannerStatus.scanEnabled ? 'bg-amber-50 text-amber-600' : 'bg-slate-100 text-slate-500'">{{ scannerStatus.scanEnabled ? '已开启' : '已关闭（默认）' }}</span>
+            </div>
+            <button type="button" @click="scannerSetGlobal(!scannerStatus.scanEnabled)" :disabled="!!scannerBusy || scannerLoading"
+              class="px-4 py-2 rounded-lg border text-sm font-medium disabled:opacity-50" :class="scannerStatus.scanEnabled ? 'text-red-600 bg-red-50' : 'text-blue-600 bg-blue-50'">
+              {{ scannerStatus.scanEnabled ? '关闭主动扫描总开关' : '开启主动扫描总开关' }}
+            </button>
+          </div>
+          <div class="flex flex-wrap gap-4 text-xs text-slate-500">
+            <span>执行器：{{ scannerStatus.executorAvailable ? '可用' : '不可用' }}</span>
+            <span>上游数量：{{ scannerStatus.upstreams.length }}</span>
+            <span>最近刷新：{{ scannerUpdatedAt || '—' }}</span>
+          </div>
+          <p v-if="!scannerStatus.executorAvailable" class="text-sm text-amber-600">后端扫描执行器不可用，启动和恢复任务已禁用。</p>
+        </div>
+      </div>
+
+      <div v-if="scannerStatus && scannerStatus.upstreams.length === 0" class="card p-6 text-sm text-slate-500">暂无已配置的上游服务器，主动扫描默认关闭。</div>
+      <div v-for="u in (scannerStatus?.upstreams || [])" :key="u.source?.sourceId" class="card p-4 md:p-6 space-y-4">
+        <div class="flex flex-wrap justify-between items-start gap-3">
+          <div class="space-y-1 min-w-0">
+            <h4 class="font-bold text-lg break-all">{{ scannerSourceName(u) }}</h4>
+            <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+              <span :class="scannerSourceOnline(u) ? 'text-green-600' : 'text-red-600'">{{ scannerSourceOnline(u) ? '上游在线' : '上游离线／未知' }}</span>
+              <span>状态：{{ scannerStateText(u.state) }}</span>
+              <span>运行类型：{{ scannerTypeText(u.run?.type) }}</span>
+            </div>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-xs text-slate-500">允许此上游主动扫描</span>
+            <button type="button" @click="scannerSetSource(u, !u.source.allowScan)" :disabled="!!scannerBusy || scannerLoading"
+              class="px-3 py-2 rounded-lg border text-sm font-medium disabled:opacity-50"
+              :class="u.source.allowScan ? 'bg-amber-50 text-amber-600' : 'bg-slate-100 text-slate-500'">
+              {{ u.source.allowScan ? '已授权 · 点击撤销' : '未授权 · 点击开启' }}
+            </button>
+          </div>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button type="button" @click="scannerCommand(u, 'start')" :disabled="!scannerMay(u, 'start')" class="btn-primary px-4 py-2 rounded-lg text-sm disabled:opacity-50">Start · 开始</button>
+          <button type="button" @click="scannerCommand(u, 'pause')" :disabled="!scannerMay(u, 'pause')" class="px-4 py-2 rounded-lg border text-sm disabled:opacity-50">Pause · 暂停</button>
+          <button type="button" @click="scannerCommand(u, 'resume')" :disabled="!scannerMay(u, 'resume')" class="px-4 py-2 rounded-lg border text-sm disabled:opacity-50">Resume · 恢复</button>
+          <button type="button" @click="scannerCommand(u, 'stop')" :disabled="!scannerMay(u, 'stop')" class="px-4 py-2 rounded-lg border text-sm text-red-600 disabled:opacity-50">Stop · 停止</button>
+          <button type="button" @click="scannerCommand(u, 'force_full')" :disabled="!scannerMay(u, 'force_full')" class="px-4 py-2 rounded-lg border text-sm text-amber-600 disabled:opacity-50">Force Full · 强制全量</button>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+          <div class="bg-slate-50 rounded p-3"><p class="text-xs text-slate-500">扫描页数</p><p class="font-bold">{{ u.run?.pages ?? '—' }}</p></div>
+          <div class="bg-slate-50 rounded p-3"><p class="text-xs text-slate-500">扫描条目数</p><p class="font-bold">{{ u.run?.items ?? '—' }}</p></div>
+          <div class="bg-slate-50 rounded p-3"><p class="text-xs text-slate-500">已完成首次全量</p><p class="font-bold">{{ u.source.initialFullScanCompleted ? '是' : '否' }}</p></div>
+          <div class="bg-slate-50 rounded p-3"><p class="text-xs text-slate-500">最近成功结束</p><p class="font-medium text-xs">{{ scannerTime(u.source.lastCompletedAt) }}</p></div>
+        </div>
+        <div class="text-xs text-slate-500 space-y-1">
+          <p>本次任务：{{ u.run?.id || '无' }} <span v-if="u.run">（修订 {{ u.run.revision }}，{{ scannerTime(u.run.updatedAt) }}）</span></p>
+          <p>熔断器：{{ scannerCircuitText(u.circuit?.state) }}；失败计数：{{ u.circuit?.failureCount ?? 0 }}；冷却至：{{ scannerTime(u.circuit?.retryAt) }}</p>
+          <p v-if="u.run?.lastError">任务错误：{{ scannerErrorText(u.run.lastError) }}</p>
+          <p v-if="u.circuit?.lastError">上游错误：{{ scannerErrorText(u.circuit.lastError) }}</p>
+        </div>
+        <div class="space-y-2">
+          <h5 class="font-semibold text-sm">媒体库进度与安全水位</h5>
+          <p v-if="!u.libraries?.length" class="text-xs text-slate-500">尚无已记录媒体库，首次扫描后出现。</p>
+          <div v-else class="overflow-x-auto border rounded-lg">
+            <table class="w-full min-w-[700px] text-left text-xs">
+              <thead class="bg-slate-50 text-slate-500"><tr>
+                <th class="px-3 py-3">媒体库 ID</th><th class="px-3 py-3">状态</th>
+                <th class="px-3 py-3">检查点（状态 / 最近页 / 条目 / 下次偏移）</th>
+                <th class="px-3 py-3">增量能力</th><th class="px-3 py-3">最后提交的游标</th>
+              </tr></thead>
+              <tbody class="divide-y divide-slate-100">
+                <tr v-for="lib in u.libraries" :key="lib.libraryId">
+                  <td class="px-3 py-3 font-mono break-all">{{ lib.libraryId }}</td>
+                  <td class="px-3 py-3">{{ lib.inactive ? '上游已移除／暂不可见' : (lib.initialCompleted ? '已初始化' : '未初始化') }}</td>
+                  <td class="px-3 py-3" v-if="u.checkpoints?.find(p => p.libraryId === lib.libraryId && p.runId === u.run?.id)">
+                    <span v-for="cp in u.checkpoints.filter(p => p.libraryId === lib.libraryId && p.runId === u.run?.id)" :key="cp.libraryId">
+                      {{ cp.state }} / {{ cp.lastSuccessPage }} / {{ cp.items }} / {{ cp.nextStartIndex }}
+                    </span>
+                  </td>
+                  <td class="px-3 py-3" v-else>—</td>
+                  <td class="px-3 py-3">{{ ({filtered:'可靠日期过滤',fallback:'降序回退',unknown:'待探测'})[lib.capability] || '待探测' }}</td>
+                  <td class="px-3 py-3">{{ scannerTime(lib.committedCursor) }}<p class="text-slate-500">全量安全水位：{{ scannerTime(lib.fullSafeWatermark) }}</p></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="text-xs text-slate-500">安全游标只会在相关媒体库完成并成功提交后推进；暂停、失败或中途退出时不等于已同步完成。</p>
+          <p v-if="u.checkpoints?.some(cp => !u.libraries?.some(lib => lib.libraryId === cp.libraryId))" class="text-xs text-amber-600">当前任务存在尚未纳入已记录媒体库列表的检查点，请查看服务端日志。</p>
+        </div>
+      </div>
+    </div>
+
     <!-- Proxies -->
     <div v-if="currentPage === 'proxies'" class="space-y-6">
       <div v-if="proxyList.length === 0" class="card p-12 text-center text-slate-400 italic">暂未添加网络代理</div>

@@ -10,7 +10,22 @@ import (
 // resolveRequestRouteID preserves each handler's missing/unavailable response
 // while denying unauthorized media before any upstream request.
 func (a *App) resolveRequestRouteID(w http.ResponseWriter, r *http.Request, virtualID string) (*routeResolution, bool) {
-	resolved, err := a.resolveAuthorizedRouteID(requestContextFrom(r.Context()), virtualID)
+	selected, _ := explicitMediaSourceID(r.URL.Query(), nil)
+	return a.resolveRequestRouteIDForSource(w, r, virtualID, selected)
+}
+
+func (a *App) resolveRequestRouteIDForSource(w http.ResponseWriter, r *http.Request, virtualID, sourceID string) (*routeResolution, bool) {
+	var resolved *routeResolution
+	var err error
+	if a.IDStore != nil && a.IDStore.MergeGroupTrust(virtualID) != mergeTrustTrusted && sourceID != "" {
+		resolved, err = a.resolveAuthorizedExplicitSourceRouteID(requestContextFrom(r.Context()), virtualID, sourceID)
+	} else {
+		resolved, err = a.resolveAuthorizedRouteID(requestContextFrom(r.Context()), virtualID)
+	}
+	if errors.Is(err, errMergeGroupQuarantined) {
+		writeMediaSelectionError(w, err)
+		return nil, false
+	}
 	if errors.Is(err, errMediaAccessDenied) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
 		return nil, false
@@ -160,7 +175,8 @@ func (a *App) selectAuthorizedMediaSource(r *http.Request, virtualItemID, source
 	if mapped.MediaItemID != "" {
 		itemOriginalID = mapped.MediaItemID
 	}
-	if !a.IDStore.MergeMemberAllowed(virtualItemID, serverID, itemOriginalID, mapped.OriginalID) {
+	if !a.IDStore.MergeMemberAllowed(virtualItemID, serverID, itemOriginalID, mapped.OriginalID) ||
+		!a.IDStore.MergeGroupRouteAllowed(virtualItemID, serverID, itemOriginalID, mapped.OriginalID) {
 		return nil, errMediaMappingMissing
 	}
 	if itemOriginalID == "" {
@@ -202,7 +218,8 @@ func (a *App) selectAuthorizedMediaSource(r *http.Request, virtualItemID, source
 	if !found {
 		return nil, errMediaMappingMissing
 	}
-	if !a.isServerAllowed(reqCtx, serverID) || !a.IDStore.MergeMemberAllowed(virtualItemID, serverID, itemOriginalID, mapped.OriginalID) {
+	if !a.isServerAllowed(reqCtx, serverID) || !a.IDStore.MergeMemberAllowed(virtualItemID, serverID, itemOriginalID, mapped.OriginalID) ||
+		!a.IDStore.MergeGroupRouteAllowed(virtualItemID, serverID, itemOriginalID, mapped.OriginalID) {
 		return nil, errMediaAccessDenied
 	}
 	a.rememberMediaMembership(reqCtx, virtualSourceID, virtualItemID, serverID)
@@ -215,6 +232,12 @@ func writeMediaSelectionError(w http.ResponseWriter, err error) {
 		status = http.StatusForbidden
 	} else if errors.Is(err, errMediaSourceUnavailable) {
 		status = http.StatusBadGateway
+	} else if errors.Is(err, errMergeGroupQuarantined) {
+		status = http.StatusConflict
+	}
+	if errors.Is(err, errMergeGroupQuarantined) {
+		writeJSON(w, status, map[string]any{"message": "Media identity conflict: a source-qualified version is required"})
+		return
 	}
 	writeJSON(w, status, map[string]any{"message": "Media source is unavailable or not authorized"})
 }
@@ -308,6 +331,14 @@ func (a *App) prepareFallbackMediaSelection(w http.ResponseWriter, r *http.Reque
 		return false
 	}
 	if sourceID == "" {
+		itemID := r.URL.Query().Get("ItemId")
+		if bodyMap != nil && itemID == "" {
+			itemID, _ = bodyMap["ItemId"].(string)
+		}
+		if a.IDStore.MergeGroupTrust(itemID) != mergeTrustTrusted {
+			writeMediaSelectionError(w, errMergeGroupQuarantined)
+			return false
+		}
 		return a.isServerAllowed(requestContextFrom(r.Context()), client.ID) &&
 			a.qualifyFallbackBodyIDs(w, bodyMap, client.ID)
 	}

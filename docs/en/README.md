@@ -2,7 +2,7 @@
 
 [Project home](../../README_EN.md) · [Security policy](../../SECURITY.md#english-security-policy) · [简体中文](../README.md)
 
-Applies to the V1.4.9 mainline.
+Applies to the V1.5.0 mainline.
 
 ## Installation and first use
 
@@ -31,8 +31,9 @@ Applies to the V1.4.9 mainline.
 ## Releases and history
 
 - [Changelog (Chinese)](../../Update.md) and [Releases](https://github.com/Zkunlun/Emby-In-One/releases).
-- [V1.4.9 validation scope](release-v1.4.9-validation.md): existing evidence and untested areas.
-- [Version numbering](version-numbering.md): how the historical V1.5.0/V1.5.1/V1.6.0 labels map to current numbering.
+- [V1.5.0 validation and limitations](release-v1.5.0-validation.md): scanner/aggregation test evidence and outstanding real-client acceptance.
+- [V1.4.9 validation scope](release-v1.4.9-validation.md): historical release evidence.
+- [Version numbering](version-numbering.md): how the pre-2026-10-06 historical V1.5.0/V1.5.1/V1.6.0 labels differ from current numbering.
 - [Update plan (Chinese)](../../Update%20Plan.md): the existing maintenance plan; published behavior is defined by Releases and current documentation.
 - [Historical Node.js V1.2.1 documentation](../../README_EN_V1.2.1.md) and [legacy notes](../../legacy/README.md): reference material excluded from the current Go build.
 

@@ -2,7 +2,7 @@
 
 [Project home](../../README_EN.md) · [Documentation](README.md) · [简体中文](../media-merge.md)
 
-Applies to V1.4.9. Merging happens when requests encounter candidates while browsing, searching, listing seasons/episodes or fetching details. Startup and user creation do not scan every upstream's full library.
+Applies to V1.5.0. Merging happens when requests encounter candidates while browsing, searching, listing seasons/episodes or fetching details. Startup and user creation do not scan every upstream's full library.
 
 | Object | Identity evidence |
 | --- | --- |
@@ -27,9 +27,12 @@ Stored relations are not proactively split because metadata changes. Requests pr
 
 One regular user shares played state, favorites and the raw resume position within a merged group. Different users and different work identities remain isolated. Different cuts share state too, without position conversion.
 
-## Existing limits
+## V1.5.0 passive discovery and scanner boundaries
 
-Some aggregate/local-filter paths fetch at most 5000 raw candidates per upstream per request, not 5000 deduplicated works or versions. ParentId paths still page upstream raw items. There is no new full-library index, global deduplicated pagination or indirect three-source conflict audit. Library counts sum official upstream values and differ from merged lists.
+- Global search, aggregate lists and passive episode/season discovery of mapped series no longer stop at the former per-upstream 5,000-candidate cap. They page using validated upstream cursors until the requested window or a valid exhaustion condition. Aggregated TotalRecordCount may be provisional; unindexed global sorting can be expensive and concurrent upstream changes prevent a fixed cross-request snapshot.
+- Browsing one upstream library remains source-scoped; this release does **not** create a combined A+B virtual library.
+- The optional administrator Scanner is **disabled by default**, requires both global and per-source grants and only proactively discovers Movie/Series. It never actively crawls Seasons/Episodes, artwork or playback streams. The 05:00 Asia/Shanghai delta does not catch up missed slots; date fallback is best-effort.
+- Indirect contradictory provider evidence quarantines the entire merged work group from unsafe automatic cross-source routing. Source lifecycle fences block late index writes. Library counts still sum official per-upstream values instead of deduplicated works.
 
 ## Display metadata priority
 
@@ -55,4 +58,4 @@ Each upstream Item ID maps to a globally unique virtual ID: 16 random bytes (128
 
 All library entries remain, with a server-name suffix. Candidates retain existing round-robin interleaving. Merging and version retention do not expand current authorization.
 
-[Release validation](release-v1.4.9-validation.md) · [User watch state](users-and-permissions.md)
+[Release validation](release-v1.5.0-validation.md) · [User watch state](users-and-permissions.md)

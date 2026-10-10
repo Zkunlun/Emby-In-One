@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/url"
-	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -58,6 +57,7 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 		if result.CompleteItems == nil {
 			result.CompleteItems = map[string]bool{}
 		}
+		quality := sampleMergeQuality(result.Items)
 		missing := []string{}
 		seen := map[string]bool{}
 		for _, item := range result.Items {
@@ -72,7 +72,9 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 				seen[id] = true
 			}
 		}
-		metadata := a.fetchEncounteredMergeMetadata(ctx, reqCtx, client, missing)
+		quality["need_metadata_hydrate"] = len(missing)
+		quality["metadata_hydrate_batches"] = (len(missing) + maxBatchIDCount - 1) / maxBatchIDCount
+		metadata := a.fetchEncounteredMergeMetadata(withSampleSource(ctx, sampleSourceHydrate), reqCtx, client, missing)
 		for _, item := range result.Items {
 			id, _ := item["Id"].(string)
 			if data := metadata[id]; data != nil {
@@ -111,7 +113,10 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 				missing = append(missing, parentID)
 			}
 		}
-		for id, item := range a.fetchEncounteredMergeMetadata(ctx, reqCtx, client, missing) {
+		quality["need_parent_hydrate"] = len(missing)
+		quality["parent_hydrate_batches"] = (len(missing) + maxBatchIDCount - 1) / maxBatchIDCount
+		a.SampleCollector.RecordMergeQuality(reqCtx, client.Name, quality)
+		for id, item := range a.fetchEncounteredMergeMetadata(withSampleSource(ctx, sampleSourceParentHydrate), reqCtx, client, missing) {
 			if parent := newMergeSeriesEvidence(result.ServerID, item); parent != nil {
 				result.Parents[id] = parent
 			}
@@ -183,7 +188,9 @@ func mergeResultCandidate(result upstreamItemsResult, item map[string]any) merge
 		parentID, _ = item["ParentId"].(string)
 	}
 	id, _ := item["Id"].(string)
-	return newMergeCandidate(result.ServerID, item, result.Parents[parentID], result.FullSources || result.CompleteItems[id])
+	candidate := newMergeCandidate(result.ServerID, item, result.Parents[parentID], result.FullSources || result.CompleteItems[id])
+	candidate.ObservationOrigin = "passive_list"
+	return candidate
 }
 
 func (a *App) invalidateMergedWatchAliases(ids []string) {
@@ -208,77 +215,18 @@ func (a *App) invalidateMergedWatchAliases(ids []string) {
 	}
 }
 
-// Mutations and cache publication share the authorization lifecycle gate.
-func (a *App) mergeHTTPBefore(candidates ...mergeCandidate) map[string]*mergeStoredGroup {
-	before := map[string]*mergeStoredGroup{}
-	for _, candidate := range candidates {
-		for _, id := range a.IDStore.MergeGroupsForItem(candidate.ServerID, candidate.ItemID) {
-			before[id] = a.IDStore.ResolveMergeGroup(id)
-		}
-	}
-	return before
-}
-
-func (a *App) publishHTTPMergeChange(id string, before map[string]*mergeStoredGroup) {
-	after := a.IDStore.ResolveMergeGroup(id)
-	if len(before) == 1 && reflect.DeepEqual(before[id], after) {
-		return
-	}
-	ids := a.IDStore.MergeStateIDs(id)
-	a.invalidateMergedWatchAliases(ids)
-	// Invalidate membership hints, preserving exact negotiated sessions and leases.
-	if a.playbackRoutes != nil {
-		changed := map[string]bool{}
-		for _, old := range ids {
-			changed[old] = true
-		}
-		a.playbackRoutes.mu.Lock()
-		for key, entry := range a.playbackRoutes.mediaSource {
-			if changed[entry.ItemID] {
-				entry.ItemID = ""
-				a.playbackRoutes.mediaSource[key] = entry
-			}
-		}
-		a.playbackRoutes.mu.Unlock()
-	}
-}
-
+// Compatibility wrappers retain HTTP call sites while all mutation policy,
+// lifecycle checks and cache publication live in the shared service.
 func (a *App) associateHTTPMerge(reqCtx *RequestContext, left, right mergeCandidate, sourceLeft, sourceRight, target string) (string, error) {
-	a.watchLifecycleMu.Lock()
-	defer a.watchLifecycleMu.Unlock()
-	if reqCtx != nil {
-		scope := a.mediaAccessScopeLocked(reqCtx)
-		if !scope.allows(left.ServerID) || !scope.allows(right.ServerID) {
-			return "", errMediaAccessDenied
-		}
-	}
-	before := a.mergeHTTPBefore(left, right)
-	id, err := a.IDStore.AssociateMergePair(left, right, sourceLeft, sourceRight, target)
-	if err == nil {
-		a.publishHTTPMergeChange(id, before)
-	}
-	return id, err
+	return a.mergeDiscovery().associate(reqCtx, left, right, sourceLeft, sourceRight, target)
 }
 
 func (a *App) registerHTTPMerge(reqCtx *RequestContext, candidate mergeCandidate, target string) (string, error) {
-	a.watchLifecycleMu.Lock()
-	defer a.watchLifecycleMu.Unlock()
-	if reqCtx != nil && !a.mediaAccessScopeLocked(reqCtx).allows(candidate.ServerID) {
-		return "", errMediaAccessDenied
-	}
-	before := a.mergeHTTPBefore(candidate)
-	if _, err := a.IDStore.CaptureLegacyMergeVersions(candidate); err != nil {
-		return "", err
-	}
-	id, err := a.IDStore.RegisterMergeItem(independentMergeCandidate(candidate), target)
-	if err == nil {
-		a.publishHTTPMergeChange(id, before)
-	}
-	return id, err
+	return a.mergeDiscovery().register(reqCtx, candidate, target, true)
 }
 
 func (a *App) bindHTTPMergePlaceholder(reqCtx *RequestContext, id string, candidate mergeCandidate) error {
-	_, err := a.registerHTTPMerge(reqCtx, candidate, id)
+	_, err := a.mergeDiscovery().register(reqCtx, candidate, id, true)
 	return err
 }
 
@@ -384,6 +332,9 @@ func (a *App) mergeHTTPItems(results []upstreamItemsResult, clientUserID string,
 			continue
 		}
 		if pos, ok := seen[id]; ok {
+			if a.IDStore.MergeGroupTrust(id) != mergeTrustTrusted {
+				continue // do not blend conflicting sources or metadata
+			}
 			combined := mergeProjectedSources(merged[pos]["MediaSources"], item["MediaSources"])
 			if isBetterMetadata(merged[pos], servers[id], item, unit.ServerID, cfg) {
 				merged[pos] = item
@@ -466,6 +417,9 @@ func (a *App) projectMergeItem(raw map[string]any, server, id, user string) map[
 	}
 	if ud, ok := item["UserData"].(map[string]any); ok {
 		ud["ItemId"] = id
+	}
+	if a.IDStore.MergeGroupTrust(id) != mergeTrustTrusted {
+		sources = nil // no automatic cross-source version projection
 	}
 	if hasSources {
 		item["MediaSources"] = sources

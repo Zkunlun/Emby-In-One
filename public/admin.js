@@ -8,6 +8,7 @@ createApp({
       currentPage: 'dashboard', pages: [
         {id:'dashboard', name:'系统概览', icon:'layout-dashboard'},
         {id:'servers', name:'上游节点', icon:'server'},
+        {id:'scanner', name:'全库扫描', icon:'scan-search'},
         {id:'users', name:'用户管理', icon:'users'},
         {id:'proxies', name:'网络代理', icon:'shield'},
         {id:'settings', name:'全局设置', icon:'settings'},
@@ -15,6 +16,9 @@ createApp({
       ],
       stats: { upstreamCount: 0, upstreamOnline: 0, idMappings: { mappingCount: 0, persistent: true }, upstream: [] },
       upstreamList: [], proxyList: [],
+      scannerStatus: null, scannerServers: [], scannerLoading: false,
+      scannerLoadError: '', scannerActionError: '', scannerBusy: '',
+      scannerRequestSeq: 0, scannerUpdatedAt: '',
       settings: { serverName: '', playbackMode: 'proxy', adminUsername: '', adminPassword: '', currentPassword: '', timeouts: { api: 30000, global: 15000, login: 10000, healthCheck: 10000, healthInterval: 60000, searchGracePeriod: 3000, metadataGracePeriod: 3000, latestGracePeriod: 0 } },
       adminUsernameOriginal: '',   // 服务端当前的管理员用户名，用于判断这次保存是否真的改了用户名
       logs: [], isLoadingLogs: false, saveSuccess: false,
@@ -45,7 +49,15 @@ createApp({
     currentPage(v) { if(this._refreshTimer) clearTimeout(this._refreshTimer); this._refreshTimer = setTimeout(()=>{this.refresh(); this.$nextTick(() => lucide.createIcons());}, 50); },
     'serverForm.playbackMode'(v) { if(v === 'redirect' && this.serverForm) this.serverForm.proxyId = null; }
   },
-  mounted() { const t = localStorage.getItem('eio_token'); if(t) this.checkAuth(t); this.$nextTick(() => lucide.createIcons()); },
+  mounted() {
+    const t = localStorage.getItem('eio_token');
+    if(t) this.checkAuth(t);
+    this._scannerPoll = setInterval(() => {
+      if(this.isLoggedIn && this.currentPage === 'scanner' && !this.scannerBusy && !this.scannerLoading) this.refreshScanner();
+    }, 15000);
+    this.$nextTick(() => lucide.createIcons());
+  },
+  beforeUnmount() { clearInterval(this._scannerPoll); clearTimeout(this._refreshTimer); },
   methods: {
     navigateTo(id) { this.currentPage = id; this.showSidebar = false; },
     async api(path, opts = {}) {
@@ -72,7 +84,13 @@ createApp({
       try { await this.api('/admin/api/status'); } catch(e) { localStorage.removeItem('eio_token'); this.loginError = '需要管理员权限'; return; }
       this.isLoggedIn = true; this.refresh(); this.refreshClientInfo();
     } catch(e) { this.loginError = '用户名或密码错误'; } },
-    logout() { this.isLoggedIn = false; localStorage.removeItem('eio_token'); },
+    logout() {
+      this.isLoggedIn = false;
+      this.scannerRequestSeq++;
+      this.scannerStatus = null; this.scannerServers = [];
+      this.scannerLoadError = ''; this.scannerActionError = '';
+      localStorage.removeItem('eio_token');
+    },
     async copyClientUA() {
       if (!this.clientInfo || !this.clientInfo.userAgent) return;
       try { await navigator.clipboard.writeText(this.clientInfo.userAgent); alert('UA 已复制到剪贴板'); } catch(e) {}
@@ -80,10 +98,167 @@ createApp({
     refresh() {
       if(this.currentPage === 'dashboard') this.refreshDashboard();
       if(this.currentPage === 'servers') this.refreshServers();
+      if(this.currentPage === 'scanner') this.refreshScanner();
       if(this.currentPage === 'users') this.refreshUsers();
       if(this.currentPage === 'proxies') this.refreshProxies();
       if(this.currentPage === 'settings') this.refreshSettings();
       if(this.currentPage === 'logs') this.refreshLogs();
+    },
+    scannerStateText(state) {
+      return ({
+        initial_scan_pending:'等待首次全量', idle:'空闲',
+        queued:'排队中', scanning:'扫描中',
+        paused_user_activity:'用户活跃，自动让路', paused_admin:'管理员暂停',
+        paused_permission:'权限撤销，已暂停', backoff:'上游限流冷却',
+        circuit_open:'上游故障熔断', completed:'完成', failed:'失败', stopped:'已停止'
+      })[state] || '未知状态';
+    },
+    scannerTypeText(type) {
+      return ({ full:'首次全量', delta:'每日增量', force_full:'强制全量校准', library_initial:'新库初始化' })[type] || '无';
+    },
+    scannerCircuitText(state) {
+      return ({closed:'正常',open:'熔断',backoff:'限流冷却'})[state] || '未知';
+    },
+    scannerErrorText(code) {
+      return ({
+        http401:'上游认证失效（401）', http403:'上游拒绝访问（403）',
+        http429:'上游限流（429）', http5xx:'上游故障（5xx）',
+        permission_revoked:'扫描权限已撤销'
+      })[code] || (code ? '扫描异常（请核对日志）' : '无');
+    },
+    scannerApiError(e) {
+      if(e && e.status === 403) return '权限不足或扫描未获授权（403）';
+      if(e && e.status === 404) return '扫描任务或上游已不存在（404），请刷新';
+      if(e && e.status === 409) return '状态已变化或命令冲突（409），请刷新后重试';
+      if(e && e.status === 503) return '上游离线、未认证或扫描暂时不可用（503）';
+      if(e && e.status === 401) return '登录已失效（401）';
+      return '请求失败，请检查网络或服务端日志';
+    },
+    scannerTime(value) {
+      if(!value || typeof value !== 'string') return '—';
+      const t = new Date(value);
+      return Number.isNaN(t.getTime()) ? '—' : t.toLocaleString();
+    },
+    scannerSourceName(entry) {
+      const source = entry && entry.source && entry.source.sourceId;
+      const up = this.scannerServers.find(s => s.id === source);
+      return up ? up.name : (source || '未知上游');
+    },
+    scannerSourceOnline(entry) {
+      const source = entry && entry.source && entry.source.sourceId;
+      const up = this.scannerServers.find(s => s.id === source);
+      return !!up && up.online === true;
+    },
+    scannerIsActive(entry) {
+      return !!entry && ['queued','scanning','paused_user_activity','paused_admin',
+        'paused_permission','backoff','circuit_open'].includes(entry.state);
+    },
+    scannerCooldown(entry) {
+      if(entry?.circuit?.state !== 'backoff') return false;
+      const time = Date.parse(entry.circuit.retryAt || '');
+      return !Number.isFinite(time) || time > Date.now();
+    },
+    scannerMay(entry, action) {
+      if(!this.scannerStatus || this.scannerBusy || this.scannerLoading || !entry?.source?.sourceId) return false;
+      const active = this.scannerIsActive(entry);
+      if(action === 'stop') return active;
+      if(action === 'pause') return active && !['paused_admin','paused_permission'].includes(entry.state);
+      const canStart = this.scannerStatus.scanEnabled && entry.source.allowScan &&
+        this.scannerStatus.executorAvailable === true && this.scannerSourceOnline(entry) && !this.scannerCooldown(entry);
+      if(!canStart) return false;
+      if(action === 'start' || action === 'force_full') return !active;
+      if(action === 'resume') return active && ['paused_admin','paused_permission','paused_user_activity',
+        'backoff','circuit_open'].includes(entry.state);
+      return false;
+    },
+    async refreshScanner() {
+      if(!this.isLoggedIn) return;
+      const request = ++this.scannerRequestSeq;
+      this.scannerLoading = true;
+      this.scannerLoadError = '';
+      try {
+        const [status, servers] = await Promise.all([
+          this.api('/admin/api/scanner/status'),
+          this.api('/admin/api/upstream')
+        ]);
+        if(request !== this.scannerRequestSeq || !this.isLoggedIn) return;
+        const validSource = item => item && item.source &&
+          typeof item.source.sourceId === 'string' && item.source.sourceId.length > 0 &&
+          typeof item.source.allowScan === 'boolean' && typeof item.state === 'string' &&
+          Array.isArray(item.libraries) && Array.isArray(item.checkpoints) &&
+          item.circuit && typeof item.circuit === 'object';
+        if(!status || typeof status.scanEnabled !== 'boolean' || !Array.isArray(status.upstreams) ||
+          !status.upstreams.every(validSource) || !Array.isArray(servers) ||
+          !servers.every(s => s && typeof s.id === 'string' && typeof s.name === 'string' && typeof s.online === 'boolean')) {
+          throw new Error('Invalid scanner status shape');
+        }
+        this.scannerStatus = status;
+        this.scannerServers = servers;
+        this.scannerUpdatedAt = new Date().toLocaleString();
+      } catch(e) {
+        if(request !== this.scannerRequestSeq || !this.isLoggedIn) return;
+        // Fail closed: never display stale state or enable commands on fetch failure.
+        this.scannerStatus = null;
+        this.scannerServers = [];
+        this.scannerLoadError = this.scannerApiError(e);
+      } finally {
+        if(request === this.scannerRequestSeq) {
+          this.scannerLoading = false;
+          this.$nextTick(() => lucide.createIcons());
+        }
+      }
+    },
+    async scannerWrite(key, path, body, confirmation) {
+      if(!this.scannerStatus || this.scannerBusy || this.scannerLoading) return;
+      if(confirmation && !confirm(confirmation)) return;
+      this.scannerBusy = key;
+      this.scannerActionError = '';
+      this.scannerRequestSeq++; // Discard any in-flight read before mutation.
+      try {
+        await this.api(path, { method: 'PUT', body: JSON.stringify(body) });
+      } catch(e) {
+        this.scannerActionError = this.scannerApiError(e);
+      } finally {
+        await this.refreshScanner();
+        this.scannerBusy = '';
+      }
+    },
+    async scannerSetGlobal(value) {
+      if(!this.scannerStatus || this.scannerStatus.scanEnabled === value) return;
+      await this.scannerWrite('global', '/admin/api/scanner/settings', {scanEnabled:value},
+        value ? '启用主动全库扫描总开关？请先确认上游允许自动请求；仍需逐上游授权。'
+              : '关闭主动扫描总开关？正在运行的任务将进入权限暂停状态，需要再次手动恢复。');
+    },
+    async scannerSetSource(entry, value) {
+      const id = entry?.source?.sourceId;
+      if(!id || !this.scannerStatus || entry.source.allowScan === value) return;
+      await this.scannerWrite('source:'+id, '/admin/api/scanner/upstreams/'+encodeURIComponent(id),
+        {allowScan:value}, value
+          ? '授权该上游进行主动全库扫描？可能造成上游风控风险；本操作不会立即开始任务。'
+          : '撤销该上游的主动扫描权限？正在运行的任务将暂停。');
+    },
+    async scannerCommand(entry, action) {
+      if(!this.scannerMay(entry, action)) return;
+      const id = entry.source.sourceId;
+      const messages = {
+        start:'启动该上游扫描？首次为轻量全量，之后为每日增量；会请求真实上游。',
+        resume:'恢复扫描任务并继续请求上游？',
+        pause:'暂停该上游的扫描任务？',
+        stop:'终止该上游的当前扫描任务？进度将停止推进；下次 Start 创建新任务。',
+        force_full:'强制重新扫描该上游的电影/剧集轻量目录？请求量可能较大，建议低峰时执行。'
+      };
+      if(!confirm(messages[action])) return;
+      this.scannerBusy = 'command:'+id;
+      this.scannerActionError = '';
+      this.scannerRequestSeq++;
+      try {
+        await this.api('/admin/api/scanner/upstreams/'+encodeURIComponent(id)+'/commands/'+action, {method:'POST'});
+      } catch(e) {
+        this.scannerActionError = this.scannerApiError(e);
+      } finally {
+        await this.refreshScanner();
+        this.scannerBusy = '';
+      }
     },
     async refreshDashboard() { try { this.stats = await this.api('/admin/api/status'); } catch(e) {} this.refreshClientInfo(); this.$nextTick(()=>lucide.createIcons()); },
     async refreshClientInfo() { try { this.clientInfo = await this.api('/admin/api/client-info'); } catch(e) {} this.$nextTick(()=>lucide.createIcons()); },

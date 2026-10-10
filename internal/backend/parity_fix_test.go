@@ -259,7 +259,12 @@ upstream: []
 			},
 		}
 
-		payload := app.mergedItemsPayload(results, app.Auth.ProxyUserID())
+		// Passive merge mutations require an authenticated, source-epoch-
+		// stamped request; metadata ordering must be tested under that same
+		// production authorization contract rather than a nil context.
+		adminToken := loginTokenAs(t, handler, "admin", "testpass")
+		reqCtx := phase3EHTTPContext(t, app, adminToken)
+		payload := app.mergedItemsPayload(results, app.Auth.ProxyUserID(), reqCtx)
 		items, _ := payload["Items"].([]any)
 		if len(items) != 1 {
 			t.Fatalf("expected 1 merged item, got %d", len(items))

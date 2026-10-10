@@ -37,10 +37,14 @@ func newFilterStub(t *testing.T, items []map[string]any) *filterStubUpstream {
 			query := r.URL.Query()
 			stub.recordItemRequest(query)
 			page, total := filterStubPage(items, query)
+			start, _ := strconv.Atoi(query.Get("StartIndex"))
+			if start < 0 {
+				start = 0
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"Items":            toAnySlice(page),
 				"TotalRecordCount": total,
-				"StartIndex":       0,
+				"StartIndex":       start,
 			})
 		case strings.HasSuffix(r.URL.Path, "/FavoriteItems/") || strings.Contains(r.URL.Path, "/FavoriteItems/"):
 			w.WriteHeader(http.StatusNoContent)

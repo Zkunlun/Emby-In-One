@@ -204,9 +204,10 @@ func TestShowsEpisodesAcceptsSeasonIDQueryCaseVariants(t *testing.T) {
 				if got := forwarded.Get("Fields"); got != "Overview,MediaSources,PremiereDate,PrimaryImageAspectRatio,ProviderIds" {
 					t.Errorf("upstream Fields = %q", got)
 				}
-				// Task 4 filters visibility before the client page limit.
-				if got := forwarded.Get("Limit"); got != "5000" {
-					t.Errorf("upstream candidate Limit = %q, want 5000", got)
+				// Phase 4 fetches bounded upstream windows, not an arbitrary
+				// 5000-candidate prefix; the client window is applied after merge.
+				if got := forwarded.Get("Limit"); got != "128" {
+					t.Errorf("upstream page Limit = %q, want 128", got)
 				}
 
 				var payload map[string]any

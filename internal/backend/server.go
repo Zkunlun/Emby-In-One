@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -26,6 +27,9 @@ type App struct {
 	libraryCache    *upstreamLibraryCache
 	mediaCounts     *mediaCountsService
 	PlaybackLimiter *PlaybackLimiter
+	SampleCollector  *SampleCollector
+	Scanner         *ScannerControl
+	scanActivity   *scanActivityGate
 	playbackRoutes  *playbackRouteStore
 	watchPlayback   playbackWatchCache
 	loginLimiter    loginRateLimiter
@@ -66,20 +70,27 @@ func NewApp() (*App, error) {
  identity := NewClientIdentityServiceFromDetectedConfig()
  auth, err := NewAuthManager(configStore, identity, logger, users)
  if err != nil { return nil, err }
+ sampleCollector := newSampleCollector(cfg.DataDir)
  app := &App{ConfigStore: configStore, Logger: logger, IDStore: idStore,
   Identity: identity, Auth: auth, UserStore: users, WatchStore: watch,
   HiddenLibraries: hidden, libraryCache: newUpstreamLibraryCache(),
-  PlaybackLimiter: NewPlaybackLimiter(), playbackRoutes: newPlaybackRouteStore()}
+  PlaybackLimiter: NewPlaybackLimiter(), playbackRoutes: newPlaybackRouteStore(), SampleCollector: sampleCollector, scanActivity: newScanActivityGate()}
  app.watchLifecycleMu.Lock()
  app.publishConfiguredSourcesLocked(configStore.Snapshot())
  if idStore.DB() != nil { err = app.recoverWatchLifecycleLocked() }
  app.watchLifecycleMu.Unlock()
  if err != nil { return nil, err }
+ // Scanner storage is fail-closed; source deletes share its SQLite transaction.
+ if idStore.DB()!=nil {
+  app.Scanner,err = newScannerControl(idStore.DB())
+  if err!=nil{return nil,fmt.Errorf("scanner control migration: %w",err)}
+ }
  // Recovery precedes identity migration, upstream login and HTTP authentication.
  if err := identity.migrateSourceOwnership(configStore.Snapshot().Upstream); err != nil { return nil, err }
  app.installIdentityLifecycle()
- app.Upstream = NewUpstreamPool(configStore.Snapshot(), logger)
+ app.Upstream = NewUpstreamPool(configStore.Snapshot(), logger, sampleCollector)
  app.Upstream.LoginAll()
+ if err=app.recoverScannerState();err!=nil{app.Upstream.stopHealthChecks();return nil,err}
  counts, err := newMediaCountsService(app, realCountsScheduleClock(), nil)
  if err != nil { app.Upstream.stopHealthChecks(); return nil, err }
  app.mediaCounts = counts
@@ -102,6 +113,7 @@ func logTimeoutNotice(logger *Logger, timeouts TimeoutsConfig) {
 }
 
 func (a *App) Close() error {
+	if a.SampleCollector != nil { a.SampleCollector.Close() }
 	if a.mediaCounts != nil { a.mediaCounts.close() }
 	if a.Upstream != nil {
 		a.Upstream.stopHealthChecks()
@@ -147,6 +159,15 @@ func (a *App) Run() error {
 			}
 		}
 	}()
+
+	// Phase5 scheduler queues durable deltas; it does not fetch upstream items.
+	if a.Scanner!=nil {go a.scannerScheduleLoop(evictCtx)}
+	var workerDone chan struct{}
+	if a.Scanner!=nil {
+		workerDone=make(chan struct{})
+		go func(){defer close(workerDone);a.scannerWorkerLoop(evictCtx)}()
+	}
+	defer func(){evictCancel();if workerDone!=nil{<-workerDone}}()
 
 	// Graceful shutdown on SIGINT/SIGTERM
 	shutdownCh := make(chan os.Signal, 1)

@@ -89,7 +89,10 @@ func TestDatabaseFileUsesPrivateMode(t *testing.T) {
 }
 
 func TestEvictExpiredStreamState_CleansActiveStreamServer(t *testing.T) {
-	store, _ := NewIDStore("", nil)
+	store, err := NewIDStore(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer store.Close()
 
 	store.SetActiveStream("vid-1", "srv-0")

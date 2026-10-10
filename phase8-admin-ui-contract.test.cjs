@@ -331,6 +331,205 @@ check('rendered edit modal uses no-access library state and disabled pending sav
   assert.ok(save); assert.equal(save.props.disabled, true);
 });
 
+
+function scannerFixture({enabled = false, allowScan = false, state = 'initial_scan_pending',
+  online = true, available = true, withRun = false} = {}) {
+  return {
+    server: {id:'src-a',name:'Example source',online},
+    status: {scanEnabled:enabled, executorAvailable:available, upstreams:[{
+      source:{sourceId:'src-a',allowScan,initialFullScanCompleted:state === 'idle',lastCompletedAt:''},
+      state, run:withRun?{id:'run-1',sourceId:'src-a',type:'delta',state,
+        pages:3,items:64,updatedAt:'2026-10-10T03:04:05Z',revision:3}:null,
+      checkpoints:[{runId:'run-1',sourceId:'src-a',libraryId:'lib-a',state:'scanning',
+        lastSuccessPage:1,items:64,nextStartIndex:64}],
+      libraries:[{libraryId:'lib-a',initialCompleted:true,inactive:false,
+        capability:'filtered',committedCursor:'2026-10-09T05:00:00Z'}],
+      circuit:{state:'closed',failureCount:0,lastError:''}
+    }]}
+  };
+}
+function scannerReady(h, fixture) {
+  h.app.isLoggedIn = true; h.app.currentPage = 'scanner';
+  h.app.scannerStatus = fixture.status;
+  h.app.scannerServers = [fixture.server];
+  return fixture.status.upstreams[0];
+}
+check('scanner nav and passive/active warning exist', () => {
+  const h = panel();
+  assert.ok(h.app.pages.some(p => p.id === 'scanner' && p.name === '全库扫描'));
+  assert.match(html, /与被动聚合不同/);
+  assert.match(html, /风控提示/);
+  assert.match(html, /Asia\/Shanghai/);
+});
+check('scanner defaults disabled and no active command', () => {
+  const h = panel(), entry = scannerReady(h, scannerFixture());
+  for(const cmd of ['start','pause','resume','stop','force_full']) assert.equal(h.app.scannerMay(entry,cmd),false);
+});
+check('active control requires global and source opt-in, executor and online', () => {
+  for(const field of ['enabled','allowScan','online','available']) {
+    const args = {enabled:true,allowScan:true,online:true,available:true};
+    args[field] = false;
+    const h = panel(), e = scannerReady(h, scannerFixture(args));
+    assert.equal(h.app.scannerMay(e,'start'),false,field);
+    assert.equal(h.app.scannerMay(e,'force_full'),false,field);
+  }
+  const h = panel(), e = scannerReady(h,scannerFixture({enabled:true,allowScan:true}));
+  assert.equal(h.app.scannerMay(e,'start'),true);
+  assert.equal(h.app.scannerMay(e,'force_full'),true);
+});
+check('active transitions are state-specific, no start or force full in-flight', () => {
+  const args = {enabled:true,allowScan:true,withRun:true};
+  for(const state of ['queued','scanning','paused_user_activity','paused_admin','paused_permission','backoff','circuit_open']) {
+    const h = panel(), e = scannerReady(h,scannerFixture({...args,state}));
+    assert.equal(h.app.scannerMay(e,'start'),false,state);
+    assert.equal(h.app.scannerMay(e,'force_full'),false,state);
+    assert.equal(h.app.scannerMay(e,'stop'),true,state);
+    assert.equal(h.app.scannerMay(e,'resume'),['paused_user_activity','paused_admin','paused_permission','backoff','circuit_open'].includes(state),state);
+  }
+});
+check('permission revoked still permits stop but not restart', () => {
+  const h = panel(),e=scannerReady(h,scannerFixture({state:'paused_permission',withRun:true}));
+  assert.equal(h.app.scannerMay(e,'stop'),true);
+  assert.equal(h.app.scannerMay(e,'resume'),false);
+  assert.equal(h.app.scannerMay(e,'pause'),false);
+});
+check('backoff cooldown refuses premature resume', () => {
+  const h = panel(), e=scannerReady(h,scannerFixture({enabled:true,allowScan:true,state:'backoff',withRun:true}));
+  e.circuit={state:'backoff',retryAt:'2999-01-01T00:00:00Z'};
+  assert.equal(h.app.scannerMay(e,'resume'),false);
+  e.circuit.retryAt='2020-01-01T00:00:00Z';
+  assert.equal(h.app.scannerMay(e,'resume'),true);
+});
+check('reads scanner status and upstream names without secrets', async () => {
+  const h=panel(),fixture=scannerFixture({enabled:true,allowScan:true});
+  h.app.isLoggedIn=true;
+  const paths=[];
+  h.app.api=async path=>{paths.push(path);return path==='/admin/api/scanner/status'?fixture.status:[fixture.server];};
+  await h.app.refreshScanner();
+  assert.deepEqual(paths,['/admin/api/scanner/status','/admin/api/upstream']);
+  assert.equal(h.app.scannerSourceName(h.app.scannerStatus.upstreams[0]),'Example source');
+  assert.equal(h.app.scannerLoadError,'');
+});
+check('unknown shape fails closed and does not enable commands', async () => {
+  const h=panel(),e=scannerReady(h,scannerFixture({enabled:true,allowScan:true}));
+  h.app.api=async path=>path==='/admin/api/scanner/status'?{scanEnabled:true,upstreams:{}}:[];
+  await h.app.refreshScanner();
+  assert.equal(h.app.scannerStatus,null);
+  assert.ok(h.app.scannerLoadError);
+  assert.equal(h.app.scannerMay(e,'start'),false);
+});
+check('incomplete per-upstream shape fails closed before Vue rendering', async () => {
+  const h=panel();scannerReady(h,scannerFixture({enabled:true,allowScan:true}));
+  h.app.api=async path=>path==='/admin/api/scanner/status'
+    ? {scanEnabled:true,upstreams:[{state:'scanning',source:null}]}
+    : [scannerFixture().server];
+  await h.app.refreshScanner();
+  assert.equal(h.app.scannerStatus,null);
+  assert.ok(h.app.scannerLoadError);
+});
+check('network error fails closed and hides stale data', async () => {
+  const h=panel();scannerReady(h,scannerFixture({enabled:true,allowScan:true}));
+  h.app.api=async()=>{throw new Error('token:should-not-echo');};
+  await h.app.refreshScanner();
+  assert.equal(h.app.scannerStatus,null);
+  assert.doesNotMatch(h.app.scannerLoadError,/token|should-not-echo/);
+});
+check('denied confirmation issues no scanner mutation', async () => {
+  const h=panel(),e=scannerReady(h,scannerFixture({enabled:true,allowScan:true}));
+  h.context.confirm=()=>false;
+  h.app.api=async()=>{throw new Error('command should not run');};
+  await h.app.scannerCommand(e,'force_full');
+  await h.app.scannerSetGlobal(false);
+  await h.app.scannerSetSource(e,false);
+});
+check('global settings mutation explicit boolean, refresh', async () => {
+  const h=panel();scannerReady(h,scannerFixture());
+  const writes=[];
+  h.app.api=async(path,opts)=>{
+    if(opts){writes.push({path,method:opts.method,body:JSON.parse(opts.body)});return {};}
+    return path==='/admin/api/scanner/status'?scannerFixture({enabled:true}).status:[scannerFixture().server];
+  };
+  await h.app.scannerSetGlobal(true);
+  assert.deepEqual(plain(writes),[{path:'/admin/api/scanner/settings',method:'PUT',body:{scanEnabled:true}}]);
+  assert.equal(h.app.scannerStatus.scanEnabled,true);
+});
+check('source mutation URL encodes id and submits allowScan only', async () => {
+  const h=panel(),e=scannerReady(h,scannerFixture());e.source.sourceId='id with/slash';
+  const writes=[];
+  h.app.api=async(path,opts)=>{
+    if(opts){writes.push([path,opts.method,JSON.parse(opts.body)]);return {};}
+    return path==='/admin/api/scanner/status'?scannerFixture().status:[scannerFixture().server];
+  };
+  await h.app.scannerSetSource(e,true);
+  assert.deepEqual(plain(writes),[['/admin/api/scanner/upstreams/id%20with%2Fslash','PUT',{allowScan:true}]]);
+});
+check('start command POST with no JSON body, refreshes status', async () => {
+  const h=panel(),e=scannerReady(h,scannerFixture({enabled:true,allowScan:true}));
+  const writes=[];
+  h.app.api=async(path,opts)=>{
+    if(opts){writes.push({path,method:opts.method,body:opts.body});return {};}
+    return path==='/admin/api/scanner/status'?scannerFixture({enabled:true,allowScan:true}).status:[scannerFixture().server];
+  };
+  await h.app.scannerCommand(e,'start');
+  assert.deepEqual(plain(writes),[{path:'/admin/api/scanner/upstreams/src-a/commands/start',method:'POST'}]);
+});
+check('failed mutation retains error and refreshes server truth', async () => {
+  const h=panel(),e=scannerReady(h,scannerFixture({enabled:true,allowScan:true}));
+  const calls=[];
+  h.app.api=async(path,opts)=>{
+    calls.push(path);
+    if(opts) throw Object.assign(new Error('sensitive password=123'),{status:409});
+    return path==='/admin/api/scanner/status'?scannerFixture({enabled:true,allowScan:true}).status:[scannerFixture().server];
+  };
+  await h.app.scannerCommand(e,'start');
+  assert.ok(h.app.scannerActionError.includes('409'));
+  assert.doesNotMatch(h.app.scannerActionError,/password/);
+  assert.deepEqual(calls,['/admin/api/scanner/upstreams/src-a/commands/start','/admin/api/scanner/status','/admin/api/upstream']);
+});
+check('stale scanner read response cannot overwrite newer refresh', async () => {
+  const h=panel();scannerReady(h,scannerFixture({enabled:true,allowScan:true}));
+  let release;
+  let count=0;
+  h.app.api=async path=>{
+    if(path==='/admin/api/upstream')return [scannerFixture().server];
+    if(++count===1)return new Promise(resolve=>{release=resolve;});
+    return scannerFixture({enabled:false}).status;
+  };
+  const slow=h.app.refreshScanner();
+  await Promise.resolve();
+  await h.app.refreshScanner();
+  release(scannerFixture({enabled:true}).status);
+  await slow;
+  assert.equal(h.app.scannerStatus.scanEnabled,false);
+});
+check('logout revokes status even if old GET later resolves', async () => {
+  const h=panel();scannerReady(h,scannerFixture({enabled:true,allowScan:true}));
+  let release;
+  h.app.api=async path=>path==='/admin/api/upstream'?[scannerFixture().server]:new Promise(resolve=>{release=resolve;});
+  const slow=h.app.refreshScanner();
+  await Promise.resolve();h.app.logout();
+  release(scannerFixture({enabled:true}).status);await slow;
+  assert.equal(h.app.scannerStatus,null);
+  assert.equal(h.app.scannerMay(scannerFixture().status.upstreams[0],'start'),false);
+});
+check('scanner render shows task/checkpoint and never raw token field', () => {
+  const h=panel(),e=scannerReady(h,scannerFixture({enabled:true,allowScan:true,state:'scanning',withRun:true}));
+  e.source.token='secret-token';
+  e.run.lastError='token=very-secret';
+  const displayed=textOf(render(h.app,[]));
+  assert.match(displayed,/主动全库扫描/);
+  assert.match(displayed,/Example source/);
+  assert.match(displayed,/媒体库进度与安全水位/);
+  assert.match(displayed,/2026/);
+  assert.doesNotMatch(displayed,/secret-token|very-secret/);
+});
+check('scanner page existing embedded stylesheet covers new utility selectors', () => {
+  const css=fs.readFileSync('public/vendor/tailwind.css','utf8');
+  for(const selector of ['.bg-amber-50','.text-amber-600','.disabled\\:opacity-50','.min-w-\\[700px\\]']) {
+    assert.ok(css.includes(selector),'missing style '+selector);
+  }
+});
+
 (async () => {
   for (const entry of checks) {
     try { await entry.run(); }

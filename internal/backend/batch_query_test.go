@@ -155,7 +155,10 @@ func TestPersonsQueryTranslatesCommaSeparatedVirtualIDs(t *testing.T) {
 }
 
 func TestTranslateBatchIDQuery_RejectsOversized(t *testing.T) {
-	store, _ := NewIDStore("", nil)
+	store, err := NewIDStore(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer store.Close()
 
 	values := url.Values{}
@@ -171,7 +174,10 @@ func TestTranslateBatchIDQuery_RejectsOversized(t *testing.T) {
 }
 
 func TestTranslateBatchIDQuery_AcceptsWithinLimit(t *testing.T) {
-	store, _ := NewIDStore("", nil)
+	store, err := NewIDStore(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer store.Close()
 
 	values := url.Values{}

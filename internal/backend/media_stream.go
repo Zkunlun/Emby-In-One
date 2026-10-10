@@ -40,7 +40,16 @@ func (a *App) proxyStream(w http.ResponseWriter, r *http.Request, route streamRo
 		a.Logger.Debugf("%s request: itemId=%s, query=%s", route.label, virtualItemID, formatValuesForLog(query))
 	}
 
-	resolved, routeOK := a.resolveRequestRouteID(w, r, virtualItemID)
+	selectedSource, _ := explicitMediaSourceID(query, nil)
+	if selectedSource == "" {
+		if rest := r.PathValue("rest"); rest != "" {
+			if slash := strings.IndexByte(rest, '/'); slash > 0 &&
+				(strings.HasPrefix(rest[slash:], "/Subtitles/") || strings.HasPrefix(rest[slash:], "/Attachments/")) {
+				selectedSource = rest[:slash]
+			}
+		}
+	}
+	resolved, routeOK := a.resolveRequestRouteIDForSource(w, r, virtualItemID, selectedSource)
 	if !routeOK {
 		return
 	}

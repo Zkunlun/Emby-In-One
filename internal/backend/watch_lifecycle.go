@@ -217,7 +217,20 @@ func (a *App) applyServerCleanupSQL(db *sqliteDB, op watchCleanupOperation) erro
 			return err
 		}
 	}
-	return a.IDStore.writeMergeRemovalSQL(a.IDStore.planMergeSourceRemovalLocked(op.Target, allowed))
+	if err := a.IDStore.writeMergeRemovalSQL(a.IDStore.planMergeSourceRemovalLocked(op.Target, allowed)); err != nil {
+		return err
+	}
+	// Durable last line of defense against stale derived rows.
+	if err := db.execParams(`DELETE FROM work_identity_keys WHERE server_id = ?`, op.Target); err != nil {
+		return err
+	}
+	if err := db.execParams(`DELETE FROM work_identity_items WHERE server_id = ?`, op.Target); err != nil {
+		return err
+	}
+	if err := removeScannerSourceSQL(db, op.Target); err != nil {
+		return err
+	}
+	return a.IDStore.advanceSourceGenerationSQL(op.Target)
 }
 
 // Config absence is the durable commit intent. A failed database cleanup never

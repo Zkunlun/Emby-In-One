@@ -12,6 +12,8 @@ type RequestContext struct {
 	Headers    http.Header
 	ProxyToken string
 	ProxyUser  *tokenInfo
+	// TraceID links one client request to all EIO→upstream requests it triggers while sample capture is active.
+	TraceID string
 	// PlaybackDeviceID is the already-resolved playback-device identity consumed by
 	// lifecycle handlers. withContext resolves it once from live headers and the
 	// validated token-scoped fallback.
@@ -24,6 +26,10 @@ type RequestContext struct {
 	// Identifiers is the read-only signing/registration view for this request. It
 	// is built once and shared by the identity predicates.
 	Identifiers *IdentifierLookup
+	// Frozen before any upstream I/O. Every passive fan-out and late drain
+	// uses this same source identity snapshot to reject delete/recreate ABA.
+	SourceGenerations        map[string]int64
+	SourceGenerationCaptured bool
 }
 
 func (a *App) withContext(next http.HandlerFunc) http.HandlerFunc {
@@ -37,14 +43,26 @@ func (a *App) withContext(next http.HandlerFunc) http.HandlerFunc {
 		if proxyUser != nil {
 			tokenDeviceID = proxyUser.DeviceID
 		}
+		// Keep the epoch snapshot stable across upstream I/O; normal Reload does
+		// not change it. Acquire no network resources under the lifecycle gate.
+		var epochs map[string]int64
+		a.watchLifecycleMu.RLock()
+		if a.IDStore != nil && a.ConfigStore != nil {
+			epochs = a.IDStore.snapshotSourceGenerations(configuredSourceIDs(a.ConfigStore.Snapshot()))
+		}
+		a.watchLifecycleMu.RUnlock()
 		ctx := context.WithValue(r.Context(), requestContextKey{}, &RequestContext{
-			Headers:           r.Header.Clone(),
-			ProxyToken:        token,
-			ProxyUser:         proxyUser,
-			PlaybackDeviceID:  resolvePlaybackDeviceID(r.Header, tokenDeviceID),
-			LegacyProxyUserID: a.Auth.ProxyUserID(),
-			Identifiers:       a.newRequestIdentifierLookup(),
+			Headers:                  r.Header.Clone(),
+			TraceID:                  sampleTraceFromContext(r.Context()),
+			ProxyToken:               token,
+			ProxyUser:                proxyUser,
+			PlaybackDeviceID:         resolvePlaybackDeviceID(r.Header, tokenDeviceID),
+			LegacyProxyUserID:        a.Auth.ProxyUserID(),
+			Identifiers:              a.newRequestIdentifierLookup(),
+			SourceGenerations:        epochs,
+			SourceGenerationCaptured: true,
 		})
+		a.observeScanClientActivity(r, requestContextFrom(ctx))
 		next(w, r.WithContext(ctx))
 	}
 }

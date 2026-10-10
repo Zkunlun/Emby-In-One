@@ -16,6 +16,7 @@ func (a *App) observeMergeDetail(reqCtx *RequestContext, id, server, original st
 		data["Type"] = group.MediaType
 	}
 	candidate := newMergeCandidate(server, data, nil, full)
+	candidate.ObservationOrigin = "passive_detail"
 	if kind := candidate.Identity.Type; kind != "Movie" && kind != "Episode" && kind != "Series" && kind != "Season" {
 		return nil
 	}
@@ -44,9 +45,11 @@ func (a *App) handleMergeItemDetail(w http.ResponseWriter, r *http.Request, user
 	}
 	var selected *mediaSourceSelection
 	if sourceID != "" {
-		if err := a.prepareMergePlaybackItem(r, id, resolved); err != nil {
-			writeMediaSelectionError(w, err)
-			return
+		if a.IDStore.MergeGroupTrust(id) == mergeTrustTrusted {
+			if err := a.prepareMergePlaybackItem(r, id, resolved); err != nil {
+				writeMediaSelectionError(w, err)
+				return
+			}
 		}
 		selected, err = a.selectAuthorizedMediaSource(r, id, sourceID, resolved)
 		if err != nil {
@@ -132,6 +135,10 @@ func (a *App) handleMergeItemDetail(w http.ResponseWriter, r *http.Request, user
 				instances = append(instances, inst)
 			}
 		}
+	}
+	if selected == nil && a.IDStore.MergeGroupTrust(id) != mergeTrustTrusted {
+		writeMediaSelectionError(w, errMergeGroupQuarantined)
+		return
 	}
 	var base map[string]any
 	baseServer := ""
@@ -237,6 +244,7 @@ func (a *App) observeMergePlaybackSources(reqCtx *RequestContext, id, server, it
 		}
 		raw := map[string]any{"Id": item, "Type": group.MediaType, "MediaSources": data["MediaSources"]}
 		candidate := newMergeCandidate(server, raw, nil, false)
+		candidate.ObservationOrigin = "passive_playback"
 		candidate.Identity = member.Identity
 		candidate.Parent = member.Parent
 		candidate.Season = member.Season

@@ -2,6 +2,8 @@
 
 [Project home](../../README_EN.md) · [Documentation](README.md) · [简体中文](../version-numbering.md)
 
+**Important:** The historical V1.5.0 dated 2026-09-29 below was renumbered V1.4.7 on 2026-10-06. The **new V1.5.0 (2026-10-11)** is a different release for full-library aggregation. Use dates, functionality and commit IDs to distinguish them.
+
 On 2026-10-06, the maintainer moved three published versions into the continuing 1.4.x sequence:
 
 | Historical label | Current label | Original publication date | Functionality |

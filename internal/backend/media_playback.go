@@ -60,7 +60,18 @@ func (a *App) commitPlaybackInfoLease(lease *playbackInfoLeaseReservation, itemI
 }
 
 func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
-	resolved, routeOK := a.resolveRequestRouteID(w, r, r.PathValue("itemId"))
+	r = r.WithContext(withSampleSource(r.Context(), sampleSourcePlayback))
+	query := cloneValues(r.URL.Query())
+	body := map[string]any{}
+	if r.Method == http.MethodPost && r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+	sourceID, sourceErr := explicitMediaSourceID(query, body)
+	if sourceErr != nil {
+		writeMediaSelectionError(w, sourceErr)
+		return
+	}
+	resolved, routeOK := a.resolveRequestRouteIDForSource(w, r, r.PathValue("itemId"), sourceID)
 	if !routeOK {
 		return
 	}
@@ -75,21 +86,14 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 	if !a.requireServerAccess(w, r, resolved) {
 		return
 	}
-	if err := a.prepareMergePlaybackItem(r, r.PathValue("itemId"), resolved); err != nil {
-		writeMediaSelectionError(w, err)
-		return
-	}
-	query := cloneValues(r.URL.Query())
-	body := map[string]any{}
-	if r.Method == http.MethodPost && r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&body)
-	}
-	sourceID, err := explicitMediaSourceID(query, body)
-	if err != nil {
-		writeMediaSelectionError(w, err)
-		return
+	if sourceID == "" || a.IDStore.MergeGroupTrust(r.PathValue("itemId")) == mergeTrustTrusted {
+		if err := a.prepareMergePlaybackItem(r, r.PathValue("itemId"), resolved); err != nil {
+			writeMediaSelectionError(w, err)
+			return
+		}
 	}
 	var selected *mediaSourceSelection
+	var err error
 	if sourceID != "" {
 		selected, err = a.selectAuthorizedMediaSource(r, r.PathValue("itemId"), sourceID, resolved)
 		if err != nil {
@@ -176,6 +180,9 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 		if err := a.observeMergePlaybackSources(reqCtx, r.PathValue("itemId"), inst.ServerID, inst.OriginalID, data); err != nil {
 			a.logMergeHTTPError(err)
 			continue
+		}
+		if selected == nil && a.IDStore.MergeGroupTrust(r.PathValue("itemId")) != mergeTrustTrusted {
+			break // no session/watch publication after newly discovered conflict
 		}
 		filtered := a.mergePlaybackSources(r.PathValue("itemId"), inst.ServerID, inst.OriginalID, asItems(map[string]any{"Items": data["MediaSources"]}), explicitSource)
 		if len(filtered) == 0 {
@@ -304,6 +311,13 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 			}
 			allMediaSources = append(allMediaSources, mediaSource)
 		}
+	}
+	if selected == nil && a.IDStore.MergeGroupTrust(r.PathValue("itemId")) != mergeTrustTrusted {
+		if lease.Applies && lease.Result.Created {
+			a.PlaybackLimiter.RollbackReservation(lease.UserID, lease.ServerID, lease.DeviceID, lease.Result.Revision)
+		}
+		writeMediaSelectionError(w, errMergeGroupQuarantined)
+		return
 	}
 	if base == nil || len(allMediaSources) == 0 {
 		if a.Logger != nil {

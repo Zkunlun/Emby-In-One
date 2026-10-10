@@ -2,7 +2,7 @@
 
 [项目主页](../README.md) · [安全政策](../SECURITY.md) · [English](en/README.md)
 
-适用主线：V1.4.9。
+适用主线：V1.5.0。
 
 ## 安装与首次使用
 
@@ -31,8 +31,9 @@
 ## 发布与历史
 
 - [更新日志](../Update.md)与 [Releases](https://github.com/Zkunlun/Emby-In-One/releases)。
-- [V1.4.9 验证范围](release-v1.4.9-validation.md)：已有证据及未覆盖事项。
-- [版本编号调整](version-numbering.md)：历史 V1.5.0/V1.5.1/V1.6.0 与当前编号关系。
+- [V1.5.0 发布验证与限制](release-v1.5.0-validation.md)：全库聚合/Scanner 的已测证据与真实客户端待验收项目。
+- [V1.4.9 验证范围](release-v1.4.9-validation.md)：历史版本证据。
+- [版本编号调整](version-numbering.md)：2026-10-06 的历史 V1.5.0/V1.5.1/V1.6.0 与现行编号的区别。
 - [更新计划](../Update%20Plan.md)：既有维护计划，实际已发布功能以 Release 和当前文档为准。
 - [旧 Node.js V1.2.1 文档](../README_V1.2.1.md)及 [legacy 说明](../legacy/README.md)：历史参考，不参与当前 Go 构建。
 
