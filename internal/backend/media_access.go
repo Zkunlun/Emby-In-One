@@ -53,8 +53,7 @@ func (a *App) mediaAccessScopeLocked(reqCtx *RequestContext) mediaAccessScope {
 	}
 	cfg := a.ConfigStore.Snapshot()
 	for _, server := range cfg.Upstream {
-		if server.ID == "" || (a.IDStore != nil && !a.IDStore.sourceGenerationMatches(reqCtx, server.ID)) {
-			// The response may belong to a deleted incarnation of this ID.
+		if server.ID == "" {
 			continue
 		}
 		if !admin {
@@ -117,9 +116,6 @@ func (a *App) resolveAuthorizedRouteID(reqCtx *RequestContext, virtualID string)
 	if a.IDStore == nil {
 		return nil, errMediaMappingMissing
 	}
-	if a.IDStore.MergeGroupTrust(virtualID) != mergeTrustTrusted {
-		return nil, errMergeGroupQuarantined
-	}
 	return a.routeForAuthorizedMapping(scope, a.IDStore.ResolveVirtualID(virtualID))
 }
 
@@ -157,9 +153,6 @@ func (a *App) resolveAuthorizedSessionRouteID(reqCtx *RequestContext, virtualID 
 		return nil, errMediaMappingMissing
 	}
 	scope := a.mediaAccessScopeLocked(reqCtx)
-	if a.IDStore.MergeGroupTrust(virtualID) != mergeTrustTrusted {
-		return nil, errMergeGroupQuarantined
-	}
 	resolved := a.IDStore.ResolveVirtualID(virtualID)
 	route, err := a.routeForAuthorizedMapping(scope, resolved)
 	if !errors.Is(err, errMediaSourceUnavailable) {

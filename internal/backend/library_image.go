@@ -1,7 +1,6 @@
 package backend
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -144,7 +143,10 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 	reqCtx := requestContextFrom(r.Context())
 	queryTemplate := cloneValues(r.URL.Query())
 	filter, localFilter := a.prepareLocalUserFilter(w, r, queryTemplate)
-	requestMergeFields(queryTemplate)
+	if !localFilter {
+		requestMergedCandidateSet(queryTemplate)
+	}
+	full := requestMergeFields(queryTemplate)
 	seasonID := firstQueryValue(queryTemplate, "SeasonId", "seasonId", "seasonid")
 	if seasonID != "" {
 		season, valid := a.resolveRequestRouteID(w, r, seasonID)
@@ -156,13 +158,13 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 			return
 		}
 	}
-	sources := make([]passivePageSource, 0)
-	for _, instance := range a.collectAllowedInstances(reqCtx, resolved) {
-		inst := instance
+	var results []upstreamItemsResult
+	for _, inst := range a.collectAllowedInstances(reqCtx, resolved) {
 		if !a.isServerAllowed(reqCtx, inst.ServerID) {
 			continue
 		}
 		query := cloneValues(queryTemplate)
+		query.Set("UserId", inst.Client.clientUserID())
 		if seasonID != "" {
 			raw := resolvedOriginalIDForServer(a.IDStore.ResolveVirtualID(seasonID), inst.ServerID)
 			if raw == "" {
@@ -172,66 +174,52 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 			query.Del("seasonid")
 			query.Set("SeasonId", raw)
 		}
-		sources = append(sources, passivePageSource{serverID: inst.ServerID, request: func(ctx context.Context, start, limit int) (any, error) {
-			q := passiveSourceQuery(query, inst.Client, start, limit)
-			payload, err := inst.Client.RequestJSON(ctx, reqCtx, a.Identity, http.MethodGet, "/Shows/"+inst.OriginalID+"/"+endpoint, q, nil)
-			if err != nil {
-				return nil, err
+		payload, err := inst.Client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Shows/"+inst.OriginalID+"/"+endpoint, query, nil)
+		if err != nil || !a.isServerAllowed(reqCtx, inst.ServerID) {
+			continue
+		}
+		if err := a.observeLegacyShowsParent(reqCtx, inst.ServerID, inst.OriginalID); err != nil {
+			a.logMergeHTTPError(err)
+			continue
+		}
+		items := asItems(payload)
+		for _, item := range items {
+			if _, exists := item["Type"]; !exists {
+				item["Type"] = kind
 			}
-			if err = a.observeLegacyShowsParent(reqCtx, inst.ServerID, inst.OriginalID); err != nil {
-				return nil, err
-			}
-			block, ok := payload.(map[string]any)
-			if !ok {
-				return payload, nil
-			}
-			items := asItems(block)
-			for _, item := range items {
-				if _, ok := item["Type"]; !ok {
-					item["Type"] = kind
-				}
-				if _, ok := item["SeriesId"]; !ok {
-					item["SeriesId"] = inst.OriginalID
-				}
-			}
-			block["Items"] = toAnySlice(items)
-			return block, nil
-		}})
-	}
-	filtered := func(items []map[string]any) []map[string]any {
-		sort.SliceStable(items, func(i, j int) bool {
-			left, right := newMergeCandidate("", items[i], nil, false), newMergeCandidate("", items[j], nil, false)
-			if left.Season.valid() != right.Season.valid() {
-				return left.Season.valid()
-			}
-			if left.Season.Ticks != right.Season.Ticks {
-				return left.Season.Ticks < right.Season.Ticks
-			}
-			if kind == "Episode" {
-				if left.Episode.valid() != right.Episode.valid() {
-					return left.Episode.valid()
-				}
-				return left.Episode.Ticks < right.Episode.Ticks
-			}
-			return false
-		})
-		if localFilter {
-			var recency map[string]int64
-			items, recency = a.filterItemsByLocalUserState(r, items, filter)
-			if r.URL.Query().Get("SortBy") != "" {
-				localItemSort(items, r.URL.Query(), recency)
+			if _, exists := item["SeriesId"]; !exists {
+				item["SeriesId"] = inst.OriginalID
 			}
 		}
-		return items
+		results = append(results, upstreamItemsResult{ServerID: inst.ServerID, Items: items, FullSources: full, RequestScope: reqCtx})
 	}
-	items, complete, err := a.collectPassivePages(r, sources, queryTemplate, filtered, a.clientFacingUserIDFor(r))
-	if err != nil {
-		writePassivePageError(w, err)
-		return
+	results = a.hydrateMergeResults(r, results)
+	items := a.mergeRoundRobinItems(results, a.clientFacingUserIDFor(r), reqCtx)
+	sort.SliceStable(items, func(i, j int) bool {
+		left, right := newMergeCandidate("", items[i], nil, false), newMergeCandidate("", items[j], nil, false)
+		if left.Season.valid() != right.Season.valid() {
+			return left.Season.valid()
+		}
+		if left.Season.Ticks != right.Season.Ticks {
+			return left.Season.Ticks < right.Season.Ticks
+		}
+		if kind == "Episode" {
+			if left.Episode.valid() != right.Episode.valid() {
+				return left.Episode.valid()
+			}
+			return left.Episode.Ticks < right.Episode.Ticks
+		}
+		return false
+	})
+	if localFilter {
+		var recency map[string]int64
+		items, recency = a.filterItemsByLocalUserState(r, items, filter)
+		if r.URL.Query().Get("SortBy") != "" {
+			localItemSort(items, r.URL.Query(), recency)
+		}
 	}
-	page := passiveWindowPayload(items, r.URL.Query(), complete)
-	a.overlayLocalUserDataItems(r, asItems(page))
-	writeJSON(w, http.StatusOK, page)
+	a.overlayLocalUserDataItems(r, items)
+	writeJSON(w, http.StatusOK, paginateItems(items, r.URL.Query()))
 }
 
 func (a *App) handleSearchHints(w http.ResponseWriter, r *http.Request) {

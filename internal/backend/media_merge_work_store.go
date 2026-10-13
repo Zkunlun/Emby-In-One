@@ -5,23 +5,11 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
-	"time"
 )
 
 // RegisterMergeItem records the item's identity anchor and every qualified
 // observed source. target may preserve a caller-held ID already owning this item.
 func (s *IDStore) RegisterMergeItem(candidate mergeCandidate, target string) (string, error) {
-	return s.registerMergeItem(candidate, target, false)
-}
-
-// RegisterMergeItemWithLegacyCapture atomically retains historical complete
-// version scope alongside the new association. App callers must hold the
-// lifecycle gate and validate their current request grant first.
-func (s *IDStore) RegisterMergeItemWithLegacyCapture(candidate mergeCandidate, target string) (string, error) {
-	return s.registerMergeItem(candidate, target, true)
-}
-
-func (s *IDStore) registerMergeItem(candidate mergeCandidate, target string, captureLegacy bool) (string, error) {
 	members, err := mergeItemMembers(candidate)
 	if err != nil {
 		return "", err
@@ -34,7 +22,7 @@ func (s *IDStore) registerMergeItem(candidate mergeCandidate, target string, cap
 	if !s.sourceAllowedForMergeLocked(candidate.ServerID) {
 		return "", errors.New("merge source is not configured")
 	}
-	return s.mergeObservedItemsLocked([]mergeCandidate{candidate}, [][]mergeStoredMember{members}, target, nil, captureLegacy)
+	return s.mergeObservedItemsLocked([]mergeCandidate{candidate}, [][]mergeStoredMember{members}, target, nil)
 }
 
 func mergeItemMembers(candidate mergeCandidate) ([]mergeStoredMember, error) {
@@ -112,11 +100,6 @@ func (s *IDStore) associateMergeItems(a, b mergeCandidate, sourceA, sourceB, tar
 		return "", errors.New("merge media type mismatch")
 	}
 	ownersA, ownersB := s.mergeItemOwnersLocked(a), s.mergeItemOwnersLocked(b)
-	for _, owner := range append(append([]string(nil), ownersA...), ownersB...) {
-		if current := s.storedMergeGroupLocked(owner); current != nil && current.TrustState == mergeTrustQuarantined {
-			return "", errMergeGroupQuarantined
-		}
-	}
 	existing := a.ServerID == b.ServerID && a.ItemID == b.ItemID
 	for _, id := range ownersA {
 		if containsString(ownersB, id) {
@@ -139,13 +122,13 @@ func (s *IDStore) associateMergeItems(a, b mergeCandidate, sourceA, sourceB, tar
 		}
 		proof = &mergeStoredProof{Left: left, Right: right, ParentGroupID: parentID, Policy: mergePolicyWork}
 	}
-	return s.mergeObservedItemsLocked([]mergeCandidate{a, b}, [][]mergeStoredMember{leftMembers, rightMembers}, target, proof, false)
+	return s.mergeObservedItemsLocked([]mergeCandidate{a, b}, [][]mergeStoredMember{leftMembers, rightMembers}, target, proof)
 }
 
 // Build a detached union, commit all lookup tables together, then publish.
 // Existing member metadata/proofs remain historical evidence; partial observations
 // add locators without pruning any previously known version or watch row.
-func (s *IDStore) mergeObservedItemsLocked(candidates []mergeCandidate, observations [][]mergeStoredMember, target string, proof *mergeStoredProof, captureLegacy bool) (string, error) {
+func (s *IDStore) mergeObservedItemsLocked(candidates []mergeCandidate, observations [][]mergeStoredMember, target string, proof *mergeStoredProof) (string, error) {
 	var owners []string
 	for _, candidate := range candidates {
 		for _, owner := range s.mergeItemOwnersLocked(candidate) {
@@ -196,60 +179,9 @@ func (s *IDStore) mergeObservedItemsLocked(candidates []mergeCandidate, observat
 		group.Aliases = append(group.Aliases, other.Aliases...)
 		absorbed = append(absorbed, owner)
 	}
-	// Passive registration snapshots an old WHOLE-item locator's previously
-	// complete version list in the SAME SQLite transaction as group creation,
-	// derived WorkIdentityIndex updates and alias absorption. A failure must
-	// roll back both the capture and the new work association.
-	if captureLegacy {
-		for _, candidate := range candidates {
-			if !candidate.SourcesComplete || (candidate.Identity.Type != "Movie" && candidate.Identity.Type != "Episode") {
-				continue
-			}
-			legacyID := s.legacyMergeOwnerForItemLocked(candidate.ServerID, candidate.ItemID)
-			if legacyID == "" {
-				continue
-			}
-			legacy := s.legacyMergeGroupLocked(legacyID, candidate.Identity.Type)
-			if legacy == nil || legacy.Policy != mergePolicyLegacy || legacy.MediaType != candidate.Identity.Type {
-				continue
-			}
-			preserved := false
-			for _, existing := range group.LegacyVersions {
-				if existing.ServerID == candidate.ServerID && existing.ItemID == candidate.ItemID {
-					preserved = true
-					break
-				}
-			}
-			if preserved {
-				continue
-			}
-			capture := mergeLegacyVersions{ServerID: candidate.ServerID, ItemID: candidate.ItemID}
-			for _, version := range candidate.Versions {
-				if version.Ref.ServerID != candidate.ServerID || version.Ref.ItemID != candidate.ItemID ||
-					version.Ref.MediaSourceID == "" || containsString(capture.SourceIDs, version.Ref.MediaSourceID) {
-					return "", errors.New("legacy version list is ambiguous")
-				}
-				capture.SourceIDs = append(capture.SourceIDs, version.Ref.MediaSourceID)
-			}
-			if len(capture.SourceIDs) != 0 {
-				group.LegacyVersions = append(group.LegacyVersions, capture)
-			}
-		}
-	}
-	for index, members := range observations {
-		candidate := candidates[index]
+	for _, members := range observations {
 		for _, member := range members {
-			matched := false
-			for i := range group.Members {
-				if mergeRefKey(group.Members[i].Ref) == mergeRefKey(member.Ref) {
-					mergeMemberObservation(&group.Members[i], member, candidate)
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				evidence := evidenceForObservation(candidate, time.Now().UTC().Format(time.RFC3339Nano))
-				member.Evidence = &evidence
+			if !mergeGroupHasMember(group, mergeRefKey(member.Ref)) {
 				group.Members = append(group.Members, member)
 			}
 		}
@@ -269,7 +201,6 @@ func (s *IDStore) mergeObservedItemsLocked(candidates []mergeCandidate, observat
 	} else {
 		group.Aliases = nil
 	}
-	evaluateGroupEvidence(group)
 	if !validStoredMergeGroup(group) {
 		return "", errors.New("invalid observed merge group")
 	}

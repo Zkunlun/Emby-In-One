@@ -133,7 +133,6 @@ type UpstreamClient struct {
 	transport      http.RoundTripper // per-client transport (shared or proxy-specific)
 	logger         *Logger
 	timeouts       TimeoutsConfig
-	sampleCollector *SampleCollector
 	recoveryMu     sync.Mutex
 	lastRecovery   time.Time
 	onAuthError    func(c *UpstreamClient)
@@ -149,16 +148,13 @@ type UpstreamPool struct {
 	clients  []*UpstreamClient
 	logger   *Logger
 	identity *ClientIdentityService
-	sampleCollector *SampleCollector
 	health   *healthCheckRunner
 	onCountsState func()
 }
 
-func NewUpstreamPool(cfg Config, logger *Logger, collectors ...*SampleCollector) *UpstreamPool {
+func NewUpstreamPool(cfg Config, logger *Logger) *UpstreamPool {
 	identity := activeIdentityService()
-	var collector *SampleCollector
-	if len(collectors) > 0 { collector = collectors[0] }
-	pool := &UpstreamPool{logger: logger, identity: identity, sampleCollector: collector}
+	pool := &UpstreamPool{logger: logger, identity: identity}
 	if identity != nil {
 		identity.RegisterCaptureListener(pool.handleCapturedIdentity)
 	}
@@ -213,7 +209,6 @@ func (p *UpstreamPool) Reload(cfg Config) {
 	clients := make([]*UpstreamClient, 0, len(cfg.Upstream))
 	for i, upstream := range cfg.Upstream {
 		newClient := newUpstreamClient(cfg, upstream, i, p.logger)
-		newClient.sampleCollector = p.sampleCollector
 		newClient.onAuthError = p.handleUpstreamAuthError
 		newClient.onCountsState = countsListener
 		if old, ok := oldByKey[StableUpstreamKey(newClient.Config)+"|"+legacyUpstreamKey(newClient.Config)]; ok {
@@ -897,7 +892,6 @@ func (c *UpstreamClient) RequestJSON(ctx context.Context, reqCtx *RequestContext
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return nil, err
 	}
-	setSampleReturnedItems(resp, decoded)
 	return decoded, nil
 }
 
@@ -1194,16 +1188,8 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 	// servers. The base URL (c.BaseURL/c.StreamBaseURL) is set by the administrator.
 	// User-controlled path segments are inherent to proxy functionality.
 	recordCountsTransportAttempt(ctx)
-	var sampleSpan *sampleOutboundSpan
-	if c.sampleCollector != nil && c.sampleCollector.Enabled() {
-		sampleSpan = c.sampleCollector.BeginOutbound(
-			sampleOutboundTrace(ctx, reqCtx), sampleOutboundSource(ctx, reqCtx, path), sampleProxyUsername(reqCtx),
-			c.Name, method, path, preparedURL.url.Query(), stream,
-		)
-	}
 	resp, doErr := client.Do(request) // CodeQL: intentional proxy forwarding to admin-configured upstream
 	if doErr != nil {
-		if sampleSpan != nil { sampleSpan.Finish(0, 0, doErr) }
 		if stream && !errors.Is(doErr, context.Canceled) && !errors.Is(doErr, context.DeadlineExceeded) {
 			c.markStreamBaseFailedObservation(base, streamObservation)
 		}
@@ -1221,11 +1207,6 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 		// the client, so the wrapped message is redacted here rather than at each
 		// of them; Unwrap keeps errors.Is/As working for cancellation checks.
 		return nil, &redactedError{err: doErr}
-	}
-	if sampleSpan != nil && resp.Body != nil {
-		resp.Body = &sampleBodyCapture{ReadCloser: resp.Body, span: sampleSpan, status: resp.StatusCode, expected: resp.ContentLength}
-	} else if sampleSpan != nil {
-		sampleSpan.Finish(resp.StatusCode, 0, nil)
 	}
 	if stream {
 		if isStreamUnavailableStatus(resp.StatusCode) {

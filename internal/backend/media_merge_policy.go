@@ -134,15 +134,14 @@ type mergeVersionCandidate struct {
 }
 
 type mergeCandidate struct {
-	ServerID          string
-	ItemID            string
-	Identity          mergeIdentity
-	Parent            *mergeSeriesEvidence
-	Season            playbackTickValue
-	Episode           playbackTickValue
-	Versions          []mergeVersionCandidate
-	SourcesComplete   bool
-	ObservationOrigin string // passive_list/detail/playback; endpoint does not determine strength
+	ServerID        string
+	ItemID          string
+	Identity        mergeIdentity
+	Parent          *mergeSeriesEvidence
+	Season          playbackTickValue
+	Episode         playbackTickValue
+	Versions        []mergeVersionCandidate
+	SourcesComplete bool
 }
 
 func mergePositiveTicks(body map[string]any, field string) playbackTickValue {

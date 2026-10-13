@@ -20,21 +20,13 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 		// A regular user's state filter cannot be forwarded to the shared upstream
 		// account. Fetch the candidate set across allowed servers, then filter/page it
 		// locally using virtual IDs.
-		requestMergeFields(query)
-		sources := a.globalPassiveSources(r, "/Items", query)
-		filtered := func(items []map[string]any) []map[string]any {
-			kept, recency := a.filterItemsByLocalUserState(r, items, filter)
-			localItemSort(kept, r.URL.Query(), recency)
-			return kept
-		}
-		items, complete, err := a.collectPassivePages(r, sources, query, filtered, a.clientFacingUserIDFor(r))
-		if err != nil {
-			writePassivePageError(w, err)
-			return
-		}
-		page := passiveWindowPayload(items, r.URL.Query(), complete)
-		a.overlayLocalUserDataItems(r, asItems(page))
-		writeJSON(w, http.StatusOK, page)
+		results := a.fetchItemsAcrossUpstreams(r.Context(), requestContextFrom(r.Context()), "/Items", query, nil)
+		merged := a.mergedItemsPayload(results, a.clientFacingUserIDFor(r), requestContextFrom(r.Context()))
+		items := asItems(merged)
+		kept, recency := a.filterItemsByLocalUserState(r, items, filter)
+		localItemSort(kept, r.URL.Query(), recency)
+		a.overlayLocalUserDataItems(r, kept)
+		writeJSON(w, http.StatusOK, paginateItems(kept, r.URL.Query()))
 		return
 	}
 	// The candidate set is the ID list the client sent, so a user-state filter can be
@@ -93,28 +85,10 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, merged)
 }
 
-// normalizeParentParam removes every casing of the ParentId key from the
-// outgoing query. A root sentinel must not accidentally scope upstream
-// collections to a nonexistent "ROOT" folder.
-func normalizeParentParam(query url.Values) string {
-	parent := firstQueryValue(query, "ParentId", "parentId", "parentid")
-	if parent == "" {
-		if key := queryKey(query, "ParentId"); key != "" {
-			parent = query.Get(key)
-		}
-	}
-	for key := range query {
-		if strings.EqualFold(key, "ParentId") {
-			query.Del(key)
-		}
-	}
-	return parent
-}
-
 func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 	query := cloneValues(r.URL.Query())
-	parentID := normalizeParentParam(query)
-	if parentID != "" && parentID != "0" && !strings.EqualFold(parentID, "root") {
+	parentID := firstQueryValue(query, "ParentId", "parentId", "parentid")
+	if parentID != "" && parentID != "0" && parentID != "root" {
 		resolved, routeOK := a.resolveRequestRouteID(w, r, parentID)
 		if !routeOK {
 			return
@@ -134,27 +108,6 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 		// of that container's items the user sees.
 		filter, localFilter := a.prepareLocalUserFilter(w, r, query)
 		fullSources := requestMergeFields(query)
-		if localFilter {
-			reqCtx := requestContextFrom(r.Context())
-			source := passivePageSource{serverID: resolved.ServerID, request: func(ctx context.Context, start, limit int) (any, error) {
-				serverQuery := passiveSourceQuery(query, resolved.Client, start, limit)
-				return resolved.Client.RequestJSON(ctx, reqCtx, a.Identity, http.MethodGet, "/Users/"+resolved.Client.clientUserID()+"/Items", serverQuery, nil)
-			}}
-			filtered := func(items []map[string]any) []map[string]any {
-				kept, recency := a.filterItemsByLocalUserState(r, items, filter)
-				localItemSort(kept, r.URL.Query(), recency)
-				return kept
-			}
-			items, complete, err := a.collectPassivePages(r, []passivePageSource{source}, r.URL.Query(), filtered, a.clientFacingUserIDFor(r))
-			if err != nil {
-				writePassivePageError(w, err)
-				return
-			}
-			page := passiveWindowPayload(items, r.URL.Query(), complete)
-			a.overlayLocalUserDataItems(r, asItems(page))
-			writeJSON(w, http.StatusOK, page)
-			return
-		}
 		payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Users/"+resolved.Client.clientUserID()+"/Items", query, nil)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
@@ -179,34 +132,47 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filter, localFilter := a.prepareLocalUserFilter(w, r, query)
-	var applyFilter func([]map[string]any) []map[string]any
-	applyFilter = func(items []map[string]any) []map[string]any {
-		if localFilter {
-			var recency map[string]int64
-			items, recency = a.filterItemsByLocalUserState(r, items, filter)
-			localItemSort(items, r.URL.Query(), recency)
-		} else {
-			passiveGlobalSort(items, r.URL.Query())
-		}
-		return items
+	if !localFilter {
+		requestMergedCandidateSet(query)
 	}
-	requestMergeFields(query)
-	sources := a.globalPassiveSources(r, "/Users/%s/Items", query)
-	items, complete, err := a.collectPassivePages(r, sources, query, applyFilter, a.clientFacingUserIDFor(r))
-	if err != nil {
-		writePassivePageError(w, err)
+	results := a.fetchItemsAcrossUpstreams(r.Context(), requestContextFrom(r.Context()), "/Users/%s/Items", query, nil)
+	// Root-level listings include the library views themselves; some clients
+	// browse the root through this endpoint instead of /Users/{id}/Views, so
+	// hidden libraries must be dropped here too. Content items are never
+	// touched — dropHiddenLibraryViews matches on the library item types only.
+	if hidden := a.hiddenLibrariesFor(requestContextFrom(r.Context())); len(hidden) > 0 {
+		dropHiddenLibraryViews(results, hidden)
+	}
+	merged := a.mergedItemsPayload(results, a.clientFacingUserIDFor(r), requestContextFrom(r.Context()))
+	if items, ok := merged["Items"].([]any); ok {
+		asMaps := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			if m, ok := item.(map[string]any); ok {
+				asMaps = append(asMaps, m)
+			}
+		}
+		if localFilter {
+			kept, recency := a.filterItemsByLocalUserState(r, asMaps, filter)
+			localItemSort(kept, r.URL.Query(), recency)
+			a.overlayLocalUserDataItems(r, kept)
+			writeJSON(w, http.StatusOK, paginateItems(kept, r.URL.Query()))
+			return
+		}
+		if len(asMaps) >= mergedItemsScanLimit {
+			a.warnTruncatedMerge(len(asMaps))
+		}
+		a.overlayLocalUserDataItems(r, asMaps)
+		writeJSON(w, http.StatusOK, paginateItems(asMaps, r.URL.Query()))
 		return
 	}
-	page := passiveWindowPayload(items, r.URL.Query(), complete)
-	a.overlayLocalUserDataItems(r, asItems(page))
-	writeJSON(w, http.StatusOK, page)
+	writeJSON(w, http.StatusOK, merged)
 }
 
 func (a *App) handleUserItemsLatest(w http.ResponseWriter, r *http.Request) {
 	query := cloneValues(r.URL.Query())
-	parentID := normalizeParentParam(query)
 	filter, localFilter := a.prepareLocalUserFilter(w, r, query)
-	if parentID != "" && !strings.EqualFold(parentID, "root") && parentID != "0" {
+	parentID := query.Get("ParentId")
+	if parentID != "" {
 		resolved, routeOK := a.resolveRequestRouteID(w, r, parentID)
 		if !routeOK {
 			return
@@ -219,31 +185,8 @@ func (a *App) handleUserItemsLatest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		query.Set("ParentId", resolved.OriginalID)
-		query.Del("parentId")
-		query.Del("parentid")
 		query.Set("UserId", resolved.Client.clientUserID())
 		fullSources := requestMergeFields(query)
-		if localFilter {
-			reqCtx := requestContextFrom(r.Context())
-			source := passivePageSource{serverID: resolved.ServerID, request: func(ctx context.Context, start, limit int) (any, error) {
-				q := passiveSourceQuery(query, resolved.Client, start, limit)
-				return resolved.Client.RequestJSON(ctx, reqCtx, a.Identity, http.MethodGet, "/Users/"+resolved.Client.clientUserID()+"/Items/Latest", q, nil)
-			}}
-			filtered := func(items []map[string]any) []map[string]any {
-				kept, recency := a.filterItemsByLocalUserState(r, items, filter)
-				localItemSort(kept, r.URL.Query(), recency)
-				return kept
-			}
-			items, _, err := a.collectPassivePages(r, []passivePageSource{source}, r.URL.Query(), filtered, a.clientFacingUserIDFor(r))
-			if err != nil {
-				writePassivePageError(w, err)
-				return
-			}
-			page := asItems(passiveWindowPayload(items, r.URL.Query(), true))
-			a.overlayLocalUserDataItems(r, page)
-			writeJSON(w, http.StatusOK, page)
-			return
-		}
 		payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Users/"+resolved.Client.clientUserID()+"/Items/Latest", query, nil)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
@@ -263,26 +206,49 @@ func (a *App) handleUserItemsLatest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, items)
 		return
 	}
-	requestMergeFields(query)
-	sources := a.globalPassiveSources(r, "/Users/%s/Items/Latest", query)
-	filtered := func(items []map[string]any) []map[string]any {
-		if localFilter {
-			var recency map[string]int64
-			items, recency = a.filterItemsByLocalUserState(r, items, filter)
-			localItemSort(items, r.URL.Query(), recency)
-		} else {
-			passiveGlobalSort(items, r.URL.Query())
+	reqCtx := requestContextFrom(r.Context())
+	clients := a.allowedClients(reqCtx)
+	cfg := a.ConfigStore.Snapshot()
+	globalTimeout := time.Duration(cfg.Timeouts.Global) * time.Millisecond
+	if globalTimeout <= 0 {
+		globalTimeout = 15 * time.Second
+	}
+
+	tasks := make([]upstreamTask, len(clients))
+	for i, client := range clients {
+		c := client
+		tasks[i] = upstreamTask{
+			index: i,
+			fn: func(bgCtx context.Context) upstreamItemsResult {
+				instQuery := cloneValues(query)
+				instQuery.Set("UserId", c.clientUserID())
+				fullSources := requestMergeFields(instQuery)
+				payload, err := c.RequestJSON(bgCtx, reqCtx, a.Identity, http.MethodGet, "/Users/"+c.clientUserID()+"/Items/Latest", instQuery, nil)
+				if err != nil {
+					return upstreamItemsResult{Err: err}
+				}
+				if !a.isServerAllowed(reqCtx, c.ID) {
+					return upstreamItemsResult{Err: errMediaAccessDenied}
+				}
+				return upstreamItemsResult{ServerID: c.ID, Items: asItems(payload), FullSources: fullSources, RequestScope: reqCtx}
+			},
 		}
-		return items
 	}
-	allItems, _, err := a.collectPassivePages(r, sources, query, filtered, a.clientFacingUserIDFor(r))
-	if err != nil {
-		writePassivePageError(w, err)
-		return
+
+	collected := a.aggregateUpstreams(r.Context(), aggregationConfig{
+		gracePeriod:   time.Duration(cfg.Timeouts.LatestGracePeriod) * time.Millisecond,
+		globalTimeout: globalTimeout,
+	}, tasks)
+	collected = a.hydrateMergeResults(r, collected)
+	allItems := a.mergeRoundRobinItems(collected, a.clientFacingUserIDFor(r), reqCtx)
+	if localFilter {
+		var recency map[string]int64
+		allItems, recency = a.filterItemsByLocalUserState(r, allItems, filter)
+		localItemSort(allItems, r.URL.Query(), recency)
+		allItems = asItems(paginateItems(allItems, r.URL.Query()))
 	}
-	page := asItems(passiveWindowPayload(allItems, r.URL.Query(), true))
-	a.overlayLocalUserDataItems(r, page)
-	writeJSON(w, http.StatusOK, page)
+	a.overlayLocalUserDataItems(r, allItems)
+	writeJSON(w, http.StatusOK, allItems)
 }
 
 func (a *App) handleUserItemByID(w http.ResponseWriter, r *http.Request) {
@@ -308,28 +274,6 @@ func (a *App) handleItemSimilar(w http.ResponseWriter, r *http.Request) {
 	query := cloneValues(r.URL.Query())
 	query.Set("UserId", resolved.Client.clientUserID())
 	filter, localFilter := a.prepareLocalUserFilter(w, r, query)
-	if localFilter {
-		requestMergeFields(query)
-		reqCtx := requestContextFrom(r.Context())
-		source := passivePageSource{serverID: resolved.ServerID, request: func(ctx context.Context, start, limit int) (any, error) {
-			q := passiveSourceQuery(query, resolved.Client, start, limit)
-			return resolved.Client.RequestJSON(ctx, reqCtx, a.Identity, http.MethodGet, "/Items/"+resolved.OriginalID+"/Similar", q, nil)
-		}}
-		filtered := func(items []map[string]any) []map[string]any {
-			kept, recency := a.filterItemsByLocalUserState(r, items, filter)
-			localItemSort(kept, r.URL.Query(), recency)
-			return kept
-		}
-		items, complete, err := a.collectPassivePages(r, []passivePageSource{source}, r.URL.Query(), filtered, a.clientFacingUserIDFor(r))
-		if err != nil {
-			writePassivePageError(w, err)
-			return
-		}
-		page := passiveWindowPayload(items, r.URL.Query(), complete)
-		a.overlayLocalUserDataItems(r, asItems(page))
-		writeJSON(w, http.StatusOK, page)
-		return
-	}
 	payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Items/"+resolved.OriginalID+"/Similar", query, nil)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
@@ -545,6 +489,30 @@ func (a *App) mergeRoundRobinItems(results []upstreamItemsResult, clientUserID s
 		results = a.filterAllowedUpstreamResults(reqCtx, results)
 	}
 	return a.mergeHTTPItems(results, clientUserID, reqCtx)
+}
+
+// mergedItemsScanLimit caps how many items one merged (no ParentId) item query may pull
+// from each upstream.
+const mergedItemsScanLimit = 5000
+
+// requestMergedCandidateSet asks the upstreams for the candidate set instead of the
+// client's page. Paging belongs to the proxy on this path: the answers are merged and
+// deduplicated before the page is cut, so a window forwarded upstream would be cut
+// twice — once there, once by paginateItems — and the merged total would be the page
+// size rather than the library size, telling the client there is no page 2.
+func requestMergedCandidateSet(query url.Values) {
+	query.Set("StartIndex", "0")
+	query.Set("Limit", strconv.Itoa(mergedItemsScanLimit))
+}
+
+// warnTruncatedMerge reports that the merged candidate set hit the scan cap, so the
+// reported total is a lower bound and the tail of the library is unreachable.
+func (a *App) warnTruncatedMerge(count int) {
+	if a.Logger == nil || !a.noticeThrottle.allow("merged-scan") {
+		return
+	}
+	a.Logger.Warnf("merged item query scanned %d upstream items (limit %d): the total and the tail of the list may be truncated",
+		count, mergedItemsScanLimit)
 }
 
 func paginateItems(merged []map[string]any, query url.Values) map[string]any {
