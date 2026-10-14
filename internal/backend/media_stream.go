@@ -165,7 +165,7 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, client *Upst
 			r.Header.Get("Range"), r.Header.Get("Accept"), r.Header.Get("Accept-Encoding"))
 	}
 
-	resp, err := client.Stream(r.Context(), reqCtx, a.Identity, upstreamPath, query, streamRequestHeaders(r))
+	resp, err := client.StreamWithMethod(r.Context(), reqCtx, a.Identity, r.Method, upstreamPath, query, streamRequestHeaders(r))
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return // client disconnected or timed out — not a server error
@@ -180,6 +180,14 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, client *Upst
 
 	if !a.isServerAllowed(reqCtx, client.ID) {
 		writeMediaSelectionError(w, errMediaAccessDenied)
+		return
+	}
+
+	// HEAD is metadata only, including for HLS playlists: preserve the
+	// upstream status and headers without reading or rewriting any body.
+	if r.Method == http.MethodHead {
+		copyStreamResponseHeaders(w, resp)
+		w.WriteHeader(resp.StatusCode)
 		return
 	}
 

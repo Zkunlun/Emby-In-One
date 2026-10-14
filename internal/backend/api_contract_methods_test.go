@@ -308,3 +308,89 @@ func TestPhase8BContractD12ProbeIsAnonymousRouteReachabilityOnly(t *testing.T) {
 	// GREEN locks historical route-reachability behavior; it is NOT proof a
 	// valid API route was used or any authenticated media is playable.
 }
+
+func TestPhase8CHeadAudioVideoStatusesRangesAndHLS(t *testing.T) {
+	cases := []struct {
+		name, method, path, contentType, requestRange, responseBody string
+		status                                                      int
+	}{
+		{"video-head-200", http.MethodHead, "/Videos/item-original/stream.mkv", "video/x-matroska", "", "", http.StatusOK},
+		{"audio-head-206", http.MethodHead, "/Audio/item-original/stream.mp3", "audio/mpeg", "bytes=0-6", "", http.StatusPartialContent},
+		{"video-head-404", http.MethodHead, "/Videos/item-original/not-found.mkv", "video/x-matroska", "", "", http.StatusNotFound},
+		{"video-hls-head", http.MethodHead, "/Videos/item-original/master.m3u8", "application/vnd.apple.mpegurl", "", "", http.StatusOK},
+		{"audio-get-200", http.MethodGet, "/Audio/item-original/stream.mp3", "audio/mpeg", "", "audio-body", http.StatusOK},
+		{"video-get-206", http.MethodGet, "/Videos/item-original/stream.mkv", "video/x-matroska", "bytes=0-6", "partial", http.StatusPartialContent},
+		{"video-hls-get", http.MethodGet, "/Videos/item-original/master.m3u8", "application/vnd.apple.mpegurl", "", "#EXTM3U\n#EXTINF:5,\nseg.ts\n", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var seenMethod, seenRange string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "mock-token", "User": map[string]any{"Id": "up-user"}})
+					return
+				}
+				if r.URL.Path != tc.path {
+					http.NotFound(w, r)
+					return
+				}
+				seenMethod = r.Method
+				seenRange = r.Header.Get("Range")
+				w.Header().Set("Content-Type", tc.contentType)
+				w.Header().Set("Accept-Ranges", "bytes")
+				w.Header().Set("ETag", `"mock-etag"`)
+				if tc.method == http.MethodHead {
+					w.Header().Set("Content-Length", "12345")
+				}
+				if tc.status == http.StatusPartialContent {
+					w.Header().Set("Content-Range", "bytes 0-6/100")
+				}
+				w.WriteHeader(tc.status)
+				if r.Method != http.MethodHead {
+					_, _ = w.Write([]byte(tc.responseBody))
+				}
+			}))
+			t.Cleanup(upstream.Close)
+			withTempAppConfig(t, singleUpstreamConfig(upstream.URL), func(app *App, h http.Handler) {
+				token := loginToken(t, h, "secret")
+				id := app.IDStore.GetOrCreateVirtualID("item-original", app.Upstream.Clients()[0].ID)
+				path := strings.Replace(tc.path, "/item-original/", "/"+id+"/", 1)
+				req := httptest.NewRequest(tc.method, path, nil)
+				req.Header.Set("X-Emby-Token", token)
+				if tc.requestRange != "" {
+					req.Header.Set("Range", tc.requestRange)
+				}
+				rr := httptest.NewRecorder()
+				h.ServeHTTP(rr, req)
+				if seenMethod != tc.method {
+					t.Errorf("upstream method=%q want=%q (must preserve client method)", seenMethod, tc.method)
+				}
+				if seenRange != tc.requestRange {
+					t.Errorf("upstream Range=%q want=%q", seenRange, tc.requestRange)
+				}
+				if rr.Code != tc.status {
+					t.Errorf("downstream status=%d want=%d", rr.Code, tc.status)
+				}
+				if tc.method == http.MethodHead {
+					if rr.Body.Len() != 0 {
+						t.Errorf("HEAD forwarded %d body bytes", rr.Body.Len())
+					}
+					for _, name := range []string{"Content-Type", "Content-Length", "Accept-Ranges", "ETag"} {
+						if rr.Header().Get(name) == "" {
+							t.Errorf("HEAD dropped response header %s", name)
+						}
+					}
+					if tc.status == http.StatusPartialContent && rr.Header().Get("Content-Range") != "bytes 0-6/100" {
+						t.Errorf("HEAD 206 lost Content-Range")
+					}
+				} else if strings.HasSuffix(tc.path, ".m3u8") {
+					if !strings.Contains(rr.Body.String(), "#EXTM3U") {
+						t.Errorf("GET HLS manifest missing, body=%q", rr.Body.String())
+					}
+				} else if rr.Body.String() != tc.responseBody {
+					t.Errorf("GET body=%q want=%q", rr.Body.String(), tc.responseBody)
+				}
+			})
+		})
+	}
+}

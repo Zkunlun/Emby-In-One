@@ -895,7 +895,18 @@ func (c *UpstreamClient) RequestJSON(ctx context.Context, reqCtx *RequestContext
 	return decoded, nil
 }
 
+// Stream keeps the historical GET-only helper for image, subtitle and test
+// callers that do not supply an incoming HTTP method.
 func (c *UpstreamClient) Stream(ctx context.Context, reqCtx *RequestContext, identity *ClientIdentityService, path string, params url.Values, extraHeaders ...http.Header) (*http.Response, error) {
+	return c.StreamWithMethod(ctx, reqCtx, identity, http.MethodGet, path, params, extraHeaders...)
+}
+
+// StreamWithMethod preserves GET/HEAD semantics for proxied video and audio.
+// Other HTTP methods must not be accepted through the streaming transport.
+func (c *UpstreamClient) StreamWithMethod(ctx context.Context, reqCtx *RequestContext, identity *ClientIdentityService, method, path string, params url.Values, extraHeaders ...http.Header) (*http.Response, error) {
+	if method != http.MethodGet && method != http.MethodHead {
+		return nil, fmt.Errorf("unsupported stream method %q", method)
+	}
 	headers := c.identityHeaders(reqCtx, identity)
 	for _, extra := range extraHeaders {
 		for key, values := range extra {
@@ -904,7 +915,7 @@ func (c *UpstreamClient) Stream(ctx context.Context, reqCtx *RequestContext, ide
 			}
 		}
 	}
-	return c.doRequest(ctx, reqCtx, http.MethodGet, path, params, nil, headers, true)
+	return c.doRequest(ctx, reqCtx, method, path, params, nil, headers, true)
 }
 
 // redirectPolicy returns the redirect handling for an upstream. Following is the
