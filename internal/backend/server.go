@@ -24,6 +24,7 @@ type App struct {
 	WatchStore      *WatchStore
 	HiddenLibraries *HiddenLibraryStore
 	libraryCache    *upstreamLibraryCache
+	sourceProbeCache detailProbeCache
 	mediaCounts     *mediaCountsService
 	PlaybackLimiter *PlaybackLimiter
 	playbackRoutes  *playbackRouteStore

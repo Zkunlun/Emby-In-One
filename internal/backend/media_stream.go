@@ -89,6 +89,7 @@ func (a *App) proxyStream(w http.ResponseWriter, r *http.Request, route streamRo
 			query.Set("MediaSourceId", virtual)
 		}
 	}
+	requestedSourceID, _ := explicitMediaSourceID(query, nil)
 	client, originalID, ok := a.resolveStreamTarget(w, r, resolved, virtualItemID, query)
 	if !ok {
 		return
@@ -103,6 +104,13 @@ func (a *App) proxyStream(w http.ResponseWriter, r *http.Request, route streamRo
 
 	upstreamPath := route.pathPrefix + "/" + originalID + "/" + rest
 	reqCtx := requestContextFrom(r.Context())
+	if requestedSourceID != "" {
+		if candidate, ok := a.playbackRoutes.MediaSource(playbackRouteOwner(reqCtx), requestedSourceID); ok &&
+			candidate.ServerID == client.ID && candidate.ItemID == virtualItemID &&
+			candidate.DirectStreamPath != "" && candidate.DirectStreamRest == rest {
+			upstreamPath = candidate.DirectStreamPath
+		}
+	}
 	if a.Logger != nil {
 		a.Logger.Infof("%s: %s/%s/%s -> [%s] %s",
 			route.label, route.pathPrefix, virtualItemID, rest, client.Name, upstreamPath)

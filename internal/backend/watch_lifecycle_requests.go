@@ -21,6 +21,13 @@ func (a *App) rememberSourceRoute(reqCtx *RequestContext, sourceID, itemID, serv
 	})
 }
 
+func (a *App) rememberDirectStreamRoute(reqCtx *RequestContext, sourceID, itemID, serverID, upstreamPath, clientRest string) {
+	a.publishPlaybackState(reqCtx, serverID, func() {
+		owner := playbackRouteOwner(reqCtx)
+		a.playbackRoutes.RememberDirectStream(owner, sourceID, itemID, serverID, upstreamPath, clientRest)
+	})
+}
+
 func (a *App) rememberMediaMembership(reqCtx *RequestContext, sourceID, itemID, serverID string) {
 	a.publishPlaybackState(reqCtx, serverID, func() {
 		owner := playbackRouteOwner(reqCtx)

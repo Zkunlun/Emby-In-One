@@ -18,6 +18,19 @@ type mergeIdentity struct {
 
 var mergeProviders = [...]string{"Tmdb", "Imdb", "Tvdb"}
 
+// mergeWireItemID accepts both full Emby items (Id) and SearchHint-shaped
+// records (ItemId). Search/Hints commonly uses ItemId as the media locator; treating
+// that shape as identity-less makes every hint disappear during merge projection.
+func mergeWireItemID(item map[string]any) string {
+	if id, ok := item["Id"].(string); ok && strings.TrimSpace(id) != "" {
+		return id
+	}
+	if id, ok := item["ItemId"].(string); ok && strings.TrimSpace(id) != "" {
+		return id
+	}
+	return ""
+}
+
 func mergeIdentityFromItem(item map[string]any) mergeIdentity {
 	kind, _ := item["Type"].(string)
 	name, _ := item["Name"].(string)
@@ -111,7 +124,7 @@ type mergeSeriesEvidence struct {
 }
 
 func newMergeSeriesEvidence(serverID string, series map[string]any) *mergeSeriesEvidence {
-	id, _ := series["Id"].(string)
+	id := mergeWireItemID(series)
 	identity := mergeIdentityFromItem(series)
 	if strings.TrimSpace(serverID) == "" || strings.TrimSpace(id) == "" || identity.Type != "Series" {
 		return nil
@@ -156,7 +169,7 @@ func mergePositiveTicks(body map[string]any, field string) playbackTickValue {
 // is the complete list. A one-element selected/partial list alone is NOT proof
 // that item-level runtime describes that sole version.
 func newMergeCandidate(serverID string, item map[string]any, parent *mergeSeriesEvidence, fullSources bool) mergeCandidate {
-	id, _ := item["Id"].(string)
+	id := mergeWireItemID(item)
 	candidate := mergeCandidate{
 		ServerID: serverID, ItemID: id, Identity: mergeIdentityFromItem(item),
 		Season:  playbackTicksFromBody(item, "ParentIndexNumber"),

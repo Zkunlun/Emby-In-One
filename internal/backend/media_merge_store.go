@@ -67,10 +67,17 @@ type mergeStoreState struct {
 	Owners  map[mergeMemberKey]string
 	Aliases map[string]string
 	Items   map[mergeItemKey]map[string]bool
+	// Work is a derived lookup index only. The persisted group snapshots remain
+	// authoritative and every candidate found here is revalidated by merge policy.
+	Work map[string]map[string]bool
 }
 
 func emptyMergeStoreState() mergeStoreState {
-	return mergeStoreState{Groups: map[string]*mergeStoredGroup{}, Owners: map[mergeMemberKey]string{}, Aliases: map[string]string{}, Items: map[mergeItemKey]map[string]bool{}}
+	return mergeStoreState{
+		Groups: map[string]*mergeStoredGroup{}, Owners: map[mergeMemberKey]string{},
+		Aliases: map[string]string{}, Items: map[mergeItemKey]map[string]bool{},
+		Work: map[string]map[string]bool{},
+	}
 }
 
 func cloneMergeGroup(group *mergeStoredGroup) *mergeStoredGroup {
@@ -78,6 +85,111 @@ func cloneMergeGroup(group *mergeStoredGroup) *mergeStoredGroup {
 	var copy mergeStoredGroup
 	_ = json.Unmarshal(data, &copy)
 	return &copy
+}
+
+func cloneMergeIdentity(identity mergeIdentity) mergeIdentity {
+	copy := identity
+	copy.ProviderIDs = make(map[string]string, len(identity.ProviderIDs))
+	for key, value := range identity.ProviderIDs {
+		copy.ProviderIDs[key] = value
+	}
+	return copy
+}
+
+func mergeGroupWorkKeys(group *mergeStoredGroup) []string {
+	if group == nil || (group.MediaType != "Movie" && group.MediaType != "Series") {
+		return nil
+	}
+	seen := map[string]bool{}
+	var keys []string
+	for _, member := range group.Members {
+		if member.Ref.MediaSourceID != "" || member.Identity.Type != group.MediaType {
+			continue
+		}
+		candidate := mergeCandidate{Identity: member.Identity}
+		for _, key := range candidate.lookupKeys() {
+			if key != "" && !seen[key] {
+				seen[key] = true
+				keys = append(keys, key)
+			}
+		}
+	}
+	return keys
+}
+
+func addMergeGroupWorkIndex(state *mergeStoreState, group *mergeStoredGroup) {
+	if state == nil || group == nil || group.VirtualID == "" {
+		return
+	}
+	if state.Work == nil {
+		state.Work = map[string]map[string]bool{}
+	}
+	for _, key := range mergeGroupWorkKeys(group) {
+		if state.Work[key] == nil {
+			state.Work[key] = map[string]bool{}
+		}
+		state.Work[key][group.VirtualID] = true
+	}
+}
+
+func removeMergeGroupWorkIndex(state *mergeStoreState, group *mergeStoredGroup) {
+	if state == nil || group == nil {
+		return
+	}
+	for _, key := range mergeGroupWorkKeys(group) {
+		delete(state.Work[key], group.VirtualID)
+		if len(state.Work[key]) == 0 {
+			delete(state.Work, key)
+		}
+	}
+}
+
+type historicalMergeWorkCandidate struct {
+	VirtualID string
+	Candidate mergeCandidate
+}
+
+// HistoricalWorkCandidates returns source-qualified persisted work anchors that
+// share at least one lookup hint with candidate. Lookup hints are not equality
+// proof; callers must still run the normal pairwise merge policy.
+func (s *IDStore) HistoricalWorkCandidates(candidate mergeCandidate) []historicalMergeWorkCandidate {
+	if candidate.Identity.Type != "Movie" && candidate.Identity.Type != "Series" {
+		return nil
+	}
+	keys := candidate.lookupKeys()
+	if len(keys) == 0 {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ids := map[string]bool{}
+	for _, key := range keys {
+		for id := range s.mergeState.Work[key] {
+			ids[s.canonicalMergeIDLocked(id)] = true
+		}
+	}
+	ordered := make([]string, 0, len(ids))
+	for id := range ids {
+		ordered = append(ordered, id)
+	}
+	sort.Strings(ordered)
+	var result []historicalMergeWorkCandidate
+	for _, id := range ordered {
+		group := s.mergeState.Groups[id]
+		if group == nil || group.MediaType != candidate.Identity.Type {
+			continue
+		}
+		for _, member := range group.Members {
+			if member.Ref.MediaSourceID != "" || member.Identity.Type != group.MediaType {
+				continue
+			}
+			result = append(result, historicalMergeWorkCandidate{
+				VirtualID: id,
+				Candidate: mergeCandidate{ServerID: member.Ref.ServerID, ItemID: member.Ref.ItemID, Identity: cloneMergeIdentity(member.Identity)},
+			})
+		}
+	}
+	return result
 }
 
 func (s *IDStore) initMergeSchema() error {
@@ -125,6 +237,7 @@ func (s *IDStore) loadMergeGroupsLocked() error {
 			return errors.New("merge group has no virtual locator")
 		}
 		next.Groups[group.VirtualID] = &group
+		addMergeGroupWorkIndex(&next, &group)
 		for _, member := range group.Members {
 			key := mergeRefKey(member.Ref)
 			if _, duplicate := next.Owners[key]; duplicate {
@@ -600,6 +713,7 @@ func (s *IDStore) writeMergeGroupSQL(group *mergeStoredGroup, absorbed []string)
 func (s *IDStore) publishMergeGroupLocked(group *mergeStoredGroup, absorbed []string) {
 	for _, id := range append([]string{group.VirtualID}, absorbed...) {
 		if old := s.mergeState.Groups[id]; old != nil {
+			removeMergeGroupWorkIndex(&s.mergeState, old)
 			for _, member := range old.Members {
 				key := mergeRefKey(member.Ref)
 				delete(s.mergeState.Owners, key)
@@ -616,6 +730,7 @@ func (s *IDStore) publishMergeGroupLocked(group *mergeStoredGroup, absorbed []st
 	}
 	copy := cloneMergeGroup(group)
 	s.mergeState.Groups[copy.VirtualID] = copy
+	addMergeGroupWorkIndex(&s.mergeState, copy)
 	for _, member := range copy.Members {
 		key := mergeRefKey(member.Ref)
 		itemKey := mergeItemKey{key.ServerID, key.ItemID}
@@ -695,6 +810,10 @@ func (s *IDStore) writeMergeRemovalSQL(changes []*mergeStoredGroup) error {
 func (s *IDStore) publishMergeRemovalLocked(changes []*mergeStoredGroup) {
 	for _, group := range changes {
 		old := s.mergeState.Groups[group.VirtualID]
+		if old == nil {
+			continue
+		}
+		removeMergeGroupWorkIndex(&s.mergeState, old)
 		for _, member := range old.Members {
 			key := mergeRefKey(member.Ref)
 			delete(s.mergeState.Owners, key)
