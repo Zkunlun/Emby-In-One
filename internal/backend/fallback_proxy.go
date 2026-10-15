@@ -2,7 +2,6 @@ package backend
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"mime"
 	"net/http"
@@ -150,7 +149,7 @@ func (a *App) handleFallbackProxyWithWatchEvent(w http.ResponseWriter, r *http.R
 	}
 	if looksLikeJSON(bodyBytes) {
 		var payload any
-		if err := json.Unmarshal(bodyBytes, &payload); err != nil {
+		if err := unmarshalJSONWithNumbers(bodyBytes, &payload); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Invalid upstream JSON"})
 			return
 		}
@@ -317,7 +316,7 @@ func decodeFallbackBody(r *http.Request) (any, error) {
 		return &rawRequestBody{data: raw, contentType: r.Header.Get("Content-Type")}, nil
 	}
 	var payload any
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	if err := unmarshalJSONWithNumbers(raw, &payload); err != nil {
 		return nil, err
 	}
 	return payload, nil

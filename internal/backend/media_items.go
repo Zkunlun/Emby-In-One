@@ -14,6 +14,24 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 	if !hasBatchIDQuery(query) {
 		filter, localFilter := a.prepareLocalUserFilter(w, r, query)
 		if !localFilter {
+			parent := firstQueryValue(query, "ParentId", "parentId", "parentid")
+			if strings.TrimSpace(query.Get("SearchTerm")) != "" &&
+				(parent == "" || parent == "0" || parent == "root") {
+				// Some clients search via /Items rather than /Search/Hints.
+				// Keep all results inside the same authorized merge/ID rewrite
+				// pipeline instead of forwarding raw upstream item IDs.
+				requestBoundedSearchCandidateSet(query, r.URL.Query())
+				reqCtx := requestContextFrom(r.Context())
+				results := a.fetchItemsAcrossUpstreams(r.Context(), reqCtx, "/Items", query, nil)
+				if hidden := a.hiddenLibrariesFor(reqCtx); len(hidden) > 0 {
+					dropHiddenLibraryViews(results, hidden)
+				}
+				merged := a.mergedItemsPayload(results, a.clientFacingUserIDFor(r), reqCtx)
+				items := asItems(merged)
+				a.overlayLocalUserDataItems(r, items)
+				writeJSON(w, http.StatusOK, paginateItems(items, r.URL.Query()))
+				return
+			}
 			a.handleFallbackProxy(w, r)
 			return
 		}
@@ -108,6 +126,7 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 		// of that container's items the user sees.
 		filter, localFilter := a.prepareLocalUserFilter(w, r, query)
 		fullSources := requestMergeFields(query)
+		removePathScopedItemsUserQuery(query)
 		payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Users/"+resolved.Client.clientUserID()+"/Items", query, nil)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
@@ -133,7 +152,11 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 	}
 	filter, localFilter := a.prepareLocalUserFilter(w, r, query)
 	if !localFilter {
-		requestMergedCandidateSet(query)
+		if strings.TrimSpace(query.Get("SearchTerm")) != "" {
+			requestBoundedSearchCandidateSet(query, r.URL.Query())
+		} else {
+			requestMergedCandidateSet(query)
+		}
 	}
 	results := a.fetchItemsAcrossUpstreams(r.Context(), requestContextFrom(r.Context()), "/Users/%s/Items", query, nil)
 	// Root-level listings include the library views themselves; some clients
@@ -328,6 +351,17 @@ func (a *App) handleItemThemeMedia(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, payload)
 }
 
+// A /Users/{UserId}/Items endpoint already scopes its user in the path.
+// Discard all case variants of the redundant Query alias; do not change
+// /Items (whose Query UserId is meaningful) or other endpoints.
+func removePathScopedItemsUserQuery(query url.Values) {
+	for key := range query {
+		if strings.EqualFold(key, "UserId") {
+			delete(query, key)
+		}
+	}
+}
+
 func (a *App) fetchItemsAcrossUpstreams(ctx context.Context, reqCtx *RequestContext, pathTemplate string, query url.Values, body any) []upstreamItemsResult {
 	clients := a.allowedClients(reqCtx)
 	if len(clients) == 0 {
@@ -347,8 +381,12 @@ func (a *App) fetchItemsAcrossUpstreams(ctx context.Context, reqCtx *RequestCont
 			fn: func(bgCtx context.Context) upstreamItemsResult {
 				serverQuery := cloneValues(query)
 				fullSources := requestMergeFields(serverQuery)
-				// Clients only ever hold EIO's virtual user ID, which no upstream knows.
-				serverQuery.Set("UserId", c.clientUserID())
+				// /Items needs a real upstream Query UserId, while the
+				// /Users/{id}/Items route already encodes it in its path.
+				removePathScopedItemsUserQuery(serverQuery)
+				if pathTemplate != "/Users/%s/Items" {
+					serverQuery.Set("UserId", c.clientUserID())
+				}
 				if hasBatchIDQuery(serverQuery) {
 					translated, ok := translateBatchIDQueryForServer(serverQuery, c.ID, a.IDStore)
 					if !ok {
@@ -356,7 +394,40 @@ func (a *App) fetchItemsAcrossUpstreams(ctx context.Context, reqCtx *RequestCont
 					}
 					serverQuery = translated
 				}
-				payload, err := c.RequestJSON(bgCtx, reqCtx, a.Identity, http.MethodGet, strings.Replace(pathTemplate, "%s", c.clientUserID(), 1), serverQuery, body)
+				path := strings.Replace(pathTemplate, "%s", c.clientUserID(), 1)
+				payload, err := c.RequestJSON(bgCtx, reqCtx, a.Identity, http.MethodGet, path, serverQuery, body)
+				// Some Emby-compatible upstreams implement only one of the
+				// /Items and /Users/{id}/Items search surfaces. Only root-level
+				// nonblank SearchTerm queries may try the sibling endpoint.
+				// Never fall back after auth/server/transport errors or for
+				// ParentId-scoped browsing, which must stay within its library.
+				parent := firstQueryValue(serverQuery, "ParentId", "parentId", "parentid")
+				canTrySibling := (pathTemplate == "/Items" || pathTemplate == "/Users/%s/Items") &&
+					strings.TrimSpace(serverQuery.Get("SearchTerm")) != "" &&
+					(parent == "" || parent == "0" || parent == "root") &&
+					c.clientUserID() != ""
+				if canTrySibling &&
+					((err == nil && len(asItems(payload)) == 0) || searchEndpointUnsupported(err, path)) &&
+					bgCtx.Err() == nil && a.isServerAllowed(reqCtx, c.ID) {
+					alternative := "/Items"
+					if pathTemplate == "/Items" {
+						alternative = "/Users/" + url.PathEscape(c.clientUserID()) + "/Items"
+					}
+					bounded, valid := boundedSearchAlternativeQuery(serverQuery, c.clientUserID())
+					if valid {
+						if pathTemplate == "/Items" {
+							// /Items -> /Users/{id}/Items sibling fallback:
+							// keep the real path user, never duplicate it.
+							removePathScopedItemsUserQuery(bounded)
+						}
+						alternativePayload, alternativeErr := c.RequestJSON(bgCtx, reqCtx, a.Identity, http.MethodGet, alternative, bounded, nil)
+						if alternativeErr == nil {
+							payload, err = alternativePayload, nil
+						} else if a.Logger != nil && a.noticeThrottle.allow("user-items-search-alternative:"+c.ID) {
+							a.Logger.Warnf("Items search alternate endpoint failed (no query or credentials logged)")
+						}
+					}
+				}
 				if err != nil {
 					return upstreamItemsResult{Err: err}
 				}
@@ -503,6 +574,26 @@ const mergedItemsScanLimit = 5000
 func requestMergedCandidateSet(query url.Values) {
 	query.Set("StartIndex", "0")
 	query.Set("Limit", strconv.Itoa(mergedItemsScanLimit))
+}
+
+// Search pages only need the candidate prefix that could fill the requested
+// window. Do not fetch the inherited 5000-item generic listing limit on each
+// keystroke. Keep the legacy safety cap and merge-before-page semantics.
+func requestBoundedSearchCandidateSet(query, requested url.Values) {
+	start := 0
+	if parsed, err := strconv.Atoi(requested.Get("StartIndex")); err == nil && parsed > 0 {
+		start = parsed
+	}
+	pageSize := 20
+	if parsed, err := strconv.Atoi(requested.Get("Limit")); err == nil && parsed > 0 {
+		pageSize = parsed
+	}
+	candidateCount := mergedItemsScanLimit
+	if start < mergedItemsScanLimit && pageSize < mergedItemsScanLimit-start {
+		candidateCount = start + pageSize
+	}
+	query.Set("StartIndex", "0")
+	query.Set("Limit", strconv.Itoa(candidateCount))
 }
 
 // warnTruncatedMerge reports that the merged candidate set hit the scan cap, so the

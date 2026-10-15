@@ -2,7 +2,7 @@
 
 [项目主页](../README.md) · [文档索引](README.md) · [English](en/operations.md)
 
-适用主线：V1.4.9。
+适用主线：V1.4.10（正式版以 GitHub Releases 为准）。
 
 ## 日常管理与服务状态
 
@@ -24,7 +24,7 @@ emby-in-one
 - 查看日志
 - 卸载服务（支持保留配置和数据）
 
-> SSH 菜单自动检测当前部署方式（Binary / Docker），所有操作自动分发到 systemd 或 Docker Compose 对应命令。Docker 模式下更新采用源码重建流程。菜单没有单独的「查看版本」选项——当前版本号直接显示在菜单标题栏上（当前发布为 V1.4.9）。
+> SSH 菜单自动检测当前部署方式（Binary / Docker），所有操作自动分发到 systemd 或 Docker Compose 对应命令。Docker 模式下更新采用源码重建流程。菜单没有单独的「查看版本」选项——当前版本号直接显示在菜单标题栏上（本源码分支目标 V1.4.10，正式已发布版本以 Releases 为准）。
 
 `/usr/local/bin/emby-in-one` 是安装后的 SSH 菜单脚本；默认 Release 可执行文件是 `/opt/emby-in-one/emby-in-one`。同名不等于同一入口。查看实际二进制版本可在项目目录执行 `./emby-in-one --version`。
 

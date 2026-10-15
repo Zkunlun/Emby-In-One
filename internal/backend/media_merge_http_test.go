@@ -355,9 +355,12 @@ func TestTask6HTTPVersionsListsAndDetails(t *testing.T) {
 			u.mu.Lock()
 			for _, call := range u.calls {
 				if strings.HasSuffix(call.Path, "/Items") && call.Query.Get("Ids") == "" {
-					if !strings.Contains(call.Query.Get("Fields"), "MediaSources") {
-						t.Fatal("source fields not requested")
+					if strings.Contains(call.Query.Get("Fields"), "MediaSources") || !strings.Contains(call.Query.Get("Fields"), "ProviderIds") {
+						t.Fatal("invalid Fields selector or missing provider identity")
 					}
+				}
+				if strings.Contains(call.Path, "/Items/movie-") && call.Query.Has("Fields") {
+					t.Errorf("D05 single item detail must not send list-only Fields selector: path=%s", call.Path)
 				}
 			}
 			u.mu.Unlock()
@@ -479,6 +482,11 @@ func TestTask6HTTPAliasesPreserveRowsAndReset(t *testing.T) {
 	a := task6HTTPMovie("movie-a", task6HTTPSource("a100", 1000))
 	b := task6HTTPMovie("movie-b", task6HTTPSource("b100", nil))
 	b["RunTimeTicks"] = nil
+	// Identity is initially unproven. Missing runtime alone never delays a
+	// merge of the same TMDB work; preserve B as a separate historical ID.
+	b["ProviderIds"] = nil
+	b["Name"] = ""
+	b["ProductionYear"] = nil
 	withTask6HTTPFixture(t, []map[string]any{a}, []map[string]any{b}, func(f *task6HTTPFixture) {
 		task6SeedSeparateItems(t, f, a, b)
 		left := task6HTTPGroup(t, f, "server-a", "movie-a", "a100")
@@ -494,6 +502,10 @@ func TestTask6HTTPAliasesPreserveRowsAndReset(t *testing.T) {
 		}
 		old := *f.app.WatchStore.GetProgress(f.user, alias)
 		b["MediaSources"] = []any{task6HTTPSource("b100", 1000)}
+		// Metadata reconciliation (not runtime equality) now proves B is A.
+		b["ProviderIds"] = map[string]any{"Tmdb": "1"}
+		b["Name"] = "Example"
+		b["ProductionYear"] = 2024
 		f.upstream[1].update(b)
 		if len(f.list(t, "Movie")) != 1 {
 			t.Fatal("newly known matching version not merged")
@@ -798,6 +810,11 @@ func TestTask6HTTPAliasStoppedEndsExactLease(t *testing.T) {
 	a := task6HTTPMovie("movie-a", task6HTTPSource("a100", 1000))
 	b := task6HTTPMovie("movie-b", task6HTTPSource("b100", nil))
 	b["RunTimeTicks"] = nil
+	// Identity is initially unproven. Missing runtime alone never delays a
+	// merge of the same TMDB work; preserve B as a separate historical ID.
+	b["ProviderIds"] = nil
+	b["Name"] = ""
+	b["ProductionYear"] = nil
 	upA, upB := newTask6HTTPUpstream(t, "a", []map[string]any{a}), newTask6HTTPUpstream(t, "b", []map[string]any{b})
 	withTempAppConfig(t, phase1EDualPlaybackConfig(upA.server.URL, upB.server.URL), func(app *App, handler http.Handler) {
 		token := phase1ECreateAuthorizedUser(t, handler, []string{"server-a", "server-b"})
@@ -816,6 +833,10 @@ func TestTask6HTTPAliasStoppedEndsExactLease(t *testing.T) {
 			t.Fatalf("alias started %d %s", rr.Code, rr.Body.String())
 		}
 		b["MediaSources"] = []any{task6HTTPSource("b100", 1000)}
+		// Metadata reconciliation (not runtime equality) now proves B is A.
+		b["ProviderIds"] = map[string]any{"Tmdb": "1"}
+		b["Name"] = "Example"
+		b["ProductionYear"] = 2024
 		upB.update(b)
 		f.list(t, "Movie")
 		if app.IDStore.CanonicalMergeID(alias) == alias {

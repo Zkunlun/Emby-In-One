@@ -61,15 +61,16 @@ func TestPlaybackInfoForwardsUpstreamUserID(t *testing.T) {
 		virtualEpisode := app.IDStore.GetOrCreateVirtualID("episode-1", app.Upstream.Clients()[0].ID)
 		proxyUserID := app.Auth.ProxyUserID()
 
-		// The client sends EIO's own user ID, in both the query and the body.
+		// The client sends EIO's own user ID in both places, but official POST
+		// PlaybackInfo must put the upstream's UserId in the body only.
 		rr := doJSONRequest(t, handler, http.MethodPost,
 			"/Items/"+virtualEpisode+"/PlaybackInfo?UserId="+proxyUserID,
 			map[string]any{"UserId": proxyUserID}, token)
 		if rr.Code != http.StatusOK {
 			t.Fatalf("playback info status = %d, body=%s", rr.Code, rr.Body.String())
 		}
-		if queryUserID != upstreamUserID {
-			t.Fatalf("upstream query UserId = %q, want %q", queryUserID, upstreamUserID)
+		if queryUserID != "" {
+			t.Fatalf("POST PlaybackInfo must omit Query UserId, got %q", queryUserID)
 		}
 		if bodyUserID != upstreamUserID {
 			t.Fatalf("upstream body UserId = %q, want %q", bodyUserID, upstreamUserID)

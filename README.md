@@ -9,6 +9,8 @@
 
 本项目基于 [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One) 持续开发与维护。
 
+**版本说明：** **V1.4.10** 重点改进 SNTP 搜索、多版本保留与 Emby API 请求兼容；实际可安装的正式版本以 [GitHub Releases](https://github.com/Zkunlun/Emby-In-One/releases) 为准，详见[更新日志](Update.md)和[本次验证范围](docs/release-v1.4.10-validation.md)。
+
 ## 适用场景
 
 - 有多台可使用的 Emby 服务器，希望在一个客户端入口浏览、搜索和选择播放来源。
@@ -100,7 +102,7 @@ EIO 本地账户用于登录 EIO，上游账户用于 EIO 接入来源。普通�
 - **统计与合并口径不同**：媒体库统计按授权在线来源的官方数据累加，不做跨来源去重，见[统计说明](docs/media-counts.md)。
 - **升级保留配套备份**：配置、数据库与 `user-password.key` 等文件需一致保存；安装回滚不替代完整数据备份，旧用户库还有版本限制，见[运维指南](docs/operations.md#版本升级)。
 
-合并按请求需要发现，候选数量和分页仍有边界，详见[合并规则](docs/media-merge.md)。已有客户端验收与未覆盖事项见[发布验证说明](docs/release-v1.4.9-validation.md)；凭据存储和使用风险见[安全政策](SECURITY.md)。
+合并按请求需要发现，候选数量和分页仍有边界，详见[合并规则](docs/media-merge.md)。客户端验收及已知限制见[本版验证说明](docs/release-v1.4.10-validation.md)；凭据存储和使用风险见[安全政策](SECURITY.md)。
 
 ## 文档与常见问题
 

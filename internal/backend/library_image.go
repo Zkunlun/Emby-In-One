@@ -2,10 +2,13 @@ package backend
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 type indexedItem struct {
@@ -222,28 +225,129 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 	writeJSON(w, http.StatusOK, paginateItems(items, r.URL.Query()))
 }
 
+// Only 404/405 for the exact endpoint authorize compatibility fallback.
+// Authentication, upstream server failures and transport errors are not a
+// reason to switch endpoints or silently retry with another identity.
+func searchEndpointUnsupported(err error, path string) bool {
+	var httpErr *upstreamHTTPStatusError
+	return errors.As(err, &httpErr) && httpErr.Path == path &&
+		(httpErr.StatusCode == http.StatusNotFound || httpErr.StatusCode == http.StatusMethodNotAllowed)
+}
+
+func searchHintsEndpointUnsupported(err error) bool {
+	return searchEndpointUnsupported(err, "/Search/Hints")
+}
+
+// A live search may add at most two lightweight compatibility probes per
+// authorized upstream, not an unbounded library query. Never modify the
+// client's original paging or search parameters in place.
+func boundedSearchAlternativeQuery(original url.Values, upstreamUserID string) (url.Values, bool) {
+	if strings.TrimSpace(original.Get("SearchTerm")) == "" {
+		return nil, false
+	}
+	query := cloneValues(original)
+	query.Set("UserId", upstreamUserID)
+	query.Set("Recursive", "true")
+	limit, err := strconv.Atoi(query.Get("Limit"))
+	if err != nil || limit <= 0 {
+		limit = 20
+	} else if limit > 100 {
+		limit = 100
+	}
+	query.Set("Limit", strconv.Itoa(limit))
+	return query, true
+}
+
+// SearchHints can use ItemId while Items responses normally use Id. Before
+// registration, normalize to a single upstream locator to prevent a conflicting
+// alias from creating an extra mapping or leaking a raw upstream ID.
+func normalizeSearchHintIDs(items []map[string]any) []map[string]any {
+	for _, item := range items {
+		if id := mergeWireItemID(item); id != "" {
+			item["Id"] = id
+			item["ItemId"] = id
+		}
+	}
+	return items
+}
+
 func (a *App) handleSearchHints(w http.ResponseWriter, r *http.Request) {
 	reqCtx := requestContextFrom(r.Context())
 	clients := a.allowedClients(reqCtx)
 
-	// A failed client returns nil so its group is simply absent from the merge.
+	// SearchHints is an optional upstream compatibility surface. A successful
+	// but empty/unrecognized response is not conclusive evidence that /Items
+	// cannot find the requested work. Only nonblank search terms may trigger
+	// one bounded alternative query on the same authorized upstream.
 	perClient := fanOutClients(clients, func(c *UpstreamClient) *upstreamItemsResult {
 		query := cloneValues(r.URL.Query())
 		query.Set("UserId", c.clientUserID())
 		fullSources := requestMergeFields(query)
+		fallbackItems := func(reason string) *upstreamItemsResult {
+			fallback, valid := boundedSearchAlternativeQuery(query, c.clientUserID())
+			if !valid || r.Context().Err() != nil {
+				return nil
+			}
+			if a.Logger != nil && a.noticeThrottle.allow("search-fallback:"+reason+":"+c.ID) {
+				a.Logger.Infof("SearchHints compatibility: %s; checking bounded Items search alternatives", reason)
+			}
+			paths := []string{"/Items"}
+			if c.clientUserID() != "" {
+				paths = append(paths, "/Users/"+url.PathEscape(c.clientUserID())+"/Items")
+			}
+			for _, path := range paths {
+				if r.Context().Err() != nil || !a.isServerAllowed(reqCtx, c.ID) {
+					return nil
+				}
+				outbound := fallback
+				if path != "/Items" {
+					// This sibling route already scopes the user in its path.
+					outbound = cloneValues(fallback)
+					removePathScopedItemsUserQuery(outbound)
+				}
+				result, err := c.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, path, outbound, nil)
+				if err != nil {
+					if searchEndpointUnsupported(err, path) {
+						continue
+					}
+					// Never move to another endpoint after a 401/403, 5xx,
+					// or transport error from either alternate endpoint.
+					if a.Logger != nil && a.noticeThrottle.allow("search-fallback-error:"+c.ID) {
+						a.Logger.Warnf("SearchHints compatibility: Items search failed (status/transport error; no query or credentials logged)")
+					}
+					return nil
+				}
+				items := asItems(result)
+				if len(items) > 0 {
+					return &upstreamItemsResult{ServerID: c.ID, Items: normalizeSearchHintIDs(items), FullSources: fullSources, RequestScope: reqCtx}
+				}
+			}
+			return nil
+		}
 		payload, err := c.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Search/Hints", query, nil)
 		if err != nil {
+			if searchHintsEndpointUnsupported(err) {
+				return fallbackItems("endpoint unsupported")
+			}
+			// Auth errors and upstream/server failures must never be hidden by
+			// silently switching to another endpoint with weaker guarantees.
+			if a.Logger != nil && a.noticeThrottle.allow("search-hints-error:"+c.ID) {
+				a.Logger.Warnf("SearchHints upstream request failed; no fallback for authentication, transport or server errors")
+			}
 			return nil
 		}
 		block, ok := payload.(map[string]any)
 		if !ok {
-			return nil
+			return fallbackItems("unexpected response type")
 		}
 		items := asItems(map[string]any{"Items": block["SearchHints"]})
 		if len(items) == 0 {
 			items = asItems(payload)
 		}
-		return &upstreamItemsResult{ServerID: c.ID, Items: items, FullSources: fullSources, RequestScope: reqCtx}
+		if len(items) == 0 {
+			return fallbackItems("empty or unrecognized response")
+		}
+		return &upstreamItemsResult{ServerID: c.ID, Items: normalizeSearchHintIDs(items), FullSources: fullSources, RequestScope: reqCtx}
 	})
 
 	collected := make([]upstreamItemsResult, 0, len(perClient))
@@ -255,6 +359,13 @@ func (a *App) handleSearchHints(w http.ResponseWriter, r *http.Request) {
 	collected = a.hydrateMergeResults(r, collected)
 	merged := a.mergeRoundRobinItems(collected, a.clientFacingUserIDFor(r), reqCtx)
 
+	// Some upstreams supply Id, others ItemId. Never return the upstream ID
+	// in either field, including legacy/untyped fallback search entries.
+	for _, item := range merged {
+		if id, _ := item["Id"].(string); id != "" {
+			item["ItemId"] = id
+		}
+	}
 	a.overlayLocalUserDataItems(r, merged)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"SearchHints":      toAnySlice(merged),

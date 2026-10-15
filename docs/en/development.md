@@ -2,7 +2,7 @@
 
 [Project home](../../README_EN.md) · [Documentation](README.md) · [简体中文](../development.md)
 
-Applies to the V1.4.9 mainline.
+Applies to the V1.4.10 source line (consult GitHub Releases for formal publication).
 
 ## Environment and builds
 
@@ -17,7 +17,7 @@ go vet ./...
 Example versioned build:
 
 ```bash
-CGO_ENABLED=1 go build -ldflags="-X main.Version=V1.4.9" -o emby-in-one ./cmd/emby-in-one
+CGO_ENABLED=1 go build -ldflags="-X main.Version=v1.4.10" -o emby-in-one ./cmd/emby-in-one
 ./emby-in-one --version
 ```
 

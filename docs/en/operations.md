@@ -2,7 +2,7 @@
 
 [Project home](../../README_EN.md) · [Documentation](README.md) · [简体中文](../operations.md)
 
-Applies to the V1.4.9 mainline.
+Applies to the V1.4.10 source line (consult GitHub Releases for formal publication).
 
 ## Daily management and service status
 
@@ -22,7 +22,7 @@ It supports:
 - Logs.
 - Uninstallation, with an option to retain configuration and data.
 
-The menu detects Binary or Docker deployments and dispatches to systemd or Docker Compose. Docker updates rebuild from source. There is no separate “view version” option: the menu title shows the version (the current release is V1.4.9).
+The menu detects Binary or Docker deployments and dispatches to systemd or Docker Compose. Docker updates rebuild from source. There is no separate “view version” option: the menu title shows the version (this source branch targets V1.4.10; consult Releases for the published version).
 
 `/usr/local/bin/emby-in-one` is the installed SSH menu script. The default Release executable is `/opt/emby-in-one/emby-in-one`; sharing a name does not make them the same entry point. In the project directory, `./emby-in-one --version` reads the binary version.
 

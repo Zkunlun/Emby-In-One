@@ -2,7 +2,7 @@
 
 [项目主页](../README.md) · [文档索引](README.md) · [English](en/development.md)
 
-适用主线：V1.4.9。
+适用主线：V1.4.10（正式版以 GitHub Releases 为准）。
 
 ## 开发环境与构建
 
@@ -17,7 +17,7 @@ go vet ./...
 构建版本示例：
 
 ```bash
-CGO_ENABLED=1 go build -ldflags="-X main.Version=V1.4.9" -o emby-in-one ./cmd/emby-in-one
+CGO_ENABLED=1 go build -ldflags="-X main.Version=v1.4.10" -o emby-in-one ./cmd/emby-in-one
 ./emby-in-one --version
 ```
 

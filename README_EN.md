@@ -9,6 +9,8 @@ A multi-upstream aggregation proxy for Emby clients: one entry point for multipl
 
 This project continues development and maintenance of [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One).
 
+**Version note:** **V1.4.10** focuses on SNTP search, preserving selectable media versions, and outbound Emby API compatibility. See [GitHub Releases](https://github.com/Zkunlun/Emby-In-One/releases) for the latest formally published version, the [changelog](Update.md) and the [release validation scope](docs/en/release-v1.4.10-validation.md).
+
 ## Who this is for
 
 - You have access to several Emby servers and want to browse, search and choose playback sources through one client entry point.
@@ -100,7 +102,7 @@ EIO local accounts log into EIO; upstream accounts let EIO connect to sources. R
 - **Counts and merging differ:** counts sum official data from authorized online sources without cross-source deduplication; see [library counts](docs/en/media-counts.md).
 - **Keep matching upgrade backups:** preserve configuration, database, user-password.key and related files consistently. Installer rollback is not a full data backup; old user databases have version restrictions. See [operations](docs/en/operations.md#version-upgrades).
 
-Merging discovers candidates on demand and retains candidate/pagination limits; see [merge rules](docs/en/media-merge.md). Existing acceptance and untested areas are in [release validation](docs/en/release-v1.4.9-validation.md). Credential storage and risks are in the [security policy](SECURITY.md#english-security-policy).
+Merging discovers candidates on demand and retains candidate/pagination limits; see [merge rules](docs/en/media-merge.md). Acceptance and known limits are in [V1.4.10 validation](docs/en/release-v1.4.10-validation.md). Credential storage and risks are in the [security policy](SECURITY.md#english-security-policy).
 
 ## Documentation and FAQ
 

@@ -2,7 +2,7 @@
 
 [Project home](../../README_EN.md) · [Documentation](README.md) · [简体中文](../getting-started.md)
 
-Applies to the V1.4.9 mainline. The current panel uses Chinese labels; the labels below help locate its controls.
+Applies to the V1.4.10 source line (consult GitHub Releases for formal publication). The current panel uses Chinese labels; the labels below help locate its controls.
 
 ## Distinguish the three accounts
 

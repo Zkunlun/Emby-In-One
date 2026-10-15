@@ -2,7 +2,7 @@
 
 [Project home](../../README_EN.md) · [Documentation](README.md) · [简体中文](../installation.md)
 
-Applies to the V1.4.9 mainline.
+Applies to the V1.4.10 source line (consult GitHub Releases for formal publication).
 
 ## Choose a deployment method
 
@@ -33,11 +33,11 @@ The default panel address is `http://server-ip:8096/admin`; clients connect to `
 
 ## Pin a Release version
 
-The pinned example uses V1.4.9:
+The pinned example uses V1.4.10:
 
 ```bash
-curl -fsSL -o release-install.sh https://github.com/Zkunlun/Emby-In-One/releases/download/V1.4.9/release-install.sh
-sudo bash release-install.sh V1.4.9
+curl -fsSL -o release-install.sh https://github.com/Zkunlun/Emby-In-One/releases/download/V1.4.10/release-install.sh
+sudo bash release-install.sh V1.4.10
 ```
 
 The URL and argument must name the same version. Pinning only the script URL still resolves Latest when no argument is supplied. Historical V1.5.0/V1.5.1/V1.6.0 addresses were renumbered; see [version numbering](version-numbering.md).
@@ -45,7 +45,7 @@ The URL and argument must name the same version. Pinning only the script URL sti
 ## Source installer
 
 ```bash
-git clone --branch V1.4.9 https://github.com/Zkunlun/Emby-In-One.git
+git clone --branch V1.4.10 https://github.com/Zkunlun/Emby-In-One.git
 cd Emby-In-One
 sudo bash install.sh
 ```
@@ -54,7 +54,7 @@ This runs the repository's Docker installer, which handles the Docker environmen
 
 ## Manual Docker Compose
 
-1. Clone the complete repository, for example using the V1.4.9 command above. Include go.mod, cmd, internal, third_party, public, Dockerfile and docker-compose.yml; copying a few Go files is insufficient.
+1. Clone the complete repository, for example using the V1.4.10 command above. Include go.mod, cmd, internal, third_party, public, Dockerfile and docker-compose.yml; copying a few Go files is insufficient.
 2. Create the mount directories at the repository root and assign them to Compose's uid/gid 1000:
 
    ```bash

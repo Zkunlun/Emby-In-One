@@ -208,9 +208,9 @@ func TestOutboundClientQueryProfilesAndAbsent(t *testing.T) {
 			"X-Emby-Client": "客户端 +%,\"", "X-Emby-Client-Version": "v%2F+", "X-Emby-Device-Name": "设备/\\",
 			"X-Emby-Device-Id": "fake+%2F 中文", "DeviceId": "fake+%2F 中文"}},
 		{"custom-partial", UpstreamConfig{SpoofClient: "custom", CustomClient: "Only"}, map[string]string{
-			"X-Emby-Client": "Only", "X-Emby-Client-Version": "", "X-Emby-Device-Name": "", "X-Emby-Device-Id": "", "DeviceId": ""}},
+			"X-Emby-Client": "Only", "X-Emby-Client-Version": "4.8.3.0", "X-Emby-Device-Name": "Chrome Windows", "X-Emby-Device-Id": "official-spoof-id", "DeviceId": "official-spoof-id"}},
 		{"custom-empty", UpstreamConfig{SpoofClient: "custom"}, map[string]string{
-			"X-Emby-Client": "", "X-Emby-Client-Version": "", "X-Emby-Device-Name": "", "X-Emby-Device-Id": "", "DeviceId": ""}},
+			"X-Emby-Client": "Emby Web", "X-Emby-Client-Version": "4.8.3.0", "X-Emby-Device-Name": "Chrome Windows", "X-Emby-Device-Id": "official-spoof-id", "DeviceId": "official-spoof-id"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

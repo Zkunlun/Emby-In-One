@@ -20,6 +20,8 @@ type playbackRouteEntry struct {
 	ServerID            string
 	PlaySessionID       string
 	ClientPlaySessionID string
+	DirectStreamPath    string
+	DirectStreamRest    string
 	UpdatedAt           time.Time
 }
 
@@ -27,7 +29,7 @@ type playbackRouteStore struct {
 	mu          sync.RWMutex
 	active      map[playbackRouteKey]playbackRouteEntry
 	mediaSource map[playbackMediaRouteKey]playbackRouteEntry
-	ownerUsers map[string]string // Real local user for exact cleanup of token-owned routes.
+	ownerUsers  map[string]string // Real local user for exact cleanup of token-owned routes.
 }
 
 func newPlaybackRouteStore() *playbackRouteStore {
@@ -82,6 +84,26 @@ func (s *playbackRouteStore) RememberMediaSourceItem(owner, mediaSourceID, itemI
 	entry.ServerID = serverID
 	entry.UpdatedAt = time.Now()
 	s.mediaSource[key] = entry
+	s.mu.Unlock()
+}
+
+// RememberDirectStream binds one client-facing canonical DirectStream rest to the
+// exact upstream business path learned from PlaybackInfo. The path never comes from
+// the client and is accepted only for the already-authorized owner/source/item route.
+func (s *playbackRouteStore) RememberDirectStream(owner, mediaSourceID, itemID, serverID, upstreamPath, clientRest string) {
+	if s == nil || owner == "" || mediaSourceID == "" || itemID == "" || serverID == "" || upstreamPath == "" || clientRest == "" {
+		return
+	}
+	key := playbackMediaRouteKey{Owner: owner, MediaSourceID: mediaSourceID}
+	now := time.Now()
+	s.mu.Lock()
+	entry, ok := s.mediaSource[key]
+	if ok && playbackRouteFresh(entry, now) && entry.ServerID == serverID && entry.ItemID == itemID {
+		entry.DirectStreamPath = upstreamPath
+		entry.DirectStreamRest = clientRest
+		entry.UpdatedAt = now
+		s.mediaSource[key] = entry
+	}
 	s.mu.Unlock()
 }
 

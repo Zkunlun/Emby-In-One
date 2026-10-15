@@ -111,9 +111,26 @@ func (a *App) registerBackgroundIDs(result upstreamItemsResult) {
 	for _, item := range result.Items {
 		candidate := mergeResultCandidate(result, item)
 		switch candidate.Identity.Type {
-		case "Series", "Season":
+		case "Series":
+			if _, ok := a.associateHistoricalWork(result.RequestScope, candidate); !ok {
+				_, _ = a.IDStore.RegisterMergeCandidate(candidate, "")
+			}
+		case "Season":
 			_, _ = a.IDStore.RegisterMergeCandidate(candidate, "")
-		case "Movie", "Episode":
+		case "Movie":
+			if _, ok := a.associateHistoricalWork(result.RequestScope, candidate); ok {
+				break
+			}
+			registered := false
+			for _, version := range candidate.Versions {
+				if _, err := a.IDStore.RegisterMergeCandidate(independentMergeCandidate(candidate), version.Ref.MediaSourceID); err == nil {
+					registered = true
+				}
+			}
+			if !registered {
+				_, _ = a.IDStore.RegisterMergePlaceholder(candidate)
+			}
+		case "Episode":
 			registered := false
 			for _, version := range candidate.Versions {
 				if _, err := a.IDStore.RegisterMergeCandidate(independentMergeCandidate(candidate), version.Ref.MediaSourceID); err == nil {

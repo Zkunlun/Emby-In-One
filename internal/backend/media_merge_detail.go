@@ -74,6 +74,9 @@ func (a *App) handleMergeItemDetail(w http.ResponseWriter, r *http.Request, user
 				}
 				query.Set("UserId", instance.Client.clientUserID())
 				full := requestMergeFields(query)
+				// A single-item detail returns the complete DTO; Fields is
+				// a list-only selector in Emby's official ItemsService.
+				query.Del("Fields")
 				endpoint := "/Items/" + instance.OriginalID
 				if userPath {
 					endpoint = "/Users/" + instance.Client.clientUserID() + endpoint
@@ -90,6 +93,9 @@ func (a *App) handleMergeItemDetail(w http.ResponseWriter, r *http.Request, user
 					return upstreamItemsResult{Err: errMediaMappingMissing}
 				}
 				data["Id"] = instance.OriginalID
+				if selected == nil {
+					a.hydrateSingleItemSources(ctx, reqCtx, id, instance, data)
+				}
 				return upstreamItemsResult{ServerID: instance.ServerID, Items: []map[string]any{data}, FullSources: full, RequestScope: reqCtx}
 			}}
 		}
@@ -111,7 +117,7 @@ func (a *App) handleMergeItemDetail(w http.ResponseWriter, r *http.Request, user
 				continue
 			}
 			raw := result.Items[0]
-			original, _ := raw["Id"].(string)
+			original := mergeWireItemID(raw)
 			if err := a.observeMergeDetail(reqCtx, id, result.ServerID, original, raw, result.FullSources); err != nil {
 				a.logMergeHTTPError(err)
 				continue
@@ -202,6 +208,8 @@ func (a *App) prepareMergePlaybackItem(r *http.Request, id string, resolved *rou
 	query.Del("MediaSourceId")
 	query.Del("mediaSourceId")
 	requestMergeFields(query)
+	// Single-item detail has no Fields Query parameter.
+	query.Del("Fields")
 	payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet,
 		"/Users/"+resolved.Client.clientUserID()+"/Items/"+resolved.OriginalID, query, nil)
 	if err != nil {

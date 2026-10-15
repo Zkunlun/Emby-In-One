@@ -11,25 +11,43 @@ import (
 )
 
 func requestMergeFields(query url.Values) bool {
-	fields := strings.Split(query.Get("Fields"), ",")
-	for _, required := range []string{"ProviderIds", "MediaSources"} {
-		found := false
-		for _, field := range fields {
-			if strings.EqualFold(field, required) {
-				found = true
+	// MediaSources is a BaseItemDto response property, not an allowed Emby
+	// ItemsService Fields selector. Never send this previously injected token.
+	// Preserve client-requested fields and their order, including optional
+	// upstream extensions that the proxy does not understand.
+	fields := []string{}
+	seen := map[string]bool{}
+	var fieldKeys []string
+	for key := range query {
+		if strings.EqualFold(key, "Fields") {
+			fieldKeys = append(fieldKeys, key)
+		}
+	}
+	sort.Strings(fieldKeys)
+	for _, key := range fieldKeys {
+		values := query[key]
+		delete(query, key)
+		for _, value := range values {
+			for _, raw := range strings.Split(value, ",") {
+				field := strings.TrimSpace(raw)
+				if field == "" || strings.EqualFold(field, "MediaSources") {
+					continue
+				}
+				folded := strings.ToLower(field)
+				if !seen[folded] {
+					fields = append(fields, field)
+					seen[folded] = true
+				}
 			}
 		}
-		if !found {
-			fields = append(fields, required)
-		}
 	}
-	query.Set("Fields", strings.Trim(strings.Join(fields, ","), ","))
-	for key, values := range query {
-		if strings.EqualFold(key, "MediaSourceId") && len(values) > 0 && values[0] != "" {
-			return false
-		}
+	if !seen["providerids"] {
+		fields = append(fields, "ProviderIds")
 	}
-	return true
+	query.Set("Fields", strings.Join(fields, ","))
+	// A requested field cannot prove completeness of MediaSources. The caller
+	// needs independent evidence from real upstream detail / hydration.
+	return false
 }
 
 // Complete metadata is requested only for items already encountered by this
@@ -61,7 +79,7 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 		missing := []string{}
 		seen := map[string]bool{}
 		for _, item := range result.Items {
-			id, _ := item["Id"].(string)
+			id := mergeWireItemID(item)
 			kind, _ := item["Type"].(string)
 			if parent := newMergeSeriesEvidence(result.ServerID, item); parent != nil {
 				result.Parents[id] = parent
@@ -74,7 +92,7 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 		}
 		metadata := a.fetchEncounteredMergeMetadata(ctx, reqCtx, client, missing)
 		for _, item := range result.Items {
-			id, _ := item["Id"].(string)
+			id := mergeWireItemID(item)
 			if data := metadata[id]; data != nil {
 				for key, value := range data {
 					item[key] = value
@@ -168,7 +186,7 @@ func (a *App) fetchEncounteredMergeMetadata(ctx context.Context, reqCtx *Request
 			continue
 		}
 		for _, item := range asItems(payload) {
-			id, _ := item["Id"].(string)
+			id := mergeWireItemID(item)
 			if requested[id] {
 				metadata[id] = item
 			}
@@ -182,7 +200,7 @@ func mergeResultCandidate(result upstreamItemsResult, item map[string]any) merge
 	if parentID == "" && item["Type"] == "Season" {
 		parentID, _ = item["ParentId"].(string)
 	}
-	id, _ := item["Id"].(string)
+	id := mergeWireItemID(item)
 	return newMergeCandidate(result.ServerID, item, result.Parents[parentID], result.FullSources || result.CompleteItems[id])
 }
 
@@ -258,6 +276,31 @@ func (a *App) associateHTTPMerge(reqCtx *RequestContext, left, right mergeCandid
 		a.publishHTTPMergeChange(id, before)
 	}
 	return id, err
+}
+
+func (a *App) associateHistoricalWork(reqCtx *RequestContext, candidate mergeCandidate) (string, bool) {
+	if candidate.Identity.Type != "Movie" && candidate.Identity.Type != "Series" {
+		return "", false
+	}
+	currentOwner := a.IDStore.CanonicalMergeID(a.IDStore.ResolveMergeMember(candidate.ServerID, candidate.ItemID, ""))
+	for _, saved := range a.IDStore.HistoricalWorkCandidates(candidate) {
+		if saved.Candidate.ServerID == candidate.ServerID && saved.Candidate.ItemID == candidate.ItemID {
+			continue
+		}
+		if currentOwner != "" && a.IDStore.CanonicalMergeID(saved.VirtualID) == currentOwner {
+			// Associating with another anchor from the candidate's own group proves
+			// nothing new and can hide a split historical group later in the index.
+			continue
+		}
+		if reqCtx != nil && !a.isServerAllowed(reqCtx, saved.Candidate.ServerID) {
+			continue
+		}
+		id, err := a.associateHTTPMerge(reqCtx, saved.Candidate, candidate, "", "", saved.VirtualID)
+		if err == nil {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 func (a *App) registerHTTPMerge(reqCtx *RequestContext, candidate mergeCandidate, target string) (string, error) {
@@ -353,6 +396,11 @@ func (a *App) mergeHTTPItems(results []upstreamItemsResult, clientUserID string,
 				if err == nil {
 					unit.VirtualID = id
 					break
+				}
+			}
+			if unit.VirtualID == "" {
+				if id, ok := a.associateHistoricalWork(reqCtx, candidate); ok {
+					unit.VirtualID = id
 				}
 			}
 			if unit.VirtualID == "" {

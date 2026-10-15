@@ -101,16 +101,18 @@ func TestSessionRoutesTranslateIDsAndBroadcastCapabilities(t *testing.T) {
 		assertForwardedIDs("progress", progressBody)
 		assertForwardedIDs("stopped", stoppedBody)
 
-		rr := doJSONRequest(t, handler, http.MethodPost, "/Sessions/Capabilities?Id=session-1", map[string]any{"SupportsMediaControl": true}, token)
+		sessionA := app.IDStore.GetOrCreateVirtualID("session-a", app.Upstream.Clients()[0].ID)
+		sessionB := app.IDStore.GetOrCreateVirtualID("session-b", app.Upstream.Clients()[1].ID)
+		rr := doJSONRequest(t, handler, http.MethodPost, "/Sessions/Capabilities?Id="+sessionA, map[string]any{"SupportsMediaControl": true}, token)
 		if rr.Code != http.StatusNoContent {
-			t.Fatalf("capabilities status = %d, body=%s", rr.Code, rr.Body.String())
+			t.Fatalf("capabilities status=%d", rr.Code)
 		}
-		rr = doJSONRequest(t, handler, http.MethodPost, "/Sessions/Capabilities/Full", map[string]any{"PlayableMediaTypes": []string{"Video"}}, token)
+		rr = doJSONRequest(t, handler, http.MethodPost, "/Sessions/Capabilities/Full?Id="+sessionB, map[string]any{"PlayableMediaTypes": []string{"Video"}}, token)
 		if rr.Code != http.StatusNoContent {
-			t.Fatalf("capabilities full status = %d, body=%s", rr.Code, rr.Body.String())
+			t.Fatalf("full capabilities status=%d", rr.Code)
 		}
-		if capabilitiesA.Load() != 1 || capabilitiesB.Load() != 1 || capabilitiesFullA.Load() != 1 || capabilitiesFullB.Load() != 1 {
-			t.Fatalf("unexpected capabilities counts: A=%d B=%d fullA=%d fullB=%d", capabilitiesA.Load(), capabilitiesB.Load(), capabilitiesFullA.Load(), capabilitiesFullB.Load())
+		if capabilitiesA.Load() != 1 || capabilitiesB.Load() != 0 || capabilitiesFullA.Load() != 0 || capabilitiesFullB.Load() != 1 {
+			t.Fatalf("capabilities should be routed per upstream session: A=%d B=%d fullA=%d fullB=%d", capabilitiesA.Load(), capabilitiesB.Load(), capabilitiesFullA.Load(), capabilitiesFullB.Load())
 		}
 	})
 }

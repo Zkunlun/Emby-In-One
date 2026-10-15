@@ -2,7 +2,7 @@
 
 [Project home](../../README_EN.md) · [Documentation](README.md) · [简体中文](../users-and-permissions.md)
 
-Applies to the V1.4.9 mainline.
+Applies to the V1.4.10 source line (consult GitHub Releases for formal publication).
 
 Administrators create local regular users and authorize stable upstream identities separately. Local user accounts and upstream accounts are managed independently.
 

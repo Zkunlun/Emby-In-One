@@ -89,6 +89,7 @@ func (a *App) proxyStream(w http.ResponseWriter, r *http.Request, route streamRo
 			query.Set("MediaSourceId", virtual)
 		}
 	}
+	requestedSourceID, _ := explicitMediaSourceID(query, nil)
 	client, originalID, ok := a.resolveStreamTarget(w, r, resolved, virtualItemID, query)
 	if !ok {
 		return
@@ -103,6 +104,13 @@ func (a *App) proxyStream(w http.ResponseWriter, r *http.Request, route streamRo
 
 	upstreamPath := route.pathPrefix + "/" + originalID + "/" + rest
 	reqCtx := requestContextFrom(r.Context())
+	if requestedSourceID != "" {
+		if candidate, ok := a.playbackRoutes.MediaSource(playbackRouteOwner(reqCtx), requestedSourceID); ok &&
+			candidate.ServerID == client.ID && candidate.ItemID == virtualItemID &&
+			candidate.DirectStreamPath != "" && candidate.DirectStreamRest == rest {
+			upstreamPath = candidate.DirectStreamPath
+		}
+	}
 	if a.Logger != nil {
 		a.Logger.Infof("%s: %s/%s/%s -> [%s] %s",
 			route.label, route.pathPrefix, virtualItemID, rest, client.Name, upstreamPath)
@@ -165,7 +173,7 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, client *Upst
 			r.Header.Get("Range"), r.Header.Get("Accept"), r.Header.Get("Accept-Encoding"))
 	}
 
-	resp, err := client.Stream(r.Context(), reqCtx, a.Identity, upstreamPath, query, streamRequestHeaders(r))
+	resp, err := client.StreamWithMethod(r.Context(), reqCtx, a.Identity, r.Method, upstreamPath, query, streamRequestHeaders(r))
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return // client disconnected or timed out — not a server error
@@ -180,6 +188,14 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, client *Upst
 
 	if !a.isServerAllowed(reqCtx, client.ID) {
 		writeMediaSelectionError(w, errMediaAccessDenied)
+		return
+	}
+
+	// HEAD is metadata only, including for HLS playlists: preserve the
+	// upstream status and headers without reading or rewriting any body.
+	if r.Method == http.MethodHead {
+		copyStreamResponseHeaders(w, resp)
+		w.WriteHeader(resp.StatusCode)
 		return
 	}
 

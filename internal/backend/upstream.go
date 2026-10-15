@@ -106,49 +106,50 @@ const (
 )
 
 type streamBaseHealth struct {
-	state                 streamBaseHealthState
-	lastFailure           time.Time
-	observationGeneration uint64
+	state                    streamBaseHealthState
+	lastFailure              time.Time
+	observationGeneration    uint64
+	completedProbeGeneration uint64 // Testable HTTP reachability, never playback evidence.
 }
 
 type UpstreamClient struct {
-	mu             sync.RWMutex
-	ID             string
-	ServerIndex    int
-	Name           string
-	BaseURL        string
-	StreamBaseURL  string   // effective stream base: first live entry of StreamBaseURLs
-	StreamBaseURLs []string // ordered stream bases: [0] primary, [1:] fallbacks
-	Online         bool
-	UserID         string
-	AccessToken    string
-	LastError      string
-	Config         UpstreamConfig
-	serverKey      string
-	retired        bool
-	apiObservation uint64 // Protected by mu; statistics API/login ordering fence.
-	apiLoginAttempts uint64 // Protected by mu; overlapping existing login attempts.
+	mu                sync.RWMutex
+	ID                string
+	ServerIndex       int
+	Name              string
+	BaseURL           string
+	StreamBaseURL     string   // effective stream base: first live entry of StreamBaseURLs
+	StreamBaseURLs    []string // ordered stream bases: [0] primary, [1:] fallbacks
+	Online            bool
+	UserID            string
+	AccessToken       string
+	LastError         string
+	Config            UpstreamConfig
+	serverKey         string
+	retired           bool
+	apiObservation    uint64             // Protected by mu; statistics API/login ordering fence.
+	apiLoginAttempts  uint64             // Protected by mu; overlapping existing login attempts.
 	countsLoginConfig countsLoginBinding // Credentials/config of the authenticated session; memory only.
-	httpClient     *http.Client
-	transport      http.RoundTripper // per-client transport (shared or proxy-specific)
-	logger         *Logger
-	timeouts       TimeoutsConfig
-	recoveryMu     sync.Mutex
-	lastRecovery   time.Time
-	onAuthError    func(c *UpstreamClient)
-	onCountsState func() // Lock-free notification after client state locks release.
+	httpClient        *http.Client
+	transport         http.RoundTripper // per-client transport (shared or proxy-specific)
+	logger            *Logger
+	timeouts          TimeoutsConfig
+	recoveryMu        sync.Mutex
+	lastRecovery      time.Time
+	onAuthError       func(c *UpstreamClient)
+	onCountsState     func() // Lock-free notification after client state locks release.
 	// streamHealth stores explicit per-stream-base liveness. Configured bases start
-	// unknown; a dead base stays dead until a successful request/probe marks it alive.
+	// unknown; only a real successful media request can revive a dead base.
 	// lastFailure only throttles when a dead base may be probed again.
 	streamHealth map[string]streamBaseHealth
 }
 
 type UpstreamPool struct {
-	mu       sync.RWMutex
-	clients  []*UpstreamClient
-	logger   *Logger
-	identity *ClientIdentityService
-	health   *healthCheckRunner
+	mu            sync.RWMutex
+	clients       []*UpstreamClient
+	logger        *Logger
+	identity      *ClientIdentityService
+	health        *healthCheckRunner
 	onCountsState func()
 }
 
@@ -238,7 +239,9 @@ func (p *UpstreamPool) Reload(cfg Config) {
 	p.mu.Unlock()
 
 	for _, old := range oldClients {
-		if old == nil { continue }
+		if old == nil {
+			continue
+		}
 		old.mu.Lock()
 		old.retired = true
 		old.AccessToken, old.UserID, old.Online = "", "", false
@@ -268,7 +271,9 @@ func (p *UpstreamPool) Reload(cfg Config) {
 	// their stream lines immediately so a config/settings reload cannot leave
 	// redirect selection on stale liveness data until the next ticker.
 	p.triggerStreamProbe()
-	if countsListener != nil { countsListener() }
+	if countsListener != nil {
+		countsListener()
+	}
 }
 
 func (p *UpstreamPool) handleUpstreamAuthError(c *UpstreamClient) {
@@ -424,6 +429,23 @@ func (c *UpstreamClient) beginStreamBaseObservation(base string) uint64 {
 	return health.observationGeneration
 }
 
+// markStreamBaseProbeComplete records that an anonymous probe has FINISHED,
+// independent of its health evidence. HTTP reachability must not change the
+// playback state. A later real request may have a larger observationGeneration.
+func (c *UpstreamClient) markStreamBaseProbeComplete(base string, generation uint64) {
+	if generation == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	health, ok := c.streamHealth[base]
+	if !ok || generation <= health.completedProbeGeneration {
+		return
+	}
+	health.completedProbeGeneration = generation
+	c.streamHealth[base] = health
+}
+
 // markStreamBaseFailedObservation applies a network failure only if it belongs
 // to the most recently started observation for this base. An older probe/request
 // may finish later, but its stale result cannot overwrite newer evidence.
@@ -477,7 +499,7 @@ func (c *UpstreamClient) markStreamBaseAlive(base string) {
 
 // streamBaseProbeCandidates returns configured bases that should be checked by
 // the next background probe. Unknown/alive bases are always observed; dead bases
-// are held until the cooldown expires, at which point they may be revalidated.
+// are held until the cooldown expires, at which point their HTTP route can be checked without promoting Alive.
 // Eligibility to probe is not eligibility for playback.
 func (c *UpstreamClient) streamBaseProbeCandidates(now time.Time) []string {
 	c.mu.RLock()
@@ -525,7 +547,7 @@ func (c *UpstreamClient) streamPlaybackAndRecoveryCandidates(now time.Time) ([]s
 
 // streamBaseCandidates returns redirect playback candidates in configured order.
 // Unknown and confirmed-alive bases remain eligible; confirmed-dead bases remain
-// excluded until successful traffic or a probe explicitly revives them. All-dead
+// excluded until a successful real media request revives them. All-dead
 // therefore returns an empty list rather than leaking a known-dead fallback URL.
 func (c *UpstreamClient) streamBaseCandidates() []string {
 	playback, _ := c.streamPlaybackAndRecoveryCandidates(time.Now())
@@ -546,7 +568,7 @@ func (c *UpstreamClient) streamRedirectRecoveryCandidates(now time.Time) []strin
 
 // streamProxyCandidates returns the bases a proxied media request may actually
 // contact. While any unknown/alive line exists, dead lines stay excluded even if
-// their cooldown has elapsed; background probes are responsible for restoring
+// their cooldown has elapsed; only real media traffic can restore
 // them. Only when every configured line is dead may proxy playback perform a
 // controlled recovery attempt, limited to dead lines whose cooldown has expired.
 func (c *UpstreamClient) streamProxyCandidates(now time.Time) []string {
@@ -673,7 +695,9 @@ func (p *UpstreamPool) retryOfflinePassthrough(token string, headers http.Header
 	var reqCtx *RequestContext
 	if identity.captureRequest != nil {
 		reqCtx = identity.captureRequest(token, headers)
-		if reqCtx == nil { return }
+		if reqCtx == nil {
+			return
+		}
 	}
 	p.mu.RLock()
 	clients := append([]*UpstreamClient(nil), p.clients...)
@@ -682,7 +706,9 @@ func (p *UpstreamPool) retryOfflinePassthrough(token string, headers http.Header
 		if client == nil || client.Config.SpoofClient != "passthrough" || client.IsOnline() {
 			continue
 		}
-		if reqCtx != nil && reqCtx.ProxyUser.Role != "admin" && !containsString(reqCtx.ProxyUser.AllowedServers, client.ID) { continue }
+		if reqCtx != nil && reqCtx.ProxyUser.Role != "admin" && !containsString(reqCtx.ProxyUser.AllowedServers, client.ID) {
+			continue
+		}
 		client.loginWithHeaders(context.Background(), reqCtx, identity, cloneHeader(headers))
 	}
 }
@@ -721,7 +747,9 @@ func (c *UpstreamClient) Login(ctx context.Context, reqCtx *RequestContext, iden
 }
 
 func (c *UpstreamClient) loginWithHeaders(ctx context.Context, reqCtx *RequestContext, identity *ClientIdentityService, override http.Header) {
-	if !c.beginAPIStateObservation() { return }
+	if !c.beginAPIStateObservation() {
+		return
+	}
 	defer c.endAPIStateObservation()
 	identityEpoch := identity.captureEpoch()
 	if ctx == nil {
@@ -739,7 +767,10 @@ func (c *UpstreamClient) loginWithHeaders(ctx context.Context, reqCtx *RequestCo
 			c.logger.Infof("[%s] Authenticating with API key", c.Name)
 		}
 		c.mu.Lock()
-		if c.retired { c.mu.Unlock(); return }
+		if c.retired {
+			c.mu.Unlock()
+			return
+		}
 		c.AccessToken = strings.TrimSpace(c.Config.APIKey)
 		c.mu.Unlock()
 		c.validateAPIKey(ctx, reqCtx, identity)
@@ -859,7 +890,9 @@ func (c *UpstreamClient) setOnline(token, userID string) {
 	defer c.notifyCountsState()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.retired { return }
+	if c.retired {
+		return
+	}
 	c.apiObservation++
 	c.AccessToken = token
 	c.UserID = userID
@@ -872,10 +905,26 @@ func (c *UpstreamClient) setOffline(message string) {
 	defer c.notifyCountsState()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.retired { return }
+	if c.retired {
+		return
+	}
 	c.apiObservation++
 	c.Online = false
 	c.LastError = message
+}
+
+// upstreamHTTPStatusError preserves the HTTP status for callers that need
+// protocol-specific compatibility handling without matching an error string.
+type upstreamHTTPStatusError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Status     string
+	Body       string
+}
+
+func (e *upstreamHTTPStatusError) Error() string {
+	return fmt.Sprintf("upstream %s %s failed: %s %s", e.Method, e.Path, e.Status, e.Body)
 }
 
 func (c *UpstreamClient) RequestJSON(ctx context.Context, reqCtx *RequestContext, identity *ClientIdentityService, method, path string, params url.Values, body any) (any, error) {
@@ -886,16 +935,29 @@ func (c *UpstreamClient) RequestJSON(ctx context.Context, reqCtx *RequestContext
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		payload, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("upstream %s %s failed: %s %s", method, path, resp.Status, strings.TrimSpace(string(payload)))
+		return nil, &upstreamHTTPStatusError{Method: method, Path: path, StatusCode: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(payload))}
 	}
 	var decoded any
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil {
 		return nil, err
 	}
 	return decoded, nil
 }
 
+// Stream keeps the historical GET-only helper for image, subtitle and test
+// callers that do not supply an incoming HTTP method.
 func (c *UpstreamClient) Stream(ctx context.Context, reqCtx *RequestContext, identity *ClientIdentityService, path string, params url.Values, extraHeaders ...http.Header) (*http.Response, error) {
+	return c.StreamWithMethod(ctx, reqCtx, identity, http.MethodGet, path, params, extraHeaders...)
+}
+
+// StreamWithMethod preserves GET/HEAD semantics for proxied video and audio.
+// Other HTTP methods must not be accepted through the streaming transport.
+func (c *UpstreamClient) StreamWithMethod(ctx context.Context, reqCtx *RequestContext, identity *ClientIdentityService, method, path string, params url.Values, extraHeaders ...http.Header) (*http.Response, error) {
+	if method != http.MethodGet && method != http.MethodHead {
+		return nil, fmt.Errorf("unsupported stream method %q", method)
+	}
 	headers := c.identityHeaders(reqCtx, identity)
 	for _, extra := range extraHeaders {
 		for key, values := range extra {
@@ -904,7 +966,7 @@ func (c *UpstreamClient) Stream(ctx context.Context, reqCtx *RequestContext, ide
 			}
 		}
 	}
-	return c.doRequest(ctx, reqCtx, http.MethodGet, path, params, nil, headers, true)
+	return c.doRequest(ctx, reqCtx, method, path, params, nil, headers, true)
 }
 
 // redirectPolicy returns the redirect handling for an upstream. Following is the
@@ -1004,7 +1066,9 @@ func (c *UpstreamClient) doRequest(ctx context.Context, reqCtx *RequestContext, 
 // classified as stream-unavailable are retried against the next base. Other HTTP
 // responses stop the attempts because the configured route answered.
 func (c *UpstreamClient) doRequestForMode(ctx context.Context, reqCtx *RequestContext, method, path string, params url.Values, body any, headers http.Header, stream bool, mode outboundAuthMode) (*http.Response, error) {
-	if c.isRetired() { return nil, fmt.Errorf("upstream client is no longer configured") }
+	if c.isRetired() {
+		return nil, fmt.Errorf("upstream client is no longer configured")
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1057,10 +1121,14 @@ func (c *UpstreamClient) doRequestForMode(ctx context.Context, reqCtx *RequestCo
 // body of the pre-fallback doRequestForMode; every identity rule it applies is
 // unchanged.
 func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestContext, method, path string, params url.Values, body any, headers http.Header, stream bool, mode outboundAuthMode, base string) (*http.Response, error) {
-	if c.isRetired() { return nil, errNoUsableStreamBase }
+	if c.isRetired() {
+		return nil, errNoUsableStreamBase
+	}
 	auth := c.authSnapshot()
 	if frozen, controlled, err := countsAuthForRequest(ctx, c); controlled {
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		auth = frozen
 	}
 	clientIdentity, spoofIdentity := c.configuredOutboundIdentity()
@@ -1080,7 +1148,9 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 
 	preparedURL, err := prepareOutboundURLWithReport(fullURL, reqCtx, auth, policy)
 	if err != nil {
-		if !isCountsRequestContext(ctx) { c.scheduleRecoveryForPreparationError(err) }
+		if !isCountsRequestContext(ctx) {
+			c.scheduleRecoveryForPreparationError(err)
+		}
 		return nil, err
 	}
 
@@ -1097,7 +1167,9 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 
 	preparedBody, bodyOutcome, err := prepareOutboundBodyWithReport(body, reqCtx, auth, policy)
 	if err != nil {
-		if !isCountsRequestContext(ctx) { c.scheduleRecoveryForPreparationError(err) }
+		if !isCountsRequestContext(ctx) {
+			c.scheduleRecoveryForPreparationError(err)
+		}
 		return nil, err
 	}
 
@@ -1211,7 +1283,9 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 	if stream {
 		if isStreamUnavailableStatus(resp.StatusCode) {
 			c.markStreamBaseFailedObservation(base, streamObservation)
-		} else {
+		} else if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			// Only a successful real media response proves this base usable.
+			// 401/403/404/500 alone establish no positive playback evidence.
 			c.markStreamBaseAliveObservation(base, streamObservation)
 		}
 	}
@@ -1315,9 +1389,13 @@ func (c *UpstreamClient) recordSuccessfulIdentity(identity *ClientIdentityServic
 	if source == "infuse-fallback" {
 		return
 	}
-	if c.isRetired() { return }
+	if c.isRetired() {
+		return
+	}
 	owner := ""
-	if reqCtx != nil && reqCtx.ProxyUser != nil { owner = reqCtx.ProxyUser.UserID }
+	if reqCtx != nil && reqCtx.ProxyUser != nil {
+		owner = reqCtx.ProxyUser.UserID
+	}
 	promote := source == "live-request" || source == "captured-token" || source == "captured-latest" || source == "override"
 	identity.saveSuccessfulIdentity(c.serverKey, headers, promote, epoch, owner)
 }

@@ -26,10 +26,22 @@ func (c *UpstreamClient) configuredOutboundIdentity() (outboundClientIdentity, b
 		return outboundClientIdentity{}, false
 	}
 	if cfg.SpoofClient == "custom" {
+		// A partially configured custom profile must not fall back to the Go
+		// HTTP transport User-Agent or present an incomplete Emby device.
+		// These are the established legacy "official" migration values;
+		// explicitly configured custom fields always take precedence.
+		fallback := func(value, defaultValue string) string {
+			if strings.TrimSpace(value) != "" {
+				return value
+			}
+			return defaultValue
+		}
 		return outboundClientIdentity{
-			UserAgent: cfg.CustomUserAgent, Client: cfg.CustomClient,
-			Version: cfg.CustomClientVersion, DeviceName: cfg.CustomDeviceName,
-			DeviceID: cfg.CustomDeviceId,
+			UserAgent:  fallback(cfg.CustomUserAgent, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Emby/1.0.0"),
+			Client:     fallback(cfg.CustomClient, "Emby Web"),
+			Version:    fallback(cfg.CustomClientVersion, "4.8.3.0"),
+			DeviceName: fallback(cfg.CustomDeviceName, "Chrome Windows"),
+			DeviceID:   fallback(cfg.CustomDeviceId, "official-spoof-id"),
 		}, true
 	}
 	profile := embyClientHeaders

@@ -8,6 +8,35 @@ import (
 	"strings"
 )
 
+func directStreamTargetPath(rawDirectURL, streamBaseURL string) string {
+	parsed, err := url.Parse(rawDirectURL)
+	if err != nil || parsed.Path == "" || !strings.HasPrefix(parsed.Path, "/") {
+		return ""
+	}
+	target := parsed.EscapedPath()
+	if target == "" {
+		target = parsed.Path
+	}
+	if base, err := url.Parse(streamBaseURL); err == nil {
+		prefix := strings.TrimSuffix(base.EscapedPath(), "/")
+		if prefix == "" {
+			prefix = strings.TrimSuffix(base.Path, "/")
+		}
+		if prefix != "" && prefix != "/" {
+			switch {
+			case target == prefix:
+				target = "/"
+			case strings.HasPrefix(target, prefix+"/"):
+				target = target[len(prefix):]
+			}
+		}
+	}
+	if !strings.HasPrefix(target, "/") {
+		return ""
+	}
+	return target
+}
+
 type playbackInfoLeaseReservation struct {
 	Applies  bool
 	UserID   string
@@ -142,23 +171,40 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 		if !a.isServerAllowed(reqCtx, inst.ServerID) {
 			continue
 		}
-		// The client only ever holds EIO's virtual user ID, and Emby prefers a UserId in the
-		// query or body over the one the request was authenticated as. Forwarding the virtual
-		// ID made the upstream look up a user that does not exist there and answer 500
-		// (NullReferenceException), which surfaced as a 502 to the client.
+		// GET PlaybackInfo declares UserId in Query and no request body. POST
+		// declares UserId/MediaSourceId in PlaybackInfoRequest's JSON Body.
+		// Keep the upstream's own user and selected source in the correct
+		// carrier: forwarding EIO's virtual user to Emby can produce a 500.
 		instQuery := cloneValues(query)
-		instQuery.Set("UserId", inst.Client.clientUserID())
 		if selected == nil {
 			if source := a.defaultMergeSource(r.PathValue("itemId"), inst.ServerID, inst.OriginalID); source != "" {
 				instQuery.Set("MediaSourceId", source)
 			}
 		}
-		instBody := deepCloneMap(body)
-		instBody["UserId"] = inst.Client.clientUserID()
-		if source := instQuery.Get("MediaSourceId"); source != "" {
-			instBody["MediaSourceId"] = source
+		source := instQuery.Get("MediaSourceId")
+		for key := range instQuery {
+			if strings.EqualFold(key, "UserId") ||
+				(r.Method == http.MethodPost && strings.EqualFold(key, "MediaSourceId")) {
+				delete(instQuery, key)
+			}
 		}
-		payload, err := inst.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, r.Method, "/Items/"+inst.OriginalID+"/PlaybackInfo", instQuery, instBody)
+		var outboundBody any
+		if r.Method == http.MethodGet {
+			instQuery.Set("UserId", inst.Client.clientUserID())
+		} else {
+			instBody := deepCloneMap(body)
+			for key := range instBody {
+				if strings.EqualFold(key, "UserId") || strings.EqualFold(key, "MediaSourceId") {
+					delete(instBody, key)
+				}
+			}
+			instBody["UserId"] = inst.Client.clientUserID()
+			if source != "" {
+				instBody["MediaSourceId"] = source
+			}
+			outboundBody = instBody
+		}
+		payload, err := inst.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, r.Method, "/Items/"+inst.OriginalID+"/PlaybackInfo", instQuery, outboundBody)
 		if err != nil {
 			if a.Logger != nil {
 				a.Logger.Warnf("PlaybackInfo: server=[%s] originalId=%s failed: %s", inst.Client.Name, inst.OriginalID, redactURLInError(err))
@@ -214,8 +260,9 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 			// address an ID EIO cannot resolve.
 			mediaSource["ItemId"] = r.PathValue("itemId")
 			if directURL, ok := mediaSource["DirectStreamUrl"].(string); ok && directURL != "" {
-				// Extract container from URL, stripping query string first
-				// Node.js uses regex /\.([a-z0-9]+)(?:\?|$)/i — path.Ext doesn't stop at '?'
+				// Keep the client-facing URL on EIO's canonical route, but remember the exact
+				// upstream business path. Some upstreams authorize that path verbatim and reject
+				// the generic /Videos/{id}/stream.ext shape.
 				cleanURL := directURL
 				if qIdx := strings.IndexByte(cleanURL, '?'); qIdx >= 0 {
 					cleanURL = cleanURL[:qIdx]
@@ -229,6 +276,10 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 				if container == "" {
 					container = "mp4"
 				}
+				clientRest := "stream." + container
+				if targetPath := directStreamTargetPath(directURL, inst.Client.StreamBaseURL); targetPath != "" {
+					a.rememberDirectStreamRoute(reqCtx, virtualMSID, r.PathValue("itemId"), inst.ServerID, targetPath, clientRest)
+				}
 				proxyURL := url.Values{}
 				proxyURL.Set("MediaSourceId", virtualMSID)
 				if virtualPlaySessionID != "" {
@@ -238,7 +289,7 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 				if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyToken != "" {
 					proxyURL.Set("api_key", reqCtx.ProxyToken)
 				}
-				mediaSource["DirectStreamUrl"] = "/Videos/" + r.PathValue("itemId") + "/stream." + container + "?" + proxyURL.Encode()
+				mediaSource["DirectStreamUrl"] = "/Videos/" + r.PathValue("itemId") + "/" + clientRest + "?" + proxyURL.Encode()
 			}
 			if transcodingURL, ok := mediaSource["TranscodingUrl"].(string); ok && transcodingURL != "" {
 				parsed, err := url.Parse(transcodingURL)

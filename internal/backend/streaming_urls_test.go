@@ -508,8 +508,8 @@ func TestProbeSelectedStreamBasesSupportsSingleExplicitBase(t *testing.T) {
 	client.mu.RLock()
 	state := client.streamHealth[only.URL].state
 	client.mu.RUnlock()
-	if state != streamBaseAlive {
-		t.Fatalf("explicit single-base state = %v, want alive", state)
+	if state != streamBaseDead {
+		t.Fatalf("explicit dummy-probe must not revive dead line, state=%v", state)
 	}
 }
 
@@ -530,8 +530,8 @@ func TestProbeSelectedStreamBasesUsesExactExplicitSubset(t *testing.T) {
 	firstState := client.streamHealth[first.URL].state
 	secondState := client.streamHealth[second.URL].state
 	client.mu.RUnlock()
-	if firstState != streamBaseDead || secondState != streamBaseAlive {
-		t.Fatalf("explicit subset health first=%v second=%v, want dead/alive", firstState, secondState)
+	if firstState != streamBaseDead || secondState != streamBaseDead {
+		t.Fatalf("anonymous probe cannot revive either dead line: first=%v second=%v", firstState, secondState)
 	}
 }
 
@@ -592,9 +592,9 @@ func TestRedirectAllDeadCoolingDownReturnsBadGateway(t *testing.T) {
 }
 
 // When all redirect lines are dead, only cooldown-expired lines may be probed.
-// A successful request-scoped probe revives that line and the same request then
-// redirects to it; younger dead lines stay untouched.
-func TestRedirectAllDeadRecoversOnlyEligibleBaseBeforeRedirect(t *testing.T) {
+// An anonymous request-scoped probe cannot certify playback or revive the
+// dead line, so redirect fails closed; younger dead lines stay untouched.
+func TestRedirectAllDeadAnonymousProbeCannotRecoverKnownDeadBase(t *testing.T) {
 	recent, recentProbeHits := redirectProbeUpstream(t, http.StatusNotFound)
 	eligible, eligibleProbeHits := redirectProbeUpstream(t, http.StatusNotFound)
 	config := redirectConfigWithStreamingURLs(recent.URL, recent.URL, eligible.URL)
@@ -616,11 +616,11 @@ func TestRedirectAllDeadRecoversOnlyEligibleBaseBeforeRedirect(t *testing.T) {
 		client.mu.Unlock()
 
 		rr := doRedirectStreamRequest(t, app, handler)
-		if rr.Code != http.StatusFound {
-			t.Fatalf("status = %d, want 302 after eligible redirect line recovers, body=%s", rr.Code, rr.Body.String())
+		if rr.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502; anonymous probe cannot certify recovery, body=%s", rr.Code, rr.Body.String())
 		}
-		if location := rr.Header().Get("Location"); !strings.HasPrefix(location, eligible.URL+"/Videos/") {
-			t.Fatalf("Location = %q, want recovered base %s", location, eligible.URL)
+		if location := rr.Header().Get("Location"); location != "" {
+			t.Fatalf("Location = %q, want no redirect target from anonymous probe, expected base %s", location, eligible.URL)
 		}
 		if recentProbeHits.Load() != 0 || eligibleProbeHits.Load() != 1 {
 			t.Fatalf("recovery probes recent=%d eligible=%d, want 0/1", recentProbeHits.Load(), eligibleProbeHits.Load())
@@ -629,8 +629,8 @@ func TestRedirectAllDeadRecoversOnlyEligibleBaseBeforeRedirect(t *testing.T) {
 		recentState := client.streamHealth[recent.URL].state
 		eligibleState := client.streamHealth[eligible.URL].state
 		client.mu.RUnlock()
-		if recentState != streamBaseDead || eligibleState != streamBaseAlive {
-			t.Fatalf("health recent=%v eligible=%v, want dead/alive", recentState, eligibleState)
+		if recentState != streamBaseDead || eligibleState != streamBaseDead {
+			t.Fatalf("health recent=%v eligible=%v, want dead/dead", recentState, eligibleState)
 		}
 	})
 }
@@ -741,10 +741,9 @@ func TestRedirectAgedDeadBaseStaysExcludedWhileUsableBaseExists(t *testing.T) {
 	})
 }
 
-// Single-line redirect setups need the same recovery path. The background probe
-// intentionally skips one-base configurations, so request-scoped recovery must be
-// able to validate that one dead line after cooldown.
-func TestRedirectSingleDeadBaseCanRecoverAfterCooldown(t *testing.T) {
+// Single-line redirect setups must also fail closed on anonymous reachability.
+// Expiring the cooldown permits a check but does not prove playback is healthy.
+func TestRedirectSingleDeadBaseAnonymousProbeCannotCertifyRecovery(t *testing.T) {
 	only, probeHits := redirectProbeUpstream(t, http.StatusNotFound)
 	config := redirectConfigWithStreamingURLs(only.URL, only.URL)
 
@@ -763,11 +762,11 @@ func TestRedirectSingleDeadBaseCanRecoverAfterCooldown(t *testing.T) {
 		client.mu.Unlock()
 
 		rr := doRedirectStreamRequest(t, app, handler)
-		if rr.Code != http.StatusFound {
-			t.Fatalf("status = %d, want 302 after single redirect base recovers", rr.Code)
+		if rr.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502; anonymous probe cannot prove single-line recovery", rr.Code)
 		}
-		if location := rr.Header().Get("Location"); !strings.HasPrefix(location, only.URL+"/Videos/") {
-			t.Fatalf("Location = %q, want single recovered base %s", location, only.URL)
+		if location := rr.Header().Get("Location"); location != "" {
+			t.Fatalf("Location = %q, want no unverified redirect to base %s", location, only.URL)
 		}
 		if probeHits.Load() != 1 {
 			t.Fatalf("single-base recovery probes = %d, want 1", probeHits.Load())
@@ -775,16 +774,15 @@ func TestRedirectSingleDeadBaseCanRecoverAfterCooldown(t *testing.T) {
 		client.mu.RLock()
 		state := client.streamHealth[only.URL].state
 		client.mu.RUnlock()
-		if state != streamBaseAlive {
-			t.Fatalf("single recovered base state = %v, want alive", state)
+		if state != streamBaseDead {
+			t.Fatalf("single recovered base state = %v, want dead (reachability only)", state)
 		}
 	})
 }
 
-// Eligible all-dead redirect lines are probed together so request latency is
-// bounded by one probe timeout rather than N sequential timeouts. Selection after
-// recovery still follows configured order among the lines proven alive.
-func TestRedirectAllDeadRecoveryProbesEligibleBasesConcurrently(t *testing.T) {
+// Eligible all-dead redirect lines are probed concurrently to bound latency;
+// no anonymous result may make a dead line playable or cause a redirect.
+func TestRedirectAllDeadRecoveryProbesConcurrentButFailClosed(t *testing.T) {
 	var enabled atomic.Bool
 	var firstProbeHits, secondProbeHits atomic.Int64
 	firstStarted := make(chan struct{}, 1)
@@ -865,11 +863,11 @@ func TestRedirectAllDeadRecoveryProbesEligibleBasesConcurrently(t *testing.T) {
 		enabled.Store(true)
 
 		rr := doRedirectStreamRequest(t, app, handler)
-		if rr.Code != http.StatusFound {
-			t.Fatalf("status = %d, want 302 after concurrent redirect recovery", rr.Code)
+		if rr.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502; neither anonymous reply confirms playable media", rr.Code)
 		}
-		if location := rr.Header().Get("Location"); !strings.HasPrefix(location, second.URL+"/Videos/") {
-			t.Fatalf("Location = %q, want second recovered base %s", location, second.URL)
+		if location := rr.Header().Get("Location"); location != "" {
+			t.Fatalf("Location = %q, want no redirect to unverified base %s", location, second.URL)
 		}
 		if firstProbeHits.Load() != 1 || secondProbeHits.Load() != 1 {
 			t.Fatalf("concurrent recovery probes first=%d second=%d, want 1/1", firstProbeHits.Load(), secondProbeHits.Load())
@@ -1311,8 +1309,8 @@ func TestStreamObservationOrderingIsIndependentPerBase(t *testing.T) {
 	firstState := client.streamHealth[first.URL].state
 	secondState := client.streamHealth[second.URL].state
 	client.mu.RUnlock()
-	if firstState != streamBaseAlive || secondState != streamBaseAlive {
-		t.Fatalf("independent-base health first=%v second=%v, want alive/alive", firstState, secondState)
+	if firstState != streamBaseDead || secondState != streamBaseAlive {
+		t.Fatalf("anonymous A reply cannot revive A, real B request must confirm B: first=%v second=%v", firstState, secondState)
 	}
 }
 

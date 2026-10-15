@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"sort"
@@ -484,6 +485,12 @@ func itemNumber(m map[string]any, key string) float64 {
 		return float64(typed)
 	case int64:
 		return float64(typed)
+	case json.Number:
+		value, err := typed.Float64()
+		if err == nil {
+			return value
+		}
+		return 0
 	default:
 		return 0
 	}

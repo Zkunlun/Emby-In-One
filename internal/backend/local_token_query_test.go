@@ -32,7 +32,7 @@ func TestLocalTokenQueryCapyPlaybackInfo(t *testing.T) {
 		}
 		query := r.URL.Query()
 		sawLocalQueryToken.Store(hasLocalEmbyTokenQuery(query))
-		sawExpectedUserID.Store(query.Get("UserId") == "user-a")
+		sawExpectedUserID.Store(query.Get("UserId") == "")
 		sawExpectedAuthHeader.Store(r.Header.Get("X-Emby-Token") == "upstream-token")
 		sawIsPlayback.Store(query.Get("IsPlayback") == "true")
 		if hasLocalEmbyTokenQuery(query) {
@@ -41,6 +41,7 @@ func TestLocalTokenQueryCapyPlaybackInfo(t *testing.T) {
 		}
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		sawExpectedUserID.Store(sawExpectedUserID.Load() && body["UserId"] == "user-a")
 		if body["UserId"] != "user-a" {
 			w.WriteHeader(http.StatusBadRequest)
 			return

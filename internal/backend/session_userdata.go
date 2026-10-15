@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 func (a *App) registerSessionAndUserStateRoutes(mux *http.ServeMux) {
@@ -42,7 +43,7 @@ func decodeOptionalJSON(r *http.Request) (any, error) {
 		return nil, nil
 	}
 	var payload any
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	if err := unmarshalJSONWithNumbers(raw, &payload); err != nil {
 		return nil, err
 	}
 	return payload, nil
@@ -196,6 +197,18 @@ func (a *App) translateSessionBodyIDs(reqCtx *RequestContext, body map[string]an
 	if rawPlaySessionID != "" && targetSessionID != "" {
 		body["PlaySessionId"] = targetSessionID
 	}
+	// SessionId and PlaySessionId are distinct Emby fields. A virtual
+	// SessionId can only be forwarded to the same proven source; arbitrary
+	// client or foreign-source session IDs must not escape upstream.
+	if rawSessionID, ok := body["SessionId"].(string); ok && rawSessionID != "" {
+		if session := a.IDStore.ResolveVirtualID(rawSessionID); session != nil && session.ServerID == serverID {
+			body["SessionId"] = session.OriginalID
+		} else {
+			delete(body, "SessionId")
+		}
+	} else {
+		delete(body, "SessionId")
+	}
 	return serverID, true
 }
 
@@ -260,11 +273,22 @@ func (a *App) populateWatchProgressMetadata(p *WatchProgress, item map[string]an
 	}
 }
 
-// numericInt64 extracts an int64 from a JSON number (float64) or returns 0.
+// unmarshalJSONWithNumbers retains exact JSON number literals while decoding
+// through any. A float64 intermediate would round Emby ticks beyond 2^53.
+func unmarshalJSONWithNumbers(raw []byte, out any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	return decoder.Decode(out)
+}
+
+// numericInt64 extracts integer playback ticks while preserving json.Number.
 func numericInt64(v any) (int64, bool) {
 	switch n := v.(type) {
 	case float64:
 		return int64(math.Round(n)), true
+	case json.Number:
+		value, err := n.Int64()
+		return value, err == nil
 	case int64:
 		return n, true
 	case int:
@@ -301,7 +325,7 @@ func readUpstreamJSONOrNoContent(resp *http.Response) (int, any, error) {
 		return resp.StatusCode, nil, nil
 	}
 	var payload any
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	if err := unmarshalJSONWithNumbers(raw, &payload); err != nil {
 		return resp.StatusCode, nil, err
 	}
 	return resp.StatusCode, payload, nil
@@ -589,36 +613,112 @@ func (a *App) handleSessionPlayingStopped(w http.ResponseWriter, r *http.Request
 }
 
 func (a *App) handleSessionsCapabilities(w http.ResponseWriter, r *http.Request) {
-	a.broadcastCapabilities(w, r, "/Sessions/Capabilities", true)
+	a.broadcastCapabilities(w, r, "/Sessions/Capabilities", false)
 }
 
 func (a *App) handleSessionsCapabilitiesFull(w http.ResponseWriter, r *http.Request) {
-	a.broadcastCapabilities(w, r, "/Sessions/Capabilities/Full", false)
+	a.broadcastCapabilities(w, r, "/Sessions/Capabilities/Full", true)
 }
 
-// broadcastCapabilities relays a capabilities broadcast to every allowed
-// upstream. Each upstream gets its own copy of the body, so preparing one
-// upstream's identity can never modify the body another upstream will receive.
-// A preparation failure is reported with its own status instead of being hidden
-// behind the best-effort 204.
-func (a *App) broadcastCapabilities(w http.ResponseWriter, r *http.Request, path string, forwardQuery bool) {
+// capabilitiesQueryHasKey treats capitalization aliases as one Query field.
+func capabilitiesQueryHasKey(query url.Values, name string) bool {
+	for key := range query {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// Basic Capabilities has Query fields only. Explicit Query beats legacy
+// clients' body values; no unknown fields or authentication data cross over.
+func moveLegacyCapabilitiesToQuery(query url.Values, payload any) {
+	fields, ok := payload.(map[string]any)
+	if !ok {
+		return
+	}
+	for _, key := range []string{"SupportsMediaControl", "SupportsSync"} {
+		if capabilitiesQueryHasKey(query, key) {
+			continue
+		}
+		if v, valid := fields[key].(bool); valid {
+			query.Set(key, fmt.Sprint(v))
+		}
+	}
+	for _, key := range []string{"PlayableMediaTypes", "SupportedCommands"} {
+		if capabilitiesQueryHasKey(query, key) {
+			continue
+		}
+		raw, ok := fields[key].([]any)
+		if !ok {
+			continue
+		}
+		values := make([]string, 0, len(raw))
+		valid := true
+		for _, entry := range raw {
+			v, ok := entry.(string)
+			if !ok {
+				valid = false
+				break
+			}
+			values = append(values, v)
+		}
+		if valid {
+			query.Set(key, strings.Join(values, ","))
+		}
+	}
+}
+
+// Capabilities Id identifies an upstream session. A client-provided Id that
+// cannot be proven to belong to one authorized upstream must never be blindly
+// broadcast to multiple upstreams. Full retains JSON; Basic has no body.
+func (a *App) broadcastCapabilities(w http.ResponseWriter, r *http.Request, path string, full bool) {
 	body, err := decodeOptionalJSON(r)
 	if err != nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	query := cloneValues(r.URL.Query())
+	sessionID := ""
+	seenSessionID := false
+	for key, values := range query {
+		if !strings.EqualFold(key, "Id") {
+			continue
+		}
+		delete(query, key)
+		if len(values) != 1 || (seenSessionID && sessionID != values[0]) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		seenSessionID = true
+		sessionID = values[0]
+	}
+	if sessionID == "" || a.IDStore == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	resolved := a.IDStore.ResolveVirtualID(sessionID)
 	reqCtx := requestContextFrom(r.Context())
-	var query url.Values
-	if forwardQuery {
-		query = cloneValues(r.URL.Query())
+	if resolved == nil || resolved.ServerID == "" || !a.isServerAllowed(reqCtx, resolved.ServerID) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	query.Set("Id", resolved.OriginalID)
+	if !full {
+		moveLegacyCapabilitiesToQuery(query, body)
+		body = nil
 	}
 	for _, client := range a.allowedClients(reqCtx) {
+		if client.ID != resolved.ServerID {
+			continue
+		}
 		if err := a.forwardNoContent(r, client, http.MethodPost, path, query, body); err != nil {
 			if status, ok := preparationErrorStatus(err); ok {
 				writeJSON(w, status, preparationErrorBody(err))
 				return
 			}
 		}
+		break
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
