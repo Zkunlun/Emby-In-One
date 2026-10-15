@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func decodeClientBodyNumbers(t *testing.T, raw string) map[string]any {
@@ -326,23 +327,37 @@ func TestOutboundClientBodyHandlers(t *testing.T) {
 				capabilities := map[string]any{"DeviceProfile": deviceProfile, "PlayableMediaTypes": []string{"Video", "Audio"},
 					"SupportedCommands": []string{"Play", "Seek"}, "SupportsMediaControl": true,
 					"AppId": "original-app", "IconUrl": "https://example.test/original.png", "PushToken": "original-push"}
+				virtualSession := app.IDStore.GetOrCreateVirtualID("target-session", app.Upstream.Clients()[0].ID)
 				for _, path := range []string{"/Sessions/Capabilities", "/Sessions/Capabilities/Full"} {
-					send(path+"?Id=target-session&X-Emby-Client=REAL-QUERY", capabilities, http.StatusNoContent)
-					seen := map[string]bool{}
-					for i := 0; i < 2; i++ {
-						got := <-records
-						assertRecord(got, capabilities)
-						seen[got.headers.Get("X-Emby-Token")] = true
-						if path == "/Sessions/Capabilities" {
-							if got.query.Get("Id") != "target-session" || got.query.Get("X-Emby-Client") != got.headers.Get("X-Emby-Client") {
-								t.Fatal("capabilities query preparation changed")
-							}
-						} else if got.query.Get("Id") != "" || got.query.Get("X-Emby-Client") != "" {
-							t.Fatal("Full started forwarding previously ignored query")
-						}
+					send(path+"?Id="+url.QueryEscape(virtualSession)+"&X-Emby-Client=REAL-QUERY", capabilities, http.StatusNoContent)
+					var got outboundClientHeaderRecord
+					select {
+					case got = <-records:
+					case <-time.After(2 * time.Second):
+						t.Fatal("owned capability session produced no upstream request")
 					}
-					if !seen["TOKEN-A"] || !seen["TOKEN-B"] {
-						t.Fatal("capabilities broadcast targets changed")
+					if got.headers.Get("X-Emby-Token") != "TOKEN-A" {
+						t.Fatalf("capabilities reached an unrelated upstream: token=%q", got.headers.Get("X-Emby-Token"))
+					}
+					if got.query.Get("Id") != "target-session" || got.query.Get("X-Emby-Client") != got.headers.Get("X-Emby-Client") {
+						t.Fatal("capabilities must translate virtual session Id and outbound client Query")
+					}
+					if path == "/Sessions/Capabilities" {
+						assertClientHeaders(t, got.headers, infuseClientHeaderWant(), "USER-A", "TOKEN-A")
+						if len(got.body) != 0 {
+							t.Fatalf("basic capabilities must not forward JSON Body, got %q", got.body)
+						}
+						if got.query.Get("SupportsMediaControl") != "true" ||
+							got.query.Get("PlayableMediaTypes") != "Video,Audio" {
+							t.Fatalf("basic capabilities Query lost legacy flags: %v", got.query)
+						}
+					} else {
+						assertRecord(got, capabilities)
+					}
+					select {
+					case extra := <-records:
+						t.Fatalf("session-scoped capabilities was broadcast to a second upstream: %q", extra.headers.Get("X-Emby-Token"))
+					default:
 					}
 				}
 				playback := map[string]any{"UserId": app.Auth.ProxyUserID(), "MediaSourceId": virtualMS, "DeviceProfile": deviceProfile,
@@ -356,7 +371,7 @@ func TestOutboundClientBodyHandlers(t *testing.T) {
 				wantPlayback["MediaSourceId"] = "ms-a"
 				got := <-records
 				assertRecord(got, wantPlayback)
-				if got.query.Get("UserId") != "USER-A" || got.query.Get("X-Emby-Device-Id") != "infuse-spoof-id" {
+				if got.query.Get("UserId") != "" || got.query.Get("X-Emby-Device-Id") != "infuse-spoof-id" {
 					t.Fatal("PlaybackInfo query mapping changed")
 				}
 				for i, path := range []string{"/Sessions/Playing", "/Sessions/Playing/Progress", "/Sessions/Playing/Stopped"} {
