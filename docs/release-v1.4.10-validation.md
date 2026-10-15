@@ -2,7 +2,7 @@
 
 [项目主页](../README.md) · [文档索引](README.md) · [English](en/release-v1.4.10-validation.md)
 
-本页记录 **V1.4.10 发布候选的证据边界**，不代表 GitHub 已发布此 Tag。
+本页记录 **V1.4.10 的验证证据及边界**。正式发布状态、日期和下载资产以 GitHub Releases 为准。
 
 ## 基线
 
@@ -18,7 +18,7 @@
 
 - 用户明确允许跳过9B3完整后端回归，不能将其标为通过。Windows 后端尝试300秒超时：488项通过、2项失败、5项跳过，剩余未跑完。
 - 两项失败：TestUnifiedCountsPendingCleanupAndRecoveryPublishOnce 与 TestUnifiedTokenPersistenceFailureStaysPendingAndRecoversOnce，模拟 Token 保存失败时预期HTTP500，Windows返回200；Linux上是否同样存在问题尚未验证。
-- 9D的默认完整 Go CI、跨架构发布构建、资产SHA256核验仍为发布门禁，跳过9B3不代表豁免CI。Linux全量race也未取得通过结论。
+- GitHub Actions PR CI #33 已通过 Linux Go build/vet/完整普通测试、面板与 Shell 检查；全量 race 按配置跳过。六架构发布构建、静态链接、二进制版本及 SHA256 仍须由正式 Release 工作流验证。
 - Redirect全部线路Dead时保守返回502；匿名404探测不证明可播。上游登录失败日志仍有未确定根因的历史记录。
 - 不包含已撤回的V1.5.0全库扫描器；SNTP按需补全不同于全库扫描。
 

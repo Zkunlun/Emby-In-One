@@ -2,7 +2,7 @@
 
 [Project home](../../README_EN.md) · [Documentation](README.md) · [简体中文](../release-v1.4.10-validation.md)
 
-This page documents a **V1.4.10 release candidate**, not an already published GitHub tag.
+This page documents **V1.4.10 verification evidence and its limits**. Formal availability, dates and release assets are determined by GitHub Releases.
 
 ## Provenance
 
@@ -18,7 +18,7 @@ Ten Phase8 commits were integrated on GitHub main 963bbf4e7d4c8a9c62d79bf55ded6c
 
 - The user explicitly waived the complete 9B3 backend regression. It did not pass: a Windows run timed out near 300 seconds with 488 passes, 2 failures and 5 skips before all cases ran.
 - TestUnifiedCountsPendingCleanupAndRecoveryPublishOnce and TestUnifiedTokenPersistenceFailureStaysPendingAndRecoversOnce expected HTTP500 for simulated Token persistence failures but got HTTP200 on Windows; Linux behavior is unverified.
-- Phase9D default full Go CI, multi-architecture release builds and SHA256 verification remain mandatory publication gates. Skipping 9B3 does not waive CI or establish a full Linux race pass.
+- GitHub Actions PR CI #33 passed Linux Go build, vet, the complete ordinary tests, the panel and shell jobs. Full race was skipped by configuration. Six-architecture binaries, static linking and SHA256 still require the formal Release workflow.
 - Redirect with every route Dead conservatively returns 502; anonymous 404 probes do not prove playability. Some historic upstream login errors remain unexplained.
 - The withdrawn V1.5.0 full-library scanner is not restored; SNTP on-demand hydration is different.
 
