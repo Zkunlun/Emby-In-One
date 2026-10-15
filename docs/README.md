@@ -2,7 +2,7 @@
 
 [项目主页](../README.md) · [安全政策](../SECURITY.md) · [English](en/README.md)
 
-适用主线：V1.4.9。
+适用主线：V1.4.10（正式版本以 GitHub Releases 为准）。
 
 ## 安装与首次使用
 
@@ -31,6 +31,7 @@
 ## 发布与历史
 
 - [更新日志](../Update.md)与 [Releases](https://github.com/Zkunlun/Emby-In-One/releases)。
+- [V1.4.10 验证范围](release-v1.4.10-validation.md)：Phase 8 实测、定向测试与跳过的完整回归。
 - [V1.4.9 验证范围](release-v1.4.9-validation.md)：已有证据及未覆盖事项。
 - [版本编号调整](version-numbering.md)：历史 V1.5.0/V1.5.1/V1.6.0 与当前编号关系。
 - [更新计划](../Update%20Plan.md)：既有维护计划，实际已发布功能以 Release 和当前文档为准。

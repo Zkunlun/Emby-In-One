@@ -1,5 +1,33 @@
 # Emby-In-One 更新日志
 
+## V1.4.10
+
+发布日期：待正式发布（Phase 9C 发布准备稿；实际日期以 GitHub Release 为准）
+
+> V1.4.10 基于 V1.4.9 的稳定业务代码，整合 SNTP 单上游搜索、多版本按需补全，以及 Emby 官方 API 出站字段一致性修复。此节是待发布内容，不代表 GitHub Tag 或正式 Release 已创建。
+
+### SNTP 搜索、多版本和媒体身份
+
+- 当 SNTP `SearchHints` 返回 404/405 或空结果时，在保留原用户授权与媒体库范围的前提下兼容回退至 `Items?SearchTerm`；401/403 不绕过认证。
+- 兼容 `SearchHints` 的 `Id` / `ItemId` 别名，维护虚拟作品身份，避免搜索结果与详情/播放间错配。
+- 对同一上游的电影和剧集多版本在详情或播放请求时按需补全，保留不同 ItemID / MediaSourceID 的选择，不把一次部分响应视作完整版本列表。
+
+### Emby 请求兼容与上游身份
+
+- 视频/音频和相关路径的 HEAD 请求保持 HEAD，不擅自改为 GET；GET PlaybackInfo 不携带不规范的 JSON 正文，使用真实上游 UserId。
+- POST PlaybackInfo、`/Users/{id}/Items`、`/Items`、`Fields` 查询和 Sessions/Capabilities(/Full) 按各自 API 契约处理 Query、Body、字段类型及实际来源会话 ID。
+- Playing/Progress/Stopped 的上游 SessionId 按真实来源映射；嵌套 JSON 64 位整数保持精度；自定义上游身份缺失时使用稳定的脱敏兜底，不把真实客户端 User-Agent 意外转发至上游。
+- 区分匿名探测的线路可达性与实际媒体成功播放：匿名 404 不宣称线路 Alive；真实媒体请求确认成功后才恢复播放健康。Redirect 模式所有线路均 Dead 时继续保守返回 502，不自动绕过这一限制。
+
+### 验证证据与已知限制
+
+- Phase 8 候选已在 DMIT 部署，用户于 2026-10-15 确认真实 Emby 客户端验收通过。此结论不代表每条 API 已在真实上游独立抓包验证。
+- Phase 9B 整合的 backend 源码与已验收候选逐字节一致，保留 GitHub main 已更新的双语文档；Windows/amd64 的 Phase 8/SNTP 定向 36 个顶层测试、cmd 测试、Go vet、Go build 已通过。
+- **根据用户明确指令跳过完整后端回归**：Windows 的完整 backend 尝试在约 300 秒超时，记录 488 通过、2 失败、5 跳过；两项失败均涉及模拟 Token 持久化失败时预期 500 却收到 200，尚未完成 Linux 复核。不得据此宣称完整回归通过。正式发布仍需完成 Phase 9D 独立 CI、构建和产物校验。
+- 旧/新候选均曾观察到上游登录失败日志，来源尚未完全确定；Redirect 全线路 Dead 返回 502 为已记录的兼容取舍。升级应保留配置、数据库、Token 及独立的 user-password.key，并在切换前进行一致性备份。
+
+---
+
 ## V1.4.9
 
 发布日期：2026-10-06（V1.4.9 正式版）

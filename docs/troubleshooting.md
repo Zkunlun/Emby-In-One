@@ -2,7 +2,7 @@
 
 [项目主页](../README.md) · [文档索引](README.md) · [English](en/troubleshooting.md)
 
-适用主线：V1.4.9。
+适用主线：V1.4.10（正式版以 GitHub Releases 为准）。
 
 ## Passthrough 服务器登录失败 (403)
 

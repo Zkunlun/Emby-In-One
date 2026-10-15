@@ -2,7 +2,7 @@
 
 [项目主页](../README.md) · [文档索引](README.md) · [English](en/installation.md)
 
-适用主线：V1.4.9。
+适用主线：V1.4.10（正式版以 GitHub Releases 为准）。
 
 ## 选择部署方式
 
@@ -33,11 +33,11 @@ sudo bash release-install.sh
 
 ## 指定 Release 版本
 
-固定版本示例为 V1.4.9：
+固定版本示例为 V1.4.10：
 
 ```bash
-curl -fsSL -o release-install.sh https://github.com/Zkunlun/Emby-In-One/releases/download/V1.4.9/release-install.sh
-sudo bash release-install.sh V1.4.9
+curl -fsSL -o release-install.sh https://github.com/Zkunlun/Emby-In-One/releases/download/V1.4.10/release-install.sh
+sudo bash release-install.sh V1.4.10
 ```
 
 URL 与参数需对应同一版本；仅固定脚本 URL、不传参数仍会解析 Latest。原 V1.5.0/V1.5.1/V1.6.0 地址已调整，参见[编号说明](version-numbering.md)。
@@ -45,7 +45,7 @@ URL 与参数需对应同一版本；仅固定脚本 URL、不传参数仍会解
 ## 源码安装脚本
 
 ```bash
-git clone --branch V1.4.9 https://github.com/Zkunlun/Emby-In-One.git
+git clone --branch V1.4.10 https://github.com/Zkunlun/Emby-In-One.git
 cd Emby-In-One
 sudo bash install.sh
 ```
@@ -54,7 +54,7 @@ sudo bash install.sh
 
 ## 手动 Docker Compose
 
-1. 克隆完整仓库（可使用上面的 V1.4.9 克隆命令）。必须包含 go.mod、cmd、internal、third_party、public、Dockerfile 和 docker-compose.yml；不能只复制几个 Go 文件。
+1. 克隆完整仓库（可使用上面的 V1.4.10 克隆命令）。必须包含 go.mod、cmd、internal、third_party、public、Dockerfile 和 docker-compose.yml；不能只复制几个 Go 文件。
 2. 在仓库根目录创建挂载目录，交给 Compose 的 uid/gid 1000：
 
    ```bash

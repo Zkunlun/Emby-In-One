@@ -2,7 +2,7 @@
 
 [Project home](../../README_EN.md) · [Documentation](README.md) · [简体中文](../configuration.md)
 
-Applies to the V1.4.9 mainline.
+Applies to the V1.4.10 source line (consult GitHub Releases for formal publication).
 
 The configuration file is `config/config.yaml`, mounted at `/app/config/config.yaml` in Docker.
 

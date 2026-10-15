@@ -9,6 +9,8 @@
 
 本项目基于 [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One) 持续开发与维护。
 
+**版本说明：** 本源码分支准备发布 **V1.4.10**，重点改进 SNTP 搜索、多版本保留与 Emby API 请求兼容；实际可安装的正式版本以 [GitHub Releases](https://github.com/Zkunlun/Emby-In-One/releases) 为准，详见[更新日志](Update.md)和[本次验证范围](docs/release-v1.4.10-validation.md)。
+
 ## 适用场景
 
 - 有多台可使用的 Emby 服务器，希望在一个客户端入口浏览、搜索和选择播放来源。

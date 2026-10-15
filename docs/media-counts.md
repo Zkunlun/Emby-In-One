@@ -2,7 +2,7 @@
 
 [项目主页](../README.md) · [文档索引](README.md) · [English](en/media-counts.md)
 
-适用主线：V1.4.9。
+适用主线：V1.4.10（正式版以 GitHub Releases 为准）。
 
 > V1.4.9 提供以下统计接口；Hills 携带语言参数的请求已完成兼容修复及用户验收。
 

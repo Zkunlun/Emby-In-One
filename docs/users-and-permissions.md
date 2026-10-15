@@ -2,7 +2,7 @@
 
 [项目主页](../README.md) · [文档索引](README.md) · [English](en/users-and-permissions.md)
 
-适用主线：V1.4.9。
+适用主线：V1.4.10（正式版以 GitHub Releases 为准）。
 
 管理员可创建多个本地普通用户，并分别授权到稳定的上游服务器身份。普通用户账户与上游账户分开管理。
 

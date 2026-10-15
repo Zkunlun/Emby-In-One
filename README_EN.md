@@ -9,6 +9,8 @@ A multi-upstream aggregation proxy for Emby clients: one entry point for multipl
 
 This project continues development and maintenance of [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One).
 
+**Version note:** This source branch prepares **V1.4.10**, focusing on SNTP search, preserving selectable media versions, and outbound Emby API compatibility. See [GitHub Releases](https://github.com/Zkunlun/Emby-In-One/releases) for the latest formally published version, the [changelog](Update.md) and the [release validation scope](docs/en/release-v1.4.10-validation.md).
+
 ## Who this is for
 
 - You have access to several Emby servers and want to browse, search and choose playback sources through one client entry point.

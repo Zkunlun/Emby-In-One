@@ -2,7 +2,7 @@
 
 [Project home](../../README_EN.md) · [Documentation](README.md) · [简体中文](../media-merge.md)
 
-Applies to V1.4.9. Merging happens when requests encounter candidates while browsing, searching, listing seasons/episodes or fetching details. Startup and user creation do not scan every upstream's full library.
+Applies to V1.4.10. Merging happens when requests encounter candidates while browsing, searching, listing seasons/episodes or fetching details. Startup and user creation do not scan every upstream's full library.
 
 | Object | Identity evidence |
 | --- | --- |
