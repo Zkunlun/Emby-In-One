@@ -11,25 +11,43 @@ import (
 )
 
 func requestMergeFields(query url.Values) bool {
-	fields := strings.Split(query.Get("Fields"), ",")
-	for _, required := range []string{"ProviderIds", "MediaSources"} {
-		found := false
-		for _, field := range fields {
-			if strings.EqualFold(field, required) {
-				found = true
+	// MediaSources is a BaseItemDto response property, not an allowed Emby
+	// ItemsService Fields selector. Never send this previously injected token.
+	// Preserve client-requested fields and their order, including optional
+	// upstream extensions that the proxy does not understand.
+	fields := []string{}
+	seen := map[string]bool{}
+	var fieldKeys []string
+	for key := range query {
+		if strings.EqualFold(key, "Fields") {
+			fieldKeys = append(fieldKeys, key)
+		}
+	}
+	sort.Strings(fieldKeys)
+	for _, key := range fieldKeys {
+		values := query[key]
+		delete(query, key)
+		for _, value := range values {
+			for _, raw := range strings.Split(value, ",") {
+				field := strings.TrimSpace(raw)
+				if field == "" || strings.EqualFold(field, "MediaSources") {
+					continue
+				}
+				folded := strings.ToLower(field)
+				if !seen[folded] {
+					fields = append(fields, field)
+					seen[folded] = true
+				}
 			}
 		}
-		if !found {
-			fields = append(fields, required)
-		}
 	}
-	query.Set("Fields", strings.Trim(strings.Join(fields, ","), ","))
-	for key, values := range query {
-		if strings.EqualFold(key, "MediaSourceId") && len(values) > 0 && values[0] != "" {
-			return false
-		}
+	if !seen["providerids"] {
+		fields = append(fields, "ProviderIds")
 	}
-	return true
+	query.Set("Fields", strings.Join(fields, ","))
+	// A requested field cannot prove completeness of MediaSources. The caller
+	// needs independent evidence from real upstream detail / hydration.
+	return false
 }
 
 // Complete metadata is requested only for items already encountered by this

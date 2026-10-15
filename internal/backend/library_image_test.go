@@ -201,7 +201,7 @@ func TestShowsEpisodesAcceptsSeasonIDQueryCaseVariants(t *testing.T) {
 				if got := forwarded.Get("UserId"); got != "user-a" {
 					t.Errorf("upstream UserId = %q, want user-a", got)
 				}
-				if got := forwarded.Get("Fields"); got != "Overview,MediaSources,PremiereDate,PrimaryImageAspectRatio,ProviderIds" {
+				if got := forwarded.Get("Fields"); got != "Overview,PremiereDate,PrimaryImageAspectRatio,ProviderIds" {
 					t.Errorf("upstream Fields = %q", got)
 				}
 				// Task 4 filters visibility before the client page limit.

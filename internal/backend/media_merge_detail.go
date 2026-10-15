@@ -74,6 +74,8 @@ func (a *App) handleMergeItemDetail(w http.ResponseWriter, r *http.Request, user
 				}
 				query.Set("UserId", instance.Client.clientUserID())
 				full := requestMergeFields(query)
+				// Single-item metadata is returned in full, without Fields.
+				query.Del("Fields")
 				endpoint := "/Items/" + instance.OriginalID
 				if userPath {
 					endpoint = "/Users/" + instance.Client.clientUserID() + endpoint
@@ -202,6 +204,8 @@ func (a *App) prepareMergePlaybackItem(r *http.Request, id string, resolved *rou
 	query.Del("MediaSourceId")
 	query.Del("mediaSourceId")
 	requestMergeFields(query)
+	// Fields is a list-only selector; a single item returns its entire DTO.
+	query.Del("Fields")
 	payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet,
 		"/Users/"+resolved.Client.clientUserID()+"/Items/"+resolved.OriginalID, query, nil)
 	if err != nil {

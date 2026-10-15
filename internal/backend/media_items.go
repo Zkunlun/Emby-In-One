@@ -108,6 +108,7 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 		// of that container's items the user sees.
 		filter, localFilter := a.prepareLocalUserFilter(w, r, query)
 		fullSources := requestMergeFields(query)
+		removePathScopedItemsUserQuery(query)
 		payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Users/"+resolved.Client.clientUserID()+"/Items", query, nil)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
@@ -328,6 +329,17 @@ func (a *App) handleItemThemeMedia(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, payload)
 }
 
+// A /Users/{UserId}/Items endpoint already scopes its user in the path.
+// Discard all case variants of the redundant Query alias; do not change
+// /Items (whose Query UserId is meaningful) or other endpoints.
+func removePathScopedItemsUserQuery(query url.Values) {
+	for key := range query {
+		if strings.EqualFold(key, "UserId") {
+			delete(query, key)
+		}
+	}
+}
+
 func (a *App) fetchItemsAcrossUpstreams(ctx context.Context, reqCtx *RequestContext, pathTemplate string, query url.Values, body any) []upstreamItemsResult {
 	clients := a.allowedClients(reqCtx)
 	if len(clients) == 0 {
@@ -347,8 +359,12 @@ func (a *App) fetchItemsAcrossUpstreams(ctx context.Context, reqCtx *RequestCont
 			fn: func(bgCtx context.Context) upstreamItemsResult {
 				serverQuery := cloneValues(query)
 				fullSources := requestMergeFields(serverQuery)
-				// Clients only ever hold EIO's virtual user ID, which no upstream knows.
-				serverQuery.Set("UserId", c.clientUserID())
+				// /Items needs the authenticated upstream Query UserId; the
+				// /Users/{id}/Items path already scopes this identity.
+				removePathScopedItemsUserQuery(serverQuery)
+				if pathTemplate != "/Users/%s/Items" {
+					serverQuery.Set("UserId", c.clientUserID())
+				}
 				if hasBatchIDQuery(serverQuery) {
 					translated, ok := translateBatchIDQueryForServer(serverQuery, c.ID, a.IDStore)
 					if !ok {

@@ -122,19 +122,70 @@ func TestPhase8BContractD04PostPlaybackInfoNoRedundantQueryUserId(t *testing.T) 
 	})
 }
 
-// D05 is conditional: RC2 already stopped treating a requested Fields token
-// as proof the upstream returned all media sources. The official enum policy
-// will be frozen in 8F per endpoint after version-specific verification.
+// D05: MediaSources is a BaseItemDto response field but is not an allowed
+// Fields selector in Emby's ItemsService list API.
 func TestPhase8BContractD05RequestedMediaSourcesDoesNotProveCompleteness(t *testing.T) {
-	q := url.Values{"Fields": {"ProviderIds"}}
-	complete := requestMergeFields(q)
-	if complete {
-		t.Fatal("D05 RC2 regression: requested Fields cannot establish complete MediaSources")
+	for _, tc := range []struct{ fields, want string }{
+		{"ProviderIds", "ProviderIds"},
+		{"Overview,MediaSources,MediaStreams", "Overview,MediaStreams,ProviderIds"},
+		{"mediasources,ProviderIds,MEDIASOURCES", "ProviderIds"},
+		{"", "ProviderIds"},
+	} {
+		t.Run(tc.fields, func(t *testing.T) {
+			q := url.Values{"Fields": {tc.fields}}
+			if requestMergeFields(q) {
+				t.Fatal("D05 Fields cannot prove source completeness")
+			}
+			if got := q.Get("Fields"); got != tc.want {
+				t.Errorf("D05 Fields=%q, want %q", got, tc.want)
+			}
+		})
 	}
-	fields := strings.Split(q.Get("Fields"), ",")
-	if !phase8BHasKey(fields, "MediaSources") {
-		t.Fatalf("D05 test fixture did not exercise RC2 MediaSources request; Fields=%v", fields)
+	q := url.Values{"Fields": {"Overview,MediaSources"}, "fields": {"MediaStreams,ProviderIds"}}
+	if requestMergeFields(q) {
+		t.Fatal("D05 case-alias selector must not establish completeness")
 	}
+	if q.Get("Fields") != "Overview,MediaStreams,ProviderIds" || q.Has("fields") {
+		t.Errorf("D05 conflicting Fields aliases not normalized deterministically")
+	}
+}
+
+// Path-scoped Users Items retains upstream user and ParentId while dropping
+// every case variation of a user ID Query argument.
+func TestPhase8FUserItemsScopedParentDoesNotSendUserQueryAlias(t *testing.T) {
+	var seenPath string
+	var seenQuery url.Values
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/Users/AuthenticateByName" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "mock-token", "User": map[string]any{"Id": "up-user"}})
+			return
+		}
+		if r.URL.Path == "/Users/up-user/Items" {
+			seenPath, seenQuery = r.URL.Path, r.URL.Query()
+			_ = json.NewEncoder(w).Encode(map[string]any{"Items": []any{}, "TotalRecordCount": 0})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(upstream.Close)
+	withTempAppConfig(t, singleUpstreamConfig(upstream.URL), func(a *App, h http.Handler) {
+		token := loginToken(t, h, "secret")
+		user := a.Auth.ProxyUserID()
+		parent := a.IDStore.GetOrCreateVirtualID("up-library", a.Upstream.Clients()[0].ID)
+		path := "/Users/" + user + "/Items?ParentId=" + url.QueryEscape(parent) + "&UserId=" + url.QueryEscape(user) + "&userid=client-spoof&Limit=1"
+		rr := doJSONRequest(t, h, http.MethodGet, path, nil, token)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("D06 scoped fixture status=%d", rr.Code)
+		}
+		if seenPath != "/Users/up-user/Items" || seenQuery.Get("ParentId") != "up-library" {
+			t.Errorf("D06 upstream user or parent scope changed")
+		}
+		for key := range seenQuery {
+			if strings.EqualFold(key, "UserId") {
+				t.Errorf("D06 Users Items forwarded redundant Query %s", key)
+			}
+		}
+	})
 }
 
 func TestPhase8BContractD06UserItemsDoesNotRepeatUserIdInQuery(t *testing.T) {
@@ -570,6 +621,46 @@ func TestPhase8ESessionIdProvenanceAcrossPlaybackEvents(t *testing.T) {
 					default:
 					}
 				})
+			}
+		}
+	})
+}
+
+func TestPhase8FGlobalItemsSearchFallbackKeepsCorrectUpstreamUserScope(t *testing.T) {
+	var globalQuery, userQuery url.Values
+	var userPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "mock-token", "User": map[string]any{"Id": "up-user"}})
+		case "/Items":
+			globalQuery = cloneValues(r.URL.Query())
+			_ = json.NewEncoder(w).Encode(map[string]any{"Items": []any{}, "TotalRecordCount": 0})
+		case "/Users/up-user/Items":
+			userPath, userQuery = r.URL.Path, cloneValues(r.URL.Query())
+			_ = json.NewEncoder(w).Encode(map[string]any{"Items": []any{}, "TotalRecordCount": 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	withTempAppConfig(t, singleUpstreamConfig(upstream.URL), func(a *App, h http.Handler) {
+		token := loginToken(t, h, "secret")
+		virtualUser := a.Auth.ProxyUserID()
+		path := "/Items?SearchTerm=search-probe&Limit=3&UserId=" + url.QueryEscape(virtualUser) + "&userid=spoof"
+		rr := doJSONRequest(t, h, http.MethodGet, path, nil, token)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("D06 global search fixture HTTP=%d", rr.Code)
+		}
+		if globalQuery.Get("UserId") != "up-user" {
+			t.Error("D06 /Items global Query must retain correct upstream real UserId")
+		}
+		if userPath != "/Users/up-user/Items" || userQuery.Get("SearchTerm") != "search-probe" {
+			t.Errorf("D06 search compatibility fallback lost route or search")
+		}
+		for key := range userQuery {
+			if strings.EqualFold(key, "UserId") {
+				t.Errorf("D06 /Users/{id}/Items sibling fallback has redundant UserId Query")
 			}
 		}
 	})

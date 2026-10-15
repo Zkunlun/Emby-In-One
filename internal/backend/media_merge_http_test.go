@@ -355,9 +355,12 @@ func TestTask6HTTPVersionsListsAndDetails(t *testing.T) {
 			u.mu.Lock()
 			for _, call := range u.calls {
 				if strings.HasSuffix(call.Path, "/Items") && call.Query.Get("Ids") == "" {
-					if !strings.Contains(call.Query.Get("Fields"), "MediaSources") {
-						t.Fatal("source fields not requested")
+					if strings.Contains(call.Query.Get("Fields"), "MediaSources") || !strings.Contains(call.Query.Get("Fields"), "ProviderIds") {
+						t.Fatal("invalid Fields selector or missing provider identity")
 					}
+				}
+				if strings.Contains(call.Path, "/Items/movie-") && call.Query.Has("Fields") {
+					t.Errorf("D05 single item detail must not send list-only Fields selector: path=%s", call.Path)
 				}
 			}
 			u.mu.Unlock()
