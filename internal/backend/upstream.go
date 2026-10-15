@@ -106,9 +106,10 @@ const (
 )
 
 type streamBaseHealth struct {
-	state                 streamBaseHealthState
-	lastFailure           time.Time
-	observationGeneration uint64
+	state                    streamBaseHealthState
+	lastFailure              time.Time
+	observationGeneration    uint64
+	completedProbeGeneration uint64 // Testable HTTP reachability, never playback evidence.
 }
 
 type UpstreamClient struct {
@@ -138,7 +139,7 @@ type UpstreamClient struct {
 	onAuthError    func(c *UpstreamClient)
 	onCountsState func() // Lock-free notification after client state locks release.
 	// streamHealth stores explicit per-stream-base liveness. Configured bases start
-	// unknown; a dead base stays dead until a successful request/probe marks it alive.
+	// unknown; only a real successful media request can revive a dead base.
 	// lastFailure only throttles when a dead base may be probed again.
 	streamHealth map[string]streamBaseHealth
 }
@@ -424,6 +425,23 @@ func (c *UpstreamClient) beginStreamBaseObservation(base string) uint64 {
 	return health.observationGeneration
 }
 
+// markStreamBaseProbeComplete records that an anonymous probe has FINISHED,
+// independent of its health evidence. HTTP reachability must not change the
+// playback state. A later real request may have a larger observationGeneration.
+func (c *UpstreamClient) markStreamBaseProbeComplete(base string, generation uint64) {
+	if generation == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	health, ok := c.streamHealth[base]
+	if !ok || generation <= health.completedProbeGeneration {
+		return
+	}
+	health.completedProbeGeneration = generation
+	c.streamHealth[base] = health
+}
+
 // markStreamBaseFailedObservation applies a network failure only if it belongs
 // to the most recently started observation for this base. An older probe/request
 // may finish later, but its stale result cannot overwrite newer evidence.
@@ -477,7 +495,7 @@ func (c *UpstreamClient) markStreamBaseAlive(base string) {
 
 // streamBaseProbeCandidates returns configured bases that should be checked by
 // the next background probe. Unknown/alive bases are always observed; dead bases
-// are held until the cooldown expires, at which point they may be revalidated.
+// are held until the cooldown expires, at which point their HTTP route can be checked without promoting Alive.
 // Eligibility to probe is not eligibility for playback.
 func (c *UpstreamClient) streamBaseProbeCandidates(now time.Time) []string {
 	c.mu.RLock()
@@ -525,7 +543,7 @@ func (c *UpstreamClient) streamPlaybackAndRecoveryCandidates(now time.Time) ([]s
 
 // streamBaseCandidates returns redirect playback candidates in configured order.
 // Unknown and confirmed-alive bases remain eligible; confirmed-dead bases remain
-// excluded until successful traffic or a probe explicitly revives them. All-dead
+// excluded until a successful real media request revives them. All-dead
 // therefore returns an empty list rather than leaking a known-dead fallback URL.
 func (c *UpstreamClient) streamBaseCandidates() []string {
 	playback, _ := c.streamPlaybackAndRecoveryCandidates(time.Now())
@@ -546,7 +564,7 @@ func (c *UpstreamClient) streamRedirectRecoveryCandidates(now time.Time) []strin
 
 // streamProxyCandidates returns the bases a proxied media request may actually
 // contact. While any unknown/alive line exists, dead lines stay excluded even if
-// their cooldown has elapsed; background probes are responsible for restoring
+// their cooldown has elapsed; only real media traffic can restore
 // them. Only when every configured line is dead may proxy playback perform a
 // controlled recovery attempt, limited to dead lines whose cooldown has expired.
 func (c *UpstreamClient) streamProxyCandidates(now time.Time) []string {
@@ -1224,7 +1242,9 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 	if stream {
 		if isStreamUnavailableStatus(resp.StatusCode) {
 			c.markStreamBaseFailedObservation(base, streamObservation)
-		} else {
+		} else if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			// Only a successful real media response proves this base usable.
+			// 401/403/404/500 alone establish no positive playback evidence.
 			c.markStreamBaseAliveObservation(base, streamObservation)
 		}
 	}

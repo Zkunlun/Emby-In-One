@@ -14,8 +14,9 @@ func withHomeLibraryPatchApp(t *testing.T, fn func(*App, http.Handler, *atomic.I
 	withTempAppConfig(t, cfg, func(app *App, handler http.Handler) { fn(app, handler, hits) })
 }
 
-// Await the startup health cycle before cancelling its runner. Cancellation of
-// a client request does not prove an accepted httptest handler has completed.
+// Await COMPLETED startup probes before changing test counters or stream state.
+// Anonymous HTTP reachability leaves Unknown unchanged; a start-generation by
+// itself is insufficient, because the probe might still be in flight.
 func phase5WaitInitialStreamProbes(t *testing.T, app *App) {
 	t.Helper()
 	client := app.Upstream.GetClient(0)
@@ -26,7 +27,7 @@ func phase5WaitInitialStreamProbes(t *testing.T, app *App) {
 		client.mu.RLock()
 		defer client.mu.RUnlock()
 		for _, base := range client.StreamBaseURLs {
-			if client.streamHealth[base].state == streamBaseUnknown {
+			if client.streamHealth[base].completedProbeGeneration == 0 {
 				return false
 			}
 		}

@@ -8,13 +8,10 @@ import (
 	"time"
 )
 
-// streamLivenessProbePath is the path liveness probes are issued against. It is
-// deliberately inside the /Videos/ route family the line is actually used for:
-// a line whose reverse proxy only forwards /Videos/ and /Audio/ (a common
-// self-hosted split-tunnel setup) answers 403/404 here, and that answer is
-// exactly what proves the whole line — proxy hop included — is up. The probe
-// never depends on any Emby endpoint being exposed at the root.
-const streamLivenessProbePath = "/Videos/probe"
+// streamLivenessProbePath follows the documented GET /Videos/{Id}/stream
+// shape. The zero item ID is intentionally nonexistent; this anonymous GET
+// checks route reachability only, never authenticates or verifies playback.
+const streamLivenessProbePath = "/Videos/00000000000000000000000000000000/stream"
 
 // redirectRecoveryProbeCap prevents a client playback request from inheriting an
 // arbitrarily large administrator health-check timeout. Recovery probes still
@@ -48,10 +45,9 @@ func (c *UpstreamClient) probeStreamBases(ctx context.Context) {
 	c.probeSelectedStreamBases(ctx, bases, c.streamProbeTimeout())
 }
 
-// probeSelectedStreamBases checks exactly the supplied stream bases in parallel
-// and updates their liveness marks. Authentication/not-found responses still prove
-// a route reachable; transport failures and explicit gateway-unavailability
-// responses (502/503/504) mark a base dead.
+// probeSelectedStreamBases checks only the requested bases concurrently.
+// Anonymous HTTP replies (even 2xx) prove route reachability, NOT playback.
+// Transport/gateway failures mark Dead; other replies cannot mark Alive.
 //
 // The probe uses the client's own transport (including its outbound proxy) but no
 // credentials: the request carries no token, so nothing is exposed to a line that
@@ -84,9 +80,12 @@ func (c *UpstreamClient) probeSelectedStreamBases(ctx context.Context, bases []s
 			default:
 			}
 			generation := c.beginStreamBaseObservation(base)
+			defer c.markStreamBaseProbeComplete(base, generation)
 			if probeOneStreamBase(ctx, client, strings.TrimRight(base, "/")+streamLivenessProbePath) {
-				if c.markStreamBaseAliveObservation(base, generation) && c.logger != nil {
-					c.logger.Debugf("[%s] Stream line alive: %s", c.Name, base)
+				// Do not promote Unknown or revive Dead from a dummy item ID.
+				// Only a real successful stream response establishes Alive.
+				if c.logger != nil {
+					c.logger.Debugf("[%s] Stream line route reachable (playability unverified): %s", c.Name, base)
 				}
 			} else {
 				if c.markStreamBaseFailedObservation(base, generation) && c.logger != nil {
@@ -99,11 +98,9 @@ func (c *UpstreamClient) probeSelectedStreamBases(ctx context.Context, bases []s
 	wg.Wait()
 }
 
-// probeOneStreamBase issues one liveness request. Transport failures are dead;
-// HTTP responses use the shared stream-unavailable classifier so background
-// health checks and proxy playback can share one definition of a broken line.
-// The URL is built from the administrator-configured base plus a fixed path, so
-// it carries no credentials.
+// probeOneStreamBase reports anonymous HTTP reachability, not playability.
+// Its fixed invalid item ID needs no credentials; a 404 must not certify media
+// success. Transport errors and 502/503/504 indicate network/gateway failure.
 func probeOneStreamBase(ctx context.Context, client *http.Client, probeURL string) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 	if err != nil {

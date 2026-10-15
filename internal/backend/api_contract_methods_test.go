@@ -372,8 +372,8 @@ func TestPhase8BContractD12ProbeIsAnonymousRouteReachabilityOnly(t *testing.T) {
 	if !reachable {
 		t.Error("D12 legacy 404 route proves path is reachable, not playable")
 	}
-	if path != "/Videos/probe" {
-		t.Errorf("D12 expected legacy split-route probe path, got different route category")
+	if path != "/Videos/00000000000000000000000000000000/stream" {
+		t.Errorf("D12 probe must use documented Emby stream route shape, got %q", path)
 	}
 	if ua != "Emby-In-One-Liveness/1.0" {
 		t.Errorf("D12 probe identity semantics changed; reassess 8H")
@@ -381,8 +381,8 @@ func TestPhase8BContractD12ProbeIsAnonymousRouteReachabilityOnly(t *testing.T) {
 	if token != "" {
 		t.Fatal("D12 anonymous probe leaked authentication token")
 	}
-	// GREEN locks historical route-reachability behavior; it is NOT proof a
-	// valid API route was used or any authenticated media is playable.
+	// GREEN only establishes anonymous HTTP reachability at the official route
+	// shape; the invalid item ID cannot prove authenticated media playback.
 }
 
 func TestPhase8CHeadAudioVideoStatusesRangesAndHLS(t *testing.T) {
@@ -738,12 +738,15 @@ func TestPhase8GExactNumbersThroughJSONBoundaries(t *testing.T) {
 }
 
 func TestPhase8GItemNumberReadsPreservedJSONNumber(t *testing.T) {
-	for _, tc := range []struct { input json.Number; want float64 }{
+	for _, tc := range []struct {
+		input json.Number
+		want  float64
+	}{
 		{json.Number("42"), 42},
 		{json.Number("1.25"), 1.25},
 	} {
-		if got := itemNumber(map[string]any{"SortField":tc.input},"SortField"); got != tc.want {
-			t.Errorf("UseNumber-backed sort value %s = %v, want %v", tc.input,got,tc.want)
+		if got := itemNumber(map[string]any{"SortField": tc.input}, "SortField"); got != tc.want {
+			t.Errorf("UseNumber-backed sort value %s = %v, want %v", tc.input, got, tc.want)
 		}
 	}
 }
