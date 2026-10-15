@@ -87,7 +87,7 @@ func TestPhase8BContractD03FullCapabilitiesRetainsRequiredId(t *testing.T) {
 	base, rec := phase8BContractFixture(t)
 	withTempAppConfig(t, singleUpstreamConfig(base), func(a *App, h http.Handler) {
 		token := loginToken(t, h, "secret")
-		rr := doJSONRequest(t, h, http.MethodPost, "/Sessions/Capabilities/Full?Id=mock-client-session", map[string]any{"PlayableMediaTypes": []string{"Video"}}, token)
+		rr := doJSONRequest(t, h, http.MethodPost, "/Sessions/Capabilities/Full?Id="+url.QueryEscape(a.IDStore.GetOrCreateVirtualID("mock-client-session", a.Upstream.Clients()[0].ID)), map[string]any{"PlayableMediaTypes": []string{"Video"}}, token)
 		if rr.Code != http.StatusNoContent {
 			t.Fatalf("Capabilities/Full status=%d, fixture failure", rr.Code)
 		}
@@ -164,41 +164,57 @@ func TestPhase8BContractD06UserItemsDoesNotRepeatUserIdInQuery(t *testing.T) {
 }
 
 func TestPhase8BContractD07CapabilitiesNeverBroadcastSameUnknownSessionId(t *testing.T) {
-	seen := [2]string{}
-	mk := func(index int) (*phase8BRecorder, string) {
-		srv, cap := phase8BUpstream(t, http.StatusNoContent, func(w http.ResponseWriter, r *http.Request) {
+	seen := [2][]string{}
+	mk := func(index int) string {
+		srv, _ := phase8BUpstream(t, http.StatusNoContent, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/Users/AuthenticateByName" {
 				_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "mock-token", "User": map[string]any{"Id": "up-user"}})
 				return
 			}
-			if r.URL.Path == "/Sessions/Capabilities" {
-				seen[index] = r.URL.Query().Get("Id") // local fixture only; never logged
+			if r.URL.Path == "/Sessions/Capabilities" || r.URL.Path == "/Sessions/Capabilities/Full" {
+				seen[index] = append(seen[index], r.URL.Query().Get("Id"))
 			}
 			w.WriteHeader(http.StatusNoContent)
 		})
-		return cap, srv.URL
+		return srv.URL
 	}
-	aRec, urlA := mk(0)
-	bRec, urlB := mk(1)
-	withTempAppConfig(t, dualUpstreamConfig(urlA, urlB), func(_ *App, h http.Handler) {
+	urlA, urlB := mk(0), mk(1)
+	withTempAppConfig(t, dualUpstreamConfig(urlA, urlB), func(a *App, h http.Handler) {
 		token := loginToken(t, h, "secret")
-		rr := doJSONRequest(t, h, http.MethodPost, "/Sessions/Capabilities?Id=frontend-session-unknown", nil, token)
-		if rr.Code != http.StatusNoContent {
-			t.Fatalf("D07 capabilities status=%d fixture failure", rr.Code)
+		sessionA := a.IDStore.GetOrCreateVirtualID("source-a-session", a.Upstream.Clients()[0].ID)
+		sessionB := a.IDStore.GetOrCreateVirtualID("source-b-session", a.Upstream.Clients()[1].ID)
+		for _, input := range []struct {
+			target           string
+			expectA, expectB int
+		}{
+			{"/Sessions/Capabilities?Id=totally-unknown-session", 0, 0},
+			{"/Sessions/Capabilities?Id=&id=" + url.QueryEscape(sessionA), 0, 0},
+			{"/Sessions/Capabilities?Id=" + url.QueryEscape(sessionA) + "&id=foreign-session", 0, 0},
+			{"/Sessions/Capabilities?Id=" + url.QueryEscape(sessionA), 1, 0},
+			{"/Sessions/Capabilities/Full?Id=" + url.QueryEscape(sessionB), 1, 1},
+		} {
+			rr := doJSONRequest(t, h, http.MethodPost, input.target, map[string]any{"SupportsMediaControl": true}, token)
+			if rr.Code != http.StatusNoContent {
+				t.Fatalf("D07 status=%d fixture failure", rr.Code)
+			}
+			if len(seen[0]) != input.expectA || len(seen[1]) != input.expectB {
+				t.Errorf("D07 capability routing counts A=%d B=%d; wanted %d/%d", len(seen[0]), len(seen[1]), input.expectA, input.expectB)
+			}
 		}
-		if len(aRec.snapshot()) < 2 || len(bRec.snapshot()) < 2 {
-			t.Fatalf("D07 expected login and capabilities per mock upstream")
+		if len(seen[0]) > 0 && seen[0][0] != "source-a-session" {
+			t.Errorf("D07 source A received wrong session Id")
 		}
-		if seen[0] == "frontend-session-unknown" && seen[1] == "frontend-session-unknown" {
-			t.Errorf("D07 same unresolvable client Session Id broadcast to distinct upstreams")
+		if len(seen[1]) > 0 && seen[1][0] != "source-b-session" {
+			t.Errorf("D07 source B received wrong session Id")
 		}
 	})
 }
 func TestPhase8BContractD08BasicCapabilitiesUsesQueryNotJSONBody(t *testing.T) {
 	base, rec := phase8BContractFixture(t)
-	withTempAppConfig(t, singleUpstreamConfig(base), func(_ *App, h http.Handler) {
+	withTempAppConfig(t, singleUpstreamConfig(base), func(a *App, h http.Handler) {
 		token := loginToken(t, h, "secret")
-		rr := doJSONRequest(t, h, http.MethodPost, "/Sessions/Capabilities?Id=frontend-session&SupportsSync=true",
+		session := a.IDStore.GetOrCreateVirtualID("frontend-session", a.Upstream.Clients()[0].ID)
+		rr := doJSONRequest(t, h, http.MethodPost, "/Sessions/Capabilities?Id="+url.QueryEscape(session)+"&SupportsSync=true",
 			map[string]any{"SupportsMediaControl": true}, token)
 		if rr.Code != http.StatusNoContent {
 			t.Fatalf("D08 capabilities status=%d fixture failure", rr.Code)
@@ -209,6 +225,9 @@ func TestPhase8BContractD08BasicCapabilitiesUsesQueryNotJSONBody(t *testing.T) {
 		}
 		if !phase8BHasKey(got.QueryKeys, "Id") {
 			t.Fatalf("D08 upstream lost basic capabilities Id; fixture not suitable")
+		}
+		if !phase8BHasKey(got.QueryKeys, "SupportsMediaControl") {
+			t.Errorf("D08 basic body legacy capability flag not normalized to Query")
 		}
 	})
 }
@@ -479,6 +498,79 @@ func TestPhase8DPlaybackInfoMethodSpecificUserAndSelectedSource(t *testing.T) {
 		selected := asItems(map[string]any{"Items": response["MediaSources"]})
 		if len(selected) != 1 || selected[0]["Id"] != virtualSource {
 			t.Errorf("selected playback did not retain single virtual MediaSourceId")
+		}
+	})
+}
+
+func TestPhase8ESessionIdProvenanceAcrossPlaybackEvents(t *testing.T) {
+	type observed struct{ route, session string }
+	sentA := make(chan observed, 32)
+	sentB := make(chan observed, 32)
+	newServer := func(index int) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/Users/AuthenticateByName" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "fixture-token", "User": map[string]any{"Id": "fixture-user"}})
+				return
+			}
+			if strings.HasPrefix(r.URL.Path, "/Sessions/Playing") {
+				var payload map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Errorf("bad event body: %v", err)
+				}
+				value, _ := payload["SessionId"].(string)
+				item := observed{route: r.URL.Path, session: value}
+				if index == 0 {
+					sentA <- item
+				} else {
+					sentB <- item
+				}
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+	}
+	aServer, bServer := newServer(0), newServer(1)
+	t.Cleanup(aServer.Close)
+	t.Cleanup(bServer.Close)
+	withTempAppConfig(t, dualUpstreamConfig(aServer.URL, bServer.URL), func(a *App, h http.Handler) {
+		token := loginToken(t, h, "secret")
+		first, second := a.Upstream.Clients()[0], a.Upstream.Clients()[1]
+		item := a.IDStore.GetOrCreateVirtualID("item-a", first.ID)
+		media := a.IDStore.GetOrCreateVirtualID("media-a", first.ID)
+		play := a.IDStore.GetOrCreateVirtualID("play-a", first.ID)
+		local := a.IDStore.GetOrCreateVirtualID("source-a-session", first.ID)
+		foreign := a.IDStore.GetOrCreateVirtualID("source-b-session", second.ID)
+		for _, route := range []string{"/Sessions/Playing", "/Sessions/Playing/Progress", "/Sessions/Playing/Stopped"} {
+			for _, tc := range []struct{ name, session, want string }{
+				{"mapped", local, "source-a-session"},
+				{"foreign", foreign, ""},
+				{"unknown", "unmapped-session-id", ""},
+			} {
+				t.Run(strings.TrimPrefix(route, "/Sessions/")+"/"+tc.name, func(t *testing.T) {
+					rr := doJSONRequest(t, h, http.MethodPost, route, map[string]any{
+						"ItemId": item, "MediaSourceId": media, "PlaySessionId": play,
+						"SessionId": tc.session, "PositionTicks": 20,
+					}, token)
+					if rr.Code != http.StatusNoContent {
+						t.Fatalf("fixture Session event HTTP=%d", rr.Code)
+					}
+					select {
+					case got := <-sentA:
+						if got.route != route || got.session != tc.want {
+							t.Errorf("D09 forwarded route/session mismatch: route=%s session-matches=%t; wanted route=%s known=%t",
+								got.route, got.session == tc.want, route, tc.want != "")
+						}
+					default:
+						t.Fatal("fixture did not observe authorized upstream event")
+					}
+					select {
+					case <-sentB:
+						t.Error("D09 event leaked to foreign upstream")
+					default:
+					}
+				})
+			}
 		}
 	})
 }
