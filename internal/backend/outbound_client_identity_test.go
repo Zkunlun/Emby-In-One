@@ -142,9 +142,15 @@ func TestOutboundClientIdentityHeaderProfiles(t *testing.T) {
 		{"infuse", UpstreamConfig{SpoofClient: "infuse"}, infuseClientHeaderWant()},
 		{"custom", custom, customWant},
 		{"custom-partial", UpstreamConfig{SpoofClient: "custom", CustomClient: "PARTIAL"}, map[string]string{
-			"User-Agent": "Go-http-client/1.1", "X-Emby-Client": "PARTIAL",
+			"User-Agent":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Emby/1.0.0",
+			"X-Emby-Client": "PARTIAL", "X-Emby-Client-Version": "4.8.3.0",
+			"X-Emby-Device-Name": "Chrome Windows", "X-Emby-Device-Id": "official-spoof-id",
 		}},
-		{"custom-empty", UpstreamConfig{SpoofClient: "custom"}, map[string]string{"User-Agent": "Go-http-client/1.1"}},
+		{"custom-empty", UpstreamConfig{SpoofClient: "custom"}, map[string]string{
+			"User-Agent":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Emby/1.0.0",
+			"X-Emby-Client": "Emby Web", "X-Emby-Client-Version": "4.8.3.0",
+			"X-Emby-Device-Name": "Chrome Windows", "X-Emby-Device-Id": "official-spoof-id",
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -331,7 +337,8 @@ func TestOutboundClientIdentityConcurrentIsolation(t *testing.T) {
 			assertClientHeaders(t, got.headers, infuseClientHeaderWant(), "A-USER", "A-TOKEN")
 		} else {
 			assertClientHeaders(t, got.headers, map[string]string{
-				"User-Agent": "B-UA", "X-Emby-Client": "B", "X-Emby-Device-Id": "B-ID",
+				"User-Agent": "B-UA", "X-Emby-Client": "B", "X-Emby-Client-Version": "4.8.3.0",
+				"X-Emby-Device-Name": "Chrome Windows", "X-Emby-Device-Id": "B-ID",
 			}, "B-USER", "B-TOKEN")
 		}
 	}

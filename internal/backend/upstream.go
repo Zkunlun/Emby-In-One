@@ -889,7 +889,9 @@ func (c *UpstreamClient) RequestJSON(ctx context.Context, reqCtx *RequestContext
 		return nil, fmt.Errorf("upstream %s %s failed: %s %s", method, path, resp.Status, strings.TrimSpace(string(payload)))
 	}
 	var decoded any
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil {
 		return nil, err
 	}
 	return decoded, nil

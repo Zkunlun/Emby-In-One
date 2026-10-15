@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -351,7 +352,12 @@ func TestPhase8BContractD11CustomMissingIdentityCannotLeakRealClient(t *testing.
 			t.Errorf("D11 custom missing field leaked original %s", name)
 		}
 	}
-	// Whether custom fields must have stable defaults remains an 8G design decision.
+	for _, name := range []string{"User-Agent", "X-Emby-Client", "X-Emby-Client-Version", "X-Emby-Device-Name", "X-Emby-Device-Id"} {
+		if headers.Get(name) == "" {
+			t.Errorf("D11 expected a non-empty identity field: %s", name)
+		}
+	}
+
 }
 func TestPhase8BContractD12ProbeIsAnonymousRouteReachabilityOnly(t *testing.T) {
 	var path, ua, token string
@@ -664,4 +670,80 @@ func TestPhase8FGlobalItemsSearchFallbackKeepsCorrectUpstreamUserScope(t *testin
 			}
 		}
 	})
+}
+
+func TestPhase8GExactNumbersThroughJSONBoundaries(t *testing.T) {
+	const raw = `{"PositionTicks":9007199254740993,"Nested":{"RunTimeTicks":9223372036854775807},"PlaybackRate":1.2500000000000001,"NoValue":null}`
+	wantTokens := []string{`"PositionTicks":9007199254740993`, `"RunTimeTicks":9223372036854775807`, `"PlaybackRate":1.2500000000000001`}
+	check := func(name string, body any) {
+		t.Helper()
+		out, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("%s marshal: %v", name, err)
+		}
+		for _, token := range wantTokens {
+			if !strings.Contains(string(out), token) {
+				t.Errorf("%s lost exact JSON number %s", name, token)
+			}
+		}
+	}
+	t.Run("session-request", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/Sessions/Playing/Progress", strings.NewReader(raw))
+		body, err := decodeOptionalJSON(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check("session-request", body)
+		got, ok := numericInt64(body.(map[string]any)["PositionTicks"])
+		if !ok || got != 9007199254740993 {
+			t.Errorf("numericInt64 exact PositionTicks failed: %d %t", got, ok)
+		}
+	})
+	t.Run("fallback-request", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/Plugins/PrivateOperation", strings.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		body, err := decodeFallbackBody(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check("fallback-request", body)
+	})
+	t.Run("session-upstream-response", func(t *testing.T) {
+		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(raw))}
+		status, body, err := readUpstreamJSONOrNoContent(resp)
+		if err != nil || status != http.StatusOK {
+			t.Fatalf("session upstream status=%d err=%v", status, err)
+		}
+		check("session-upstream-response", body)
+	})
+	t.Run("items-upstream-response", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, raw)
+		}))
+		t.Cleanup(srv.Close)
+		c := newUpstreamClient(Config{}, UpstreamConfig{URL: srv.URL, SpoofClient: "none"}, 0, nil)
+		c.setOnline("fixture-token", "fixture-user")
+		body, err := c.RequestJSON(context.Background(), nil, nil, http.MethodGet, "/Items/probe", nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check("items-upstream-response", body)
+	})
+	t.Run("fraction-not-rounded-to-integer", func(t *testing.T) {
+		if _, ok := numericInt64(json.Number("1.25")); ok {
+			t.Error("D10 fractional number must not be accepted as integer ticks")
+		}
+	})
+}
+
+func TestPhase8GItemNumberReadsPreservedJSONNumber(t *testing.T) {
+	for _, tc := range []struct { input json.Number; want float64 }{
+		{json.Number("42"), 42},
+		{json.Number("1.25"), 1.25},
+	} {
+		if got := itemNumber(map[string]any{"SortField":tc.input},"SortField"); got != tc.want {
+			t.Errorf("UseNumber-backed sort value %s = %v, want %v", tc.input,got,tc.want)
+		}
+	}
 }

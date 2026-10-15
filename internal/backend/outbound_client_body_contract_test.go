@@ -101,7 +101,8 @@ func TestOutboundClientBodyModelWire(t *testing.T) {
 					cfg.CustomUserAgent = "Custom/1"
 					cfg.CustomClient = "Custom"
 					cfg.CustomDeviceId = "custom-stable"
-					wantHeaders = map[string]string{"User-Agent": "Custom/1", "X-Emby-Client": "Custom", "X-Emby-Device-Id": "custom-stable"}
+					wantHeaders = map[string]string{"User-Agent": "Custom/1", "X-Emby-Client": "Custom",
+						"X-Emby-Client-Version": "4.8.3.0", "X-Emby-Device-Name": "Chrome Windows", "X-Emby-Device-Id": "custom-stable"}
 				} else if mode == "passthrough" {
 					wantHeaders = realWant
 				}

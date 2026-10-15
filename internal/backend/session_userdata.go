@@ -43,7 +43,7 @@ func decodeOptionalJSON(r *http.Request) (any, error) {
 		return nil, nil
 	}
 	var payload any
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	if err := unmarshalJSONWithNumbers(raw, &payload); err != nil {
 		return nil, err
 	}
 	return payload, nil
@@ -273,11 +273,22 @@ func (a *App) populateWatchProgressMetadata(p *WatchProgress, item map[string]an
 	}
 }
 
-// numericInt64 extracts an int64 from a JSON number (float64) or returns 0.
+// unmarshalJSONWithNumbers retains exact JSON number literals while decoding
+// through any. A float64 intermediate would round Emby ticks beyond 2^53.
+func unmarshalJSONWithNumbers(raw []byte, out any) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	return decoder.Decode(out)
+}
+
+// numericInt64 extracts integer playback ticks while preserving json.Number.
 func numericInt64(v any) (int64, bool) {
 	switch n := v.(type) {
 	case float64:
 		return int64(math.Round(n)), true
+	case json.Number:
+		value, err := n.Int64()
+		return value, err == nil
 	case int64:
 		return n, true
 	case int:
@@ -314,7 +325,7 @@ func readUpstreamJSONOrNoContent(resp *http.Response) (int, any, error) {
 		return resp.StatusCode, nil, nil
 	}
 	var payload any
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	if err := unmarshalJSONWithNumbers(raw, &payload); err != nil {
 		return resp.StatusCode, nil, err
 	}
 	return resp.StatusCode, payload, nil
