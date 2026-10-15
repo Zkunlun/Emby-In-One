@@ -142,23 +142,40 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 		if !a.isServerAllowed(reqCtx, inst.ServerID) {
 			continue
 		}
-		// The client only ever holds EIO's virtual user ID, and Emby prefers a UserId in the
-		// query or body over the one the request was authenticated as. Forwarding the virtual
-		// ID made the upstream look up a user that does not exist there and answer 500
-		// (NullReferenceException), which surfaced as a 502 to the client.
+		// GET PlaybackInfo declares UserId in Query and no request body. POST
+		// declares UserId/MediaSourceId in PlaybackInfoRequest's JSON Body.
+		// Keep the upstream's own user and selected source in the correct
+		// carrier: forwarding EIO's virtual user to Emby can produce a 500.
 		instQuery := cloneValues(query)
-		instQuery.Set("UserId", inst.Client.clientUserID())
 		if selected == nil {
 			if source := a.defaultMergeSource(r.PathValue("itemId"), inst.ServerID, inst.OriginalID); source != "" {
 				instQuery.Set("MediaSourceId", source)
 			}
 		}
-		instBody := deepCloneMap(body)
-		instBody["UserId"] = inst.Client.clientUserID()
-		if source := instQuery.Get("MediaSourceId"); source != "" {
-			instBody["MediaSourceId"] = source
+		source := instQuery.Get("MediaSourceId")
+		for key := range instQuery {
+			if strings.EqualFold(key, "UserId") ||
+				(r.Method == http.MethodPost && strings.EqualFold(key, "MediaSourceId")) {
+				delete(instQuery, key)
+			}
 		}
-		payload, err := inst.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, r.Method, "/Items/"+inst.OriginalID+"/PlaybackInfo", instQuery, instBody)
+		var outboundBody any
+		if r.Method == http.MethodGet {
+			instQuery.Set("UserId", inst.Client.clientUserID())
+		} else {
+			instBody := deepCloneMap(body)
+			for key := range instBody {
+				if strings.EqualFold(key, "UserId") || strings.EqualFold(key, "MediaSourceId") {
+					delete(instBody, key)
+				}
+			}
+			instBody["UserId"] = inst.Client.clientUserID()
+			if source != "" {
+				instBody["MediaSourceId"] = source
+			}
+			outboundBody = instBody
+		}
+		payload, err := inst.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, r.Method, "/Items/"+inst.OriginalID+"/PlaybackInfo", instQuery, outboundBody)
 		if err != nil {
 			if a.Logger != nil {
 				a.Logger.Warnf("PlaybackInfo: server=[%s] originalId=%s failed: %s", inst.Client.Name, inst.OriginalID, redactURLInError(err))

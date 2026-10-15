@@ -394,3 +394,91 @@ func TestPhase8CHeadAudioVideoStatusesRangesAndHLS(t *testing.T) {
 		})
 	}
 }
+
+func TestPhase8DPlaybackInfoMethodSpecificUserAndSelectedSource(t *testing.T) {
+	type requestShape struct {
+		method string
+		query  url.Values
+		body   map[string]any
+	}
+	var captured []requestShape
+	full := task6HTTPMovie("mock-movie", task6HTTPSource("source-a", 1000), task6HTTPSource("source-b", 1000))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "mock-token", "User": map[string]any{"Id": "actual-upstream-user"}})
+		case r.URL.Path == "/Items/mock-movie/PlaybackInfo":
+			var payload map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			captured = append(captured, requestShape{method: r.Method, query: r.URL.Query(), body: payload})
+			source := ""
+			if payload != nil {
+				source, _ = payload["MediaSourceId"].(string)
+			}
+			sources := []any{}
+			for _, item := range asItems(full["MediaSources"]) {
+				if source == "" || source == item["Id"] {
+					sources = append(sources, item)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"MediaSources": sources, "PlaySessionId": "mock-session"})
+		case r.URL.Path == "/Items/mock-movie" || r.URL.Path == "/Users/actual-upstream-user/Items/mock-movie":
+			_ = json.NewEncoder(w).Encode(full)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	withTempAppConfig(t, phase2SNTPFixtureConfig(upstream.URL), func(app *App, h http.Handler) {
+		token := loginToken(t, h, "secret")
+		client := app.Upstream.Clients()[0]
+		virtualItem, err := app.IDStore.RegisterMergeItem(newMergeCandidate(client.ID, deepCloneMap(full), nil, true), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		virtualSource, err := app.IDStore.GetMergeMediaSourceID(client.ID, "mock-movie", "source-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		virtualUser := app.Auth.ProxyUserID()
+		getRR := doJSONRequest(t, h, http.MethodGet, "/Items/"+virtualItem+"/PlaybackInfo?UserId="+url.QueryEscape(virtualUser), nil, token)
+		if getRR.Code != http.StatusOK {
+			t.Fatalf("GET fixture playback status=%d", getRR.Code)
+		}
+		postRR := doJSONRequest(t, h, http.MethodPost, "/Items/"+virtualItem+"/PlaybackInfo?UserId="+url.QueryEscape(virtualUser)+"&userid="+url.QueryEscape(virtualUser)+"&MediaSourceId="+url.QueryEscape(virtualSource),
+			map[string]any{"UserId": virtualUser, "MediaSourceId": virtualSource, "EnableDirectPlay": true}, token)
+		if postRR.Code != http.StatusOK {
+			t.Fatalf("POST fixture playback status=%d", postRR.Code)
+		}
+		if len(captured) != 2 {
+			t.Fatalf("PlaybackInfo upstream calls=%d, want 2", len(captured))
+		}
+		get, post := captured[0], captured[1]
+		if get.method != http.MethodGet || len(get.body) != 0 {
+			t.Errorf("GET sent unexpected JSON body fields: %d", len(get.body))
+		}
+		if get.query.Get("UserId") != "actual-upstream-user" {
+			t.Errorf("GET lost required upstream UserId Query")
+		}
+		if post.method != http.MethodPost {
+			t.Fatalf("expected POST upstream, got %s", post.method)
+		}
+		for key := range post.query {
+			if strings.EqualFold(key, "UserId") || strings.EqualFold(key, "MediaSourceId") {
+				t.Errorf("POST sends Body-only query key %q", key)
+			}
+		}
+		if post.body["UserId"] != "actual-upstream-user" || post.body["MediaSourceId"] != "source-a" || post.body["EnableDirectPlay"] != true {
+			t.Errorf("POST body lost real upstream UserId, selected source or player flags")
+		}
+		var response map[string]any
+		if err := json.Unmarshal(postRR.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		selected := asItems(map[string]any{"Items": response["MediaSources"]})
+		if len(selected) != 1 || selected[0]["Id"] != virtualSource {
+			t.Errorf("selected playback did not retain single virtual MediaSourceId")
+		}
+	})
+}
