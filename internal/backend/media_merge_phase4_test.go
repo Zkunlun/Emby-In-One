@@ -119,6 +119,11 @@ func withTask6Phase4Alias(t *testing.T, fn func(*task6HTTPFixture, string, strin
 	a := task6HTTPMovie("movie-a", task6HTTPSource("a100", 1000))
 	b := task6HTTPMovie("movie-b", task6HTTPSource("b100", nil))
 	b["RunTimeTicks"] = nil
+	// Identity is initially unproven. Missing runtime alone never delays a
+	// merge of the same TMDB work; preserve B as a separate historical ID.
+	b["ProviderIds"] = nil
+	b["Name"] = ""
+	b["ProductionYear"] = nil
 	withTask6HTTPFixture(t, []map[string]any{a}, []map[string]any{b}, func(f *task6HTTPFixture) {
 		task6SeedSeparateItems(t, f, a, b)
 		alias := task6HTTPGroup(t, f, "server-b", "movie-b", "b100")
@@ -126,6 +131,10 @@ func withTask6Phase4Alias(t *testing.T, fn func(*task6HTTPFixture, string, strin
 			t.Fatal(err)
 		}
 		b["MediaSources"] = []any{task6HTTPSource("b100", 1000)}
+		// Metadata reconciliation (not runtime equality) now proves B is A.
+		b["ProviderIds"] = map[string]any{"Tmdb": "1"}
+		b["Name"] = "Example"
+		b["ProductionYear"] = 2024
 		f.upstream[1].update(b)
 		f.list(t, "Movie")
 		canonical := f.app.IDStore.CanonicalMergeID(alias)
