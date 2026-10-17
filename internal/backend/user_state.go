@@ -198,10 +198,13 @@ func localPlayedPercentage(progress *WatchProgress) float64 {
 	if progress == nil {
 		return 0
 	}
-	if progress.Played {
-		return 100
+	if progress.PositionTicks <= 0 {
+		if progress.Played {
+			return 100
+		}
+		return 0
 	}
-	if progress.RuntimeTicks <= 0 || progress.PositionTicks <= 0 {
+	if progress.RuntimeTicks <= 0 {
 		return 0
 	}
 	percentage := float64(progress.PositionTicks) * 100 / float64(progress.RuntimeTicks)

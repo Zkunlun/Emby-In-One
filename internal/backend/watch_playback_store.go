@@ -27,7 +27,7 @@ func (ws *WatchStore) recordPlaybackProgress(metadata *WatchProgress, event play
 	}
 	if event.Kind > playbackWatchStopped || !event.Source.valid() ||
 		(!inherited && (event.Source.ServerID != metadata.ServerID ||
-		event.Source.OriginalItemID != metadata.OriginalItemID)) {
+			event.Source.OriginalItemID != metadata.OriginalItemID)) {
 		return fmt.Errorf("watch playback: invalid event source")
 	}
 
@@ -66,8 +66,7 @@ func (ws *WatchStore) recordPlaybackProgress(metadata *WatchProgress, event play
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(proxy_user_id, virtual_item_id) DO UPDATE SET
 			position_ticks = CASE
-				WHEN user_watch_progress.played = 1 OR ? = 1
-				THEN 0
+				WHEN ? = 1 THEN 0
 				WHEN ? = 1 THEN ?
 				ELSE user_watch_progress.position_ticks
 			END,

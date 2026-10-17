@@ -163,7 +163,10 @@ func TestUnifiedCompletionThresholdAndStorePreservation(t *testing.T) {
 		live, failed, played bool
 	}{
 		{"below", "Movie", 899, 1000, playbackWatchProgress, false, false, false},
-		{"exact", "Movie", 900, 1000, playbackWatchProgress, false, false, true},
+		{"exact progress", "Movie", 900, 1000, playbackWatchProgress, false, false, false},
+		{"above progress", "Movie", 950, 1000, playbackWatchProgress, false, false, false},
+		{"below stopped", "Movie", 899, 1000, playbackWatchStopped, false, false, false},
+		{"exact stopped", "Movie", 900, 1000, playbackWatchStopped, false, false, true},
 		{"above", "Episode", 950, 1000, playbackWatchStopped, false, false, true},
 		{"audio", "Audio", 950, 1000, playbackWatchProgress, false, false, false},
 		{"live", "Movie", 950, 1000, playbackWatchProgress, true, false, false},
@@ -193,18 +196,41 @@ func TestUnifiedCompletionThresholdAndStorePreservation(t *testing.T) {
 				t.Fatalf("result=%+v", p)
 			}
 			if tc.played {
-				event.Position = validPlaybackTicks(100)
+				// Repeating the same qualified completion must remain complete.
 				if err := ws.RecordPlaybackProgress(&meta, event); err != nil {
 					t.Fatal(err)
 				}
 				p = ws.GetProgress("u", "v")
 				if !p.Played || p.PositionTicks != 0 || !p.IsFavorite {
-					t.Fatalf("completion regressed: %+v", p)
+					t.Fatalf("duplicate completion regressed: %+v", p)
+				}
+				// A subsequent progress event may be a rewatch. The store has
+				// no session identity; ownership guards reject stale events upstream.
+				event.Kind = playbackWatchProgress
+				event.Position = validPlaybackTicks(100)
+				if err := ws.RecordPlaybackProgress(&meta, event); err != nil {
+					t.Fatal(err)
+				}
+				p = ws.GetProgress("u", "v")
+				if !p.Played || p.PositionTicks != 100 || !p.IsFavorite {
+					t.Fatalf("rewatch progress regressed: %+v", p)
 				}
 			}
 		})
 	}
 }
+func TestUnifiedProgressPastThresholdSeekBackBeforeStopped(t *testing.T) {
+	withUnifiedWatchFixture(t, func(f *unifiedWatchFixture) {
+		f.send(t, 0, "/Sessions/Playing", 0)
+		f.send(t, 0, "/Sessions/Playing/Progress", 950)
+		f.assertProgress(t, 950, false, "server-a")
+		f.send(t, 0, "/Sessions/Playing/Progress", 800)
+		f.assertProgress(t, 800, false, "server-a")
+		f.send(t, 0, "/Sessions/Playing/Stopped", 800)
+		f.assertProgress(t, 800, false, "server-a")
+	})
+}
+
 func TestUnifiedSharedOwnerAndLateResponse(t *testing.T) {
 	withUnifiedWatchFixture(t, func(f *unifiedWatchFixture) {
 		f.send(t, 0, "/Sessions/Playing", 0)
@@ -218,6 +244,8 @@ func TestUnifiedSharedOwnerAndLateResponse(t *testing.T) {
 		f.send(t, 0, "/Sessions/Playing/Stopped", 850)
 		f.assertProgress(t, 300, false, "server-b")
 		f.send(t, 1, "/Sessions/Playing/Progress", 900)
+		f.assertProgress(t, 900, false, "server-b")
+		f.send(t, 1, "/Sessions/Playing/Stopped", 900)
 		f.assertProgress(t, 0, true, "server-b")
 	})
 }

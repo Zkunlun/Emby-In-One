@@ -44,6 +44,15 @@ func (l *PlaybackLimiter) RemoveLifecycle(userID, serverID string) {
    delete(l.streams, key)
   }
  }
+ // Lifecycle removal is not playback completion; discard pending expiries.
+ kept := l.expired[:0]
+ for _, expiry := range l.expired {
+  if (userID == "" || expiry.Key.UserID == userID) && (serverID == "" || expiry.Key.ServerID == serverID) {
+   continue
+  }
+  kept = append(kept, expiry)
+ }
+ l.expired = kept
 }
 
 // Detach removes all source identity from the coordinator, retaining only the

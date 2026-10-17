@@ -20,16 +20,52 @@ type streamEntry struct {
 	Revision      uint64
 }
 
+// Record expired leases before discarding them, for deferred local settlement.
+type expiredPlaybackLease struct {
+	Key   streamKey
+	Entry streamEntry
+}
+
 func playbackLeaseExpired(now time.Time, entry *streamEntry) bool {
 	return entry == nil || now.Sub(entry.LastHeartbeat) >= playbackHeartbeatTimeout
+}
+
+func (l *PlaybackLimiter) expireLocked(key streamKey, entry *streamEntry) {
+	if entry != nil && entry.PlaySessionID != "" && entry.ItemID != "" {
+		l.expired = append(l.expired, expiredPlaybackLease{Key: key, Entry: *entry})
+	}
+	delete(l.streams, key)
 }
 
 func (l *PlaybackLimiter) pruneExpiredLocked(now time.Time) {
 	for key, entry := range l.streams {
 		if playbackLeaseExpired(now, entry) {
-			delete(l.streams, key)
+			l.expireLocked(key, entry)
 		}
 	}
+}
+
+// All expiry paths enqueue snapshots; the App settles them outside the limiter lock.
+func (l *PlaybackLimiter) takeExpired() []expiredPlaybackLease {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	pending := l.expired
+	l.expired = nil
+	return pending
+}
+
+// A transient SQLite failure must not permanently discard the only expiry proof.
+func (l *PlaybackLimiter) retryExpired(lease expiredPlaybackLease) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.expired = append(l.expired, lease)
+}
+
+func (l *PlaybackLimiter) hasCurrentLease(key streamKey) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, exists := l.streams[key]
+	return exists
 }
 
 // playbackLeaseResult reports whether a lease reservation was accepted, whether
@@ -46,6 +82,7 @@ type playbackLeaseResult struct {
 type PlaybackLimiter struct {
 	mu           sync.Mutex
 	streams      map[streamKey]*streamEntry
+	expired      []expiredPlaybackLease
 	nextRevision uint64
 }
 
@@ -82,7 +119,7 @@ func (l *PlaybackLimiter) Reserve(userID string, serverID string, deviceID strin
 	key := streamKey{UserID: userID, ServerID: serverID}
 	if existing, ok := l.streams[key]; ok {
 		if playbackLeaseExpired(now, existing) {
-			delete(l.streams, key)
+			l.expireLocked(key, existing)
 		} else if existing.DeviceID != deviceID {
 			return playbackLeaseResult{}
 		} else {
@@ -146,7 +183,7 @@ func (l *PlaybackLimiter) Heartbeat(userID string, serverID string, deviceID str
 		return false
 	}
 	if playbackLeaseExpired(now, entry) {
-		delete(l.streams, key)
+		l.expireLocked(key, entry)
 		return false
 	}
 	if entry.DeviceID != deviceID {
@@ -172,7 +209,7 @@ func (l *PlaybackLimiter) Stop(userID string, serverID string, deviceID string, 
 	}
 	now := time.Now()
 	if playbackLeaseExpired(now, entry) {
-		delete(l.streams, key)
+		l.expireLocked(key, entry)
 		return false
 	}
 	if entry.DeviceID != deviceID {

@@ -58,7 +58,7 @@ func TestUnifiedTickParsingAndOverflowSafeThreshold(t *testing.T) {
 	source := playbackWatchSource{ServerID: "a", OriginalItemID: "i", MediaSourceID: "m"}
 	for _, runtime := range []int64{1, 11, 101, 1000, math.MaxInt64} {
 		boundary := runtime - runtime/10
-		event := playbackWatchEvent{Kind: playbackWatchProgress, Source: source, Runtime: validPlaybackTicks(runtime)}
+		event := playbackWatchEvent{Kind: playbackWatchStopped, Source: source, Runtime: validPlaybackTicks(runtime)}
 		event.Position = validPlaybackTicks(boundary - 1)
 		if event.completionCandidate() {
 			t.Fatalf("completed below integer boundary runtime=%d", runtime)
@@ -66,6 +66,10 @@ func TestUnifiedTickParsingAndOverflowSafeThreshold(t *testing.T) {
 		event.Position = validPlaybackTicks(boundary)
 		if !event.completionCandidate() {
 			t.Fatalf("missed integer boundary runtime=%d", runtime)
+		}
+		event.Kind = playbackWatchProgress
+		if event.completionCandidate() {
+			t.Fatalf("progress completed before stopped runtime=%d", runtime)
 		}
 	}
 }

@@ -179,10 +179,10 @@ func TestWatchStoreGetResumeItems(t *testing.T) {
 		ProxyUserID: "user1", VirtualItemID: "item1",
 		PositionTicks: 100, RuntimeTicks: 1000,
 	})
-	// Item fully played → should NOT appear in resume
+	// Completed item without an active rewatch → should NOT appear in resume
 	ws.RecordProgress(&WatchProgress{
 		ProxyUserID: "user1", VirtualItemID: "item2",
-		PositionTicks: 900, RuntimeTicks: 1000, Played: true,
+		PositionTicks: 0, RuntimeTicks: 1000, Played: true,
 	})
 	// Item with no position → should NOT appear in resume
 	ws.RecordProgress(&WatchProgress{
@@ -478,7 +478,7 @@ func TestGetResumeItemsSeriesGrouping(t *testing.T) {
 			ServerID: "srv-0", OriginalItemID: fmt.Sprintf("orig-%d", i),
 			ItemType: "Episode", SeriesName: "三体", SeriesVirtualID: "series-1",
 			ParentIndexNumber: 1, IndexNumber: i,
-			PositionTicks: 100, RuntimeTicks: 100, Played: true,
+			PositionTicks: 0, RuntimeTicks: 100, Played: true,
 		})
 	}
 	// 三体 E6: 50% progress, not played
@@ -526,7 +526,7 @@ func TestGetResumeItemsSeriesGrouping(t *testing.T) {
 
 	// Expected order by last_played DESC: Movie A (8000), 三体 E7 (7000), Movie B (5000)
 	// 三体: only E7 appears (latest), E6 is grouped out
-	// E1-E5: played=true, excluded by position>0 && played=0 filter
+	// E1-E5: played=true and position=0, so they have no current resume point
 	if len(items) != 3 {
 		t.Fatalf("expected 3 items, got %d: %+v", len(items), items)
 	}

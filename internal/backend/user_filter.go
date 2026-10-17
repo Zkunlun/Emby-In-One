@@ -260,7 +260,7 @@ func satisfiesUserState(p WatchProgress, f userStateFilter) bool {
 	if f.played && !p.Played {
 		return false
 	}
-	if f.resumable && !(p.PositionTicks > 0 && !p.Played) {
+	if f.resumable && p.PositionTicks <= 0 {
 		return false
 	}
 	return true
@@ -320,7 +320,7 @@ func satisfiesCandidateUserState(p WatchProgress, exists bool, f userStateFilter
 	if f.played && (!exists || !p.Played) {
 		return false
 	}
-	if f.resumable && (!exists || !(p.PositionTicks > 0 && !p.Played)) {
+	if f.resumable && (!exists || p.PositionTicks <= 0) {
 		return false
 	}
 	if f.unplayed && exists && p.Played {

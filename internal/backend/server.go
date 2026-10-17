@@ -133,18 +133,19 @@ func (a *App) Run() error {
 	evictCtx, evictCancel := context.WithCancel(context.Background())
 	defer evictCancel()
 	go func() {
-		ticker := time.NewTicker(30 * time.Minute)
-		defer ticker.Stop()
+		maintenanceTicker := time.NewTicker(30 * time.Minute)
+		defer maintenanceTicker.Stop()
+		leaseTicker := time.NewTicker(time.Minute)
+		defer leaseTicker.Stop()
 		for {
 			select {
 			case <-evictCtx.Done():
 				return
-			case <-ticker.C:
+			case <-maintenanceTicker.C:
 				a.IDStore.evictExpiredStreamState()
 				a.loginLimiter.cleanup()
-				if a.PlaybackLimiter != nil {
-					a.PlaybackLimiter.Cleanup()
-				}
+			case <-leaseTicker.C:
+				a.settleExpiredPlaybackLeases()
 			}
 		}
 	}()

@@ -236,7 +236,8 @@ func (ws *WatchStore) SetFavorite(proxyUserID, virtualItemID string, favorite bo
 	`, proxyUserID, virtualItemID, boolToInt(favorite), now)
 }
 
-// GetResumeItems returns items with position > 0 and not fully played, ordered by last_played desc.
+// GetResumeItems returns items with a saved position, including previously played
+// titles being rewatched. Played is historical and independent of resume state.
 func (ws *WatchStore) GetResumeItems(proxyUserID string, limit int) ([]WatchProgress, error) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
@@ -258,7 +259,7 @@ func (ws *WatchStore) GetResumeItems(proxyUserID string, limit int) ([]WatchProg
 				ORDER BY last_played DESC
 			) AS rn
 			FROM user_watch_progress
-			WHERE proxy_user_id = ? AND position_ticks > 0 AND played = 0
+			WHERE proxy_user_id = ? AND position_ticks > 0
 		)
 		WHERE rn = 1
 		ORDER BY last_played DESC
@@ -332,7 +333,7 @@ func (ws *WatchStore) GetResumableItems(proxyUserID string) ([]WatchProgress, er
 			parent_index_number, index_number, name, production_year, provider_tmdb,
 			position_ticks, runtime_ticks, played, is_favorite, last_played, updated_at
 		FROM user_watch_progress
-		WHERE proxy_user_id = ? AND position_ticks > 0 AND played = 0
+		WHERE proxy_user_id = ? AND position_ticks > 0
 		ORDER BY last_played DESC
 	`)
 	if err != nil {

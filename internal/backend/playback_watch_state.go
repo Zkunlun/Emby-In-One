@@ -209,7 +209,7 @@ func playbackWatchEventFromQuery(kind playbackWatchEventKind, query url.Values) 
 }
 
 func (event playbackWatchEvent) completionCandidate() bool {
-	if (event.Kind != playbackWatchProgress && event.Kind != playbackWatchStopped) ||
+	if event.Kind != playbackWatchStopped ||
 		event.Failed || event.Live || !event.Source.valid() ||
 		!event.Position.valid() || !event.Runtime.valid() ||
 		event.Position.Ticks <= 0 || event.Runtime.Ticks <= 0 {

@@ -28,8 +28,7 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 				}
 				merged := a.mergedItemsPayload(results, a.clientFacingUserIDFor(r), reqCtx)
 				items := asItems(merged)
-				a.overlayLocalUserDataItems(r, items)
-				writeJSON(w, http.StatusOK, paginateItems(items, r.URL.Query()))
+				a.writePagedUserItems(w, r, items)
 				return
 			}
 			a.handleFallbackProxy(w, r)
@@ -43,8 +42,7 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 		items := asItems(merged)
 		kept, recency := a.filterItemsByLocalUserState(r, items, filter)
 		localItemSort(kept, r.URL.Query(), recency)
-		a.overlayLocalUserDataItems(r, kept)
-		writeJSON(w, http.StatusOK, paginateItems(kept, r.URL.Query()))
+		a.writePagedUserItems(w, r, kept)
 		return
 	}
 	// The candidate set is the ID list the client sent, so a user-state filter can be
@@ -95,8 +93,7 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 	if localFilter {
 		kept, recency := a.filterItemsByLocalUserState(r, items, filter)
 		localItemSort(kept, r.URL.Query(), recency)
-		a.overlayLocalUserDataItems(r, kept)
-		writeJSON(w, http.StatusOK, paginateItems(kept, r.URL.Query()))
+		a.writePagedUserItems(w, r, kept)
 		return
 	}
 	a.overlayLocalUserDataItems(r, items)
@@ -142,8 +139,7 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 		if localFilter {
 			kept, recency := a.filterItemsByLocalUserState(r, items, filter)
 			localItemSort(kept, r.URL.Query(), recency)
-			a.overlayLocalUserDataItems(r, kept)
-			writeJSON(w, http.StatusOK, paginateItems(kept, r.URL.Query()))
+			a.writePagedUserItems(w, r, kept)
 			return
 		}
 		a.overlayLocalUserDataItems(r, items)
@@ -177,15 +173,13 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 		if localFilter {
 			kept, recency := a.filterItemsByLocalUserState(r, asMaps, filter)
 			localItemSort(kept, r.URL.Query(), recency)
-			a.overlayLocalUserDataItems(r, kept)
-			writeJSON(w, http.StatusOK, paginateItems(kept, r.URL.Query()))
+			a.writePagedUserItems(w, r, kept)
 			return
 		}
 		if len(asMaps) >= mergedItemsScanLimit {
 			a.warnTruncatedMerge(len(asMaps))
 		}
-		a.overlayLocalUserDataItems(r, asMaps)
-		writeJSON(w, http.StatusOK, paginateItems(asMaps, r.URL.Query()))
+		a.writePagedUserItems(w, r, asMaps)
 		return
 	}
 	writeJSON(w, http.StatusOK, merged)
@@ -312,8 +306,7 @@ func (a *App) handleItemSimilar(w http.ResponseWriter, r *http.Request) {
 	if localFilter {
 		kept, recency := a.filterItemsByLocalUserState(r, items, filter)
 		localItemSort(kept, r.URL.Query(), recency)
-		a.overlayLocalUserDataItems(r, kept)
-		writeJSON(w, http.StatusOK, paginateItems(kept, r.URL.Query()))
+		a.writePagedUserItems(w, r, kept)
 		return
 	}
 	a.overlayLocalUserDataItems(r, items)
@@ -604,6 +597,15 @@ func (a *App) warnTruncatedMerge(count int) {
 	}
 	a.Logger.Warnf("merged item query scanned %d upstream items (limit %d): the total and the tail of the list may be truncated",
 		count, mergedItemsScanLimit)
+}
+
+// Overlay only the rows the client will actually receive. The full candidate
+// set is still used for cross-source merge, local filtering and accurate totals.
+// Overlaying thousands of off-page rows wastes SQLite batch reads and heap.
+func (a *App) writePagedUserItems(w http.ResponseWriter, r *http.Request, items []map[string]any) {
+	page := paginateItems(items, r.URL.Query())
+	a.overlayLocalUserDataItems(r, asItems(page))
+	writeJSON(w, http.StatusOK, page)
 }
 
 func paginateItems(merged []map[string]any, query url.Values) map[string]any {

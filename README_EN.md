@@ -9,7 +9,7 @@ A multi-upstream aggregation proxy for Emby clients: one entry point for multipl
 
 This project continues development and maintenance of [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One).
 
-**Version note:** **V1.4.10** focuses on SNTP search, preserving selectable media versions, and outbound Emby API compatibility. See [GitHub Releases](https://github.com/Zkunlun/Emby-In-One/releases) for the latest formally published version, the [changelog](Update.md) and the [release validation scope](docs/en/release-v1.4.10-validation.md).
+**Version note:** **V1.4.11** improves played-state finalization, rewatch resume, expired playback lease settlement, and paged UserData overlay. See [GitHub Releases](https://github.com/Zkunlun/Emby-In-One/releases) for the latest formally published version, the [changelog](Update.md) and the [release validation scope](docs/en/release-v1.4.11-validation.md).
 
 ## Who this is for
 

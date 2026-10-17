@@ -113,7 +113,7 @@ func (ws *WatchStore) GetVisiblePlayedItems(scope mediaAccessScope) ([]WatchProg
 }
 
 func (ws *WatchStore) GetVisibleResumableItems(scope mediaAccessScope) ([]WatchProgress, error) {
-	return ws.visibleWatchRows(scope, "w.position_ticks > 0 AND w.played = 0", " ORDER BY w.last_played DESC, w.virtual_item_id")
+	return ws.visibleWatchRows(scope, "w.position_ticks > 0", " ORDER BY w.last_played DESC, w.virtual_item_id")
 }
 
 // Filter before ROW_NUMBER and LIMIT: an unauthorized episode must not displace
@@ -147,7 +147,7 @@ func (ws *WatchStore) visibleResumeRows(scope mediaAccessScope, parentID string,
 			ORDER BY w.last_played DESC, w.virtual_item_id
 		) AS rn
 		FROM ` + mergedVisibleWatchTable + ` WHERE ` + where + `
-			AND w.position_ticks > 0 AND w.played = 0
+			AND w.position_ticks > 0
 	) WHERE rn = 1 ORDER BY last_played DESC, virtual_item_id`
 	if limit > 0 {
 		query += " LIMIT ?"

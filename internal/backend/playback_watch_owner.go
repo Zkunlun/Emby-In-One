@@ -25,6 +25,7 @@ type playbackWatchSharedState struct {
 	Session             playbackWatchSession
 	Active              bool
 	Detached            bool
+	PendingStopped      bool
 	RebasedFromRevision int64
 	RebasedRevision     int64
 	RebasedTokens       map[string]bool // Digests of tokens still issued at the deletion boundary.
@@ -154,6 +155,9 @@ func (cache *playbackWatchCache) admit(key playbackWatchCacheKey, kind playbackW
 	entry.NextSequence++
 	state.Seen = now
 	state.NextSequence++
+	if kind == playbackWatchStopped {
+		state.PendingStopped = true
+	}
 	return &playbackWatchAdmission{
 		SharedKey: sharedKey, State: state, ResetRevision: state.ResetRevision,
 		Generation: state.Generation, Sequence: state.NextSequence, Kind: kind, Session: session,
@@ -222,6 +226,7 @@ func (cache *playbackWatchCache) commitAdmitted(admission *playbackWatchAdmissio
 		state.TerminalSequence, state.TerminalSession = admission.Sequence, session
 		state.TerminalGeneration = state.Generation
 		state.Active = false
+		state.PendingStopped = false
 		for key, peer := range cache.entries {
 			if samePlaybackWatchScope(snapshot.Key, key) {
 				peer.Closed = true
@@ -243,6 +248,7 @@ func (cache *playbackWatchCache) claimStartedLocked(admission *playbackWatchAdmi
 	state.StartedSequence = admission.Sequence
 	state.LastCommitted = admission.Sequence
 	state.Session, state.Active = session, true
+	state.PendingStopped = false
 	state.Detached = false
 	state.RebasedFromRevision, state.RebasedRevision = -1, -1
 	state.RebasedTokens = nil
