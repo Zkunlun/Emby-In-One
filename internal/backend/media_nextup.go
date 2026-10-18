@@ -106,7 +106,12 @@ func (a *App) handleLocalNextUp(w http.ResponseWriter, r *http.Request, reqCtx *
 			writeJSON(w, http.StatusOK, empty)
 			return
 		}
-		nextEp := a.fetchNextEpisode(r, reqCtx, resolved.Client, resolved.OriginalID, resolved.ServerID, seriesProgress)
+		allowedAtStart := a.isServerAllowed(reqCtx, resolved.ServerID)
+		nextEp, loaded := a.fetchNextEpisode(r, reqCtx, resolved.Client, resolved.OriginalID, resolved.ServerID, seriesProgress)
+		if allowedAtStart && !loaded && r.Context().Err() == nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Upstream next-up metadata unavailable"})
+			return
+		}
 		if nextEp == nil || !a.isServerAllowed(reqCtx, resolved.ServerID) {
 			writeJSON(w, http.StatusOK, empty)
 			return
@@ -135,13 +140,21 @@ func (a *App) handleLocalNextUp(w http.ResponseWriter, r *http.Request, reqCtx *
 	}
 
 	var nextUpItems []map[string]any
+	attempted, confirmed := 0, 0
 	for _, sp := range seriesList {
 		resolved, err := a.resolveAuthorizedRouteID(reqCtx, sp.SeriesVirtualID)
 		if err != nil || resolved == nil {
 			continue
 		}
 		serverID, seriesOrigID, client := resolved.ServerID, resolved.OriginalID, resolved.Client
-		nextEp := a.fetchNextEpisode(r, reqCtx, client, seriesOrigID, serverID, &sp)
+		if !a.isServerAllowed(reqCtx, serverID) {
+			continue
+		}
+		attempted++
+		nextEp, loaded := a.fetchNextEpisode(r, reqCtx, client, seriesOrigID, serverID, &sp)
+		if loaded {
+			confirmed++
+		}
 		if nextEp != nil && a.isServerAllowed(reqCtx, serverID) {
 			items := a.projectNextEpisode(r, nextEp, serverID, &sp)
 			a.overlayLocalUserDataItems(r, items)
@@ -149,6 +162,12 @@ func (a *App) handleLocalNextUp(w http.ResponseWriter, r *http.Request, reqCtx *
 		}
 	}
 
+	if attempted > 0 && confirmed == 0 {
+		if r.Context().Err() == nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Upstream next-up metadata unavailable"})
+		}
+		return
+	}
 	writeJSON(w, http.StatusOK, watchResponsePage(nextUpItems, query))
 }
 
@@ -183,9 +202,12 @@ func (a *App) resolveSeriesServer(sp *WatchProgress) (serverID string, seriesOri
 
 // fetchNextEpisode queries the upstream for the next unwatched episode after
 // the user's last played episode in a series.
-func (a *App) fetchNextEpisode(r *http.Request, reqCtx *RequestContext, client *UpstreamClient, seriesOriginalID string, serverID string, lastPlayed *WatchProgress) map[string]any {
+// The second result reports a confirmed upstream request, even if the source
+// genuinely has no next episode. This prevents HTTP errors from becoming an
+// indistinguishable empty NextUp page while retaining offline/empty behavior.
+func (a *App) fetchNextEpisode(r *http.Request, reqCtx *RequestContext, client *UpstreamClient, seriesOriginalID string, serverID string, lastPlayed *WatchProgress) (map[string]any, bool) {
 	if !a.isServerAllowed(reqCtx, serverID) {
-		return nil
+		return nil, false
 	}
 	q := url.Values{}
 	q.Set("Fields", "BasicSyncInfo,CanDelete,PrimaryImageAspectRatio,Overview,DateCreated,MediaSources,Path,SortName,Studios,Taglines,Genres,CommunityRating,OfficialRating,CumulativeRunTimeTicks,Chapters,ProviderIds")
@@ -196,7 +218,7 @@ func (a *App) fetchNextEpisode(r *http.Request, reqCtx *RequestContext, client *
 
 	payload, err := client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Shows/"+seriesOriginalID+"/Episodes", q, nil)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	items := asItems(payload)
 	// Find the first episode after the user's last played one
@@ -212,12 +234,12 @@ func (a *App) fetchNextEpisode(r *http.Request, reqCtx *RequestContext, client *
 			// If the current episode is not fully played yet (still in progress),
 			// it IS the next-up item (user hasn't finished it)
 			if !lastPlayed.Played && lastPlayed.PositionTicks > 0 {
-				return ep
+				return ep, true
 			}
 			continue
 		}
 		if foundCurrent {
-			return ep
+			return ep, true
 		}
 		// The remembered episode is not in this page — an upstream that renumbered the
 		// season, or a page that stops before reaching it. Remember the first same-season
@@ -231,18 +253,18 @@ func (a *App) fetchNextEpisode(r *http.Request, reqCtx *RequestContext, client *
 		}
 		// Handle case where episodes are in a later season
 		if parentIdx > lastPlayed.ParentIndexNumber {
-			return ep
+			return ep, true
 		}
 	}
 	if sameSeasonFallback != nil {
-		return sameSeasonFallback
+		return sameSeasonFallback, true
 	}
 
 	// If we didn't find a next episode in this season and the current one was played,
 	// try the next season
 	if lastPlayed.Played {
 		if !a.isServerAllowed(reqCtx, client.ID) {
-			return nil
+			return nil, true
 		}
 		q2 := url.Values{}
 		q2.Set("Fields", q.Get("Fields"))
@@ -253,12 +275,15 @@ func (a *App) fetchNextEpisode(r *http.Request, reqCtx *RequestContext, client *
 		q2.Set("Limit", "1")
 
 		payload2, err2 := client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Shows/"+seriesOriginalID+"/Episodes", q2, nil)
-		if err2 == nil {
-			items2 := asItems(payload2)
-			if len(items2) > 0 {
-				return items2[0]
-			}
+		if err2 != nil {
+			// The next-season lookup is required to determine NextUp. A
+			// successful empty current season cannot mask its upstream failure.
+			return nil, false
+		}
+		items2 := asItems(payload2)
+		if len(items2) > 0 {
+			return items2[0], true
 		}
 	}
-	return nil
+	return nil, true
 }

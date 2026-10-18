@@ -92,14 +92,20 @@ func (a *App) handleLocalResume(w http.ResponseWriter, r *http.Request, reqCtx *
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"message": "Failed to read resume state"})
 		return
 	}
-	enriched := a.enrichWatchItems(r, reqCtx, items)
+	enriched, metadataUnavailable := a.enrichWatchItems(r, reqCtx, items)
+	if metadataUnavailable {
+		if r.Context().Err() == nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Upstream resume metadata unavailable"})
+		}
+		return
+	}
 	writeJSON(w, http.StatusOK, watchResponsePage(enriched, query))
 }
 
 // enrichWatchItems fetches fresh metadata from upstream for a list of WatchProgress items,
 // groups by server, batch-fetches via GET /Items?Ids=..., overlays local UserData.
 // When a recorded server is offline, items are remapped to an online OtherInstance via IDStore.
-func (a *App) enrichWatchItems(r *http.Request, reqCtx *RequestContext, items []WatchProgress) []map[string]any {
+func (a *App) enrichWatchItems(r *http.Request, reqCtx *RequestContext, items []WatchProgress) ([]map[string]any, bool) {
 
 	// Group by server ID, remapping offline servers to online alternatives
 	type serverGroup struct {
@@ -131,6 +137,7 @@ func (a *App) enrichWatchItems(r *http.Request, reqCtx *RequestContext, items []
 	}
 	// Original item IDs belong to an upstream namespace, not a global one.
 	fetched := map[metadataKey]map[string]any{}
+	attempted, confirmed := 0, 0
 	for serverID, g := range groups {
 		client := a.Upstream.ClientByID(serverID)
 		if client == nil || !client.IsOnline() || !a.isServerAllowed(reqCtx, serverID) {
@@ -147,10 +154,12 @@ func (a *App) enrichWatchItems(r *http.Request, reqCtx *RequestContext, items []
 				break
 			}
 			q.Set("Ids", joinComma(g.originalIDs[start:end]))
+			attempted++
 			payload, err := client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Items", q, nil)
 			if err != nil || !a.isServerAllowed(reqCtx, serverID) {
 				continue
 			}
+			confirmed++
 			for _, item := range asItems(payload) {
 				if id, _ := item["Id"].(string); id != "" {
 					fetched[metadataKey{serverID: serverID, originalID: id}] = item
@@ -185,7 +194,10 @@ func (a *App) enrichWatchItems(r *http.Request, reqCtx *RequestContext, items []
 		result = append(result, item)
 	}
 	a.overlayLocalUserDataItems(r, result)
-	return result
+	// A real upstream 200 (even with zero rows) is not a request failure.
+	// Offline/unresolvable authorized history has zero attempts and retains
+	// its existing empty response; never infer an outage from its absence.
+	return result, attempted > 0 && confirmed == 0
 }
 
 // resolveWatchItemServer returns the serverID and originalItemID to use for
