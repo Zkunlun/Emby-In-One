@@ -126,7 +126,9 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 		removePathScopedItemsUserQuery(query)
 		payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Users/"+resolved.Client.clientUserID()+"/Items", query, nil)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
+			// The upstream HTTP error may include its raw response body, which is
+			// internal diagnostic data rather than a client-safe API message.
+			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Upstream items request failed"})
 			return
 		}
 		if !a.requireServerAccess(w, r, resolved) {
@@ -212,7 +214,9 @@ func (a *App) handleUserItemsLatest(w http.ResponseWriter, r *http.Request) {
 		fullSources := requestMergeFields(query)
 		payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Users/"+resolved.Client.clientUserID()+"/Items/Latest", query, nil)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
+			// Keep real gateway failures visible without disclosing the upstream
+			// response body or source-specific internal diagnostics.
+			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Upstream latest items request failed"})
 			return
 		}
 		if !a.requireServerAccess(w, r, resolved) {
