@@ -389,20 +389,26 @@ func TestAdminPanelEmptyPasswordEditingContract(t *testing.T) {
 			t.Error("saveServer must submit the current password field verbatim, including an empty string")
 		}
 
-		// Editing a regular user uses the recoverable password returned by the admin
-		// API. A normal save always sends the field, so manually clearing it sets an
-		// empty password. toggleUser remains a separate partial update.
-		if strings.Contains(js, "this.userForm = { username:u.username, password:'',") {
-			t.Error("editUser still blanks the password instead of refilling the current password")
+		// Editing a regular user preserves the existing password by default.
+		// It must not refill recoverable credentials into a browser input or send
+		// password on an unrelated update. A deliberate set/clear remains available.
+		if !strings.Contains(js, "this.userForm = { username:u.username, password:'',") {
+			t.Error("editUser must start with a blank password input, not expose the old password")
 		}
-		if !strings.Contains(js, "password:u.password") {
-			t.Error("editUser must refill userForm.password from the admin user payload")
+		if strings.Contains(js, "password:u.password") {
+			t.Error("editUser must not refill the existing password from the admin user payload")
+		}
+		if !strings.Contains(js, "this.userPasswordMode = 'keep'") || !strings.Contains(js, "if (this.userPasswordMode === 'set')") || !strings.Contains(js, "this.userPasswordMode === 'clear'") {
+			t.Error("editUser must provide explicit keep/set/clear password intents")
 		}
 		if strings.Contains(js, "if (this.userForm.password) body.password = this.userForm.password") {
 			t.Error("saveUser still drops an explicit empty password during edit")
 		}
-		if !strings.Contains(js, "body.password = this.userForm.password") {
-			t.Error("editing a user must submit password even when it is empty")
+		if !strings.Contains(js, "body.password = this.userForm.password") || !strings.Contains(js, "body.password = ''") {
+			t.Error("explicit password set must submit the new value; explicit clear must submit an empty password")
+		}
+		if !strings.Contains(html, `v-model="userPasswordMode"`) || !strings.Contains(html, `value="keep"`) || !strings.Contains(html, `value="clear"`) {
+			t.Error("the user editor must expose explicit keep and clear password modes")
 		}
 
 		// Empty is a valid password; only a non-empty password is constrained to
