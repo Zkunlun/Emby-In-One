@@ -14,7 +14,7 @@ func (a *App) handleShowsNextUp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := cloneValues(r.URL.Query())
-	seriesID := query.Get("SeriesId")
+	seriesID := firstQueryValue(query, "SeriesId", "seriesId", "seriesid")
 	if seriesID != "" {
 		resolved, routeOK := a.resolveRequestRouteID(w, r, seriesID)
 		if !routeOK {
@@ -32,14 +32,18 @@ func (a *App) handleShowsNextUp(w http.ResponseWriter, r *http.Request) {
 		for _, inst := range instances {
 			originalIDs[inst.OriginalID] = struct{}{}
 		}
+		successful := false
 		for _, inst := range instances {
 			instQuery := cloneValues(query)
 			instQuery.Set("SeriesId", inst.OriginalID)
+			instQuery.Del("seriesId")
+			instQuery.Del("seriesid")
 			requestMergeFields(instQuery)
 			payload, err := inst.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Shows/NextUp", instQuery, nil)
 			if err != nil {
 				continue
 			}
+			successful = true
 			filtered := filterSeriesItems(asItems(payload), originalIDs)
 			if len(filtered) > 0 {
 				for _, item := range filtered {
@@ -52,10 +56,17 @@ func (a *App) handleShowsNextUp(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if len(instances) > 0 && !successful {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "All available upstream media requests failed"})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"Items": []any{}, "TotalRecordCount": 0, "StartIndex": 0})
 		return
 	}
 	results := a.fetchItemsAcrossUpstreams(r.Context(), requestContextFrom(r.Context()), "/Shows/NextUp", query, nil)
+	if a.failAllMediaListUpstreams(w, r, results) {
+		return
+	}
 	writeJSON(w, http.StatusOK, a.mergedItemsPayload(results, a.clientFacingUserIDFor(r), reqCtx))
 }
 
@@ -66,7 +77,7 @@ func (a *App) handleLocalNextUp(w http.ResponseWriter, r *http.Request, reqCtx *
 	empty := map[string]any{"Items": []any{}, "TotalRecordCount": 0, "StartIndex": 0}
 
 	// If SeriesId specified, only compute for that series
-	seriesID := query.Get("SeriesId")
+	seriesID := firstQueryValue(query, "SeriesId", "seriesId", "seriesid")
 	if seriesID != "" {
 		resolved, routeOK := a.resolveRequestRouteID(w, r, seriesID)
 		if !routeOK {

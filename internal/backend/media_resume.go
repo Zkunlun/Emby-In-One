@@ -16,7 +16,7 @@ func (a *App) handleUserItemsResume(w http.ResponseWriter, r *http.Request) {
 	}
 	query := cloneValues(r.URL.Query())
 	parentID := firstQueryValue(query, "ParentId", "parentId", "parentid")
-	if parentID != "" {
+	if parentID != "" && !isRootMediaParent(parentID) {
 		resolved, routeOK := a.resolveRequestRouteID(w, r, parentID)
 		if !routeOK {
 			return
@@ -33,6 +33,7 @@ func (a *App) handleUserItemsResume(w http.ResponseWriter, r *http.Request) {
 		for _, inst := range instances {
 			originalIDs[inst.OriginalID] = struct{}{}
 		}
+		successful := false
 		for _, inst := range instances {
 			instQuery := cloneValues(query)
 			instQuery.Set("ParentId", inst.OriginalID)
@@ -43,6 +44,7 @@ func (a *App) handleUserItemsResume(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
+			successful = true
 			filtered := filterSeriesItems(asItems(payload), originalIDs)
 			if len(filtered) > 0 {
 				a.rewriteItems(filtered, inst.ServerID, a.clientFacingUserIDFor(r))
@@ -50,10 +52,18 @@ func (a *App) handleUserItemsResume(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if len(instances) > 0 && !successful {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "All available upstream media requests failed"})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"Items": []any{}, "TotalRecordCount": 0, "StartIndex": 0})
 		return
 	}
+	clearRootMediaParent(query)
 	results := a.fetchItemsAcrossUpstreams(r.Context(), requestContextFrom(r.Context()), "/Users/%s/Items/Resume", query, nil)
+	if a.failAllMediaListUpstreams(w, r, results) {
+		return
+	}
 	writeJSON(w, http.StatusOK, a.mergedItemsPayload(results, a.clientFacingUserIDFor(r), reqCtx))
 }
 
@@ -62,10 +72,14 @@ func (a *App) handleUserItemsResume(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleLocalResume(w http.ResponseWriter, r *http.Request, reqCtx *RequestContext) {
 	query := cloneValues(r.URL.Query())
 	parentID := firstQueryValue(query, "ParentId", "parentId", "parentid")
-	if parentID != "" {
+	if parentID != "" && !isRootMediaParent(parentID) {
 		if _, routeOK := a.resolveRequestRouteID(w, r, parentID); !routeOK {
 			return
 		}
+	}
+	if isRootMediaParent(parentID) {
+		parentID = ""
+		clearRootMediaParent(query)
 	}
 	var items []WatchProgress
 	err := a.withVisibleWatchScope(reqCtx, true, func(scope mediaAccessScope) error {

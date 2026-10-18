@@ -103,7 +103,7 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 	query := cloneValues(r.URL.Query())
 	parentID := firstQueryValue(query, "ParentId", "parentId", "parentid")
-	if parentID != "" && parentID != "0" && parentID != "root" {
+	if parentID != "" && !isRootMediaParent(parentID) {
 		resolved, routeOK := a.resolveRequestRouteID(w, r, parentID)
 		if !routeOK {
 			return
@@ -146,6 +146,7 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, payload)
 		return
 	}
+	clearRootMediaParent(query)
 	filter, localFilter := a.prepareLocalUserFilter(w, r, query)
 	if !localFilter {
 		if strings.TrimSpace(query.Get("SearchTerm")) != "" {
@@ -155,6 +156,9 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	results := a.fetchItemsAcrossUpstreams(r.Context(), requestContextFrom(r.Context()), "/Users/%s/Items", query, nil)
+	if a.failAllMediaListUpstreams(w, r, results) {
+		return
+	}
 	// Root-level listings include the library views themselves; some clients
 	// browse the root through this endpoint instead of /Users/{id}/Views, so
 	// hidden libraries must be dropped here too. Content items are never
@@ -188,8 +192,8 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleUserItemsLatest(w http.ResponseWriter, r *http.Request) {
 	query := cloneValues(r.URL.Query())
 	filter, localFilter := a.prepareLocalUserFilter(w, r, query)
-	parentID := query.Get("ParentId")
-	if parentID != "" {
+	parentID := firstQueryValue(query, "ParentId", "parentId", "parentid")
+	if parentID != "" && !isRootMediaParent(parentID) {
 		resolved, routeOK := a.resolveRequestRouteID(w, r, parentID)
 		if !routeOK {
 			return
@@ -202,6 +206,8 @@ func (a *App) handleUserItemsLatest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		query.Set("ParentId", resolved.OriginalID)
+		query.Del("parentId")
+		query.Del("parentid")
 		query.Set("UserId", resolved.Client.clientUserID())
 		fullSources := requestMergeFields(query)
 		payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Users/"+resolved.Client.clientUserID()+"/Items/Latest", query, nil)
@@ -223,6 +229,7 @@ func (a *App) handleUserItemsLatest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, items)
 		return
 	}
+	clearRootMediaParent(query)
 	reqCtx := requestContextFrom(r.Context())
 	clients := a.allowedClients(reqCtx)
 	cfg := a.ConfigStore.Snapshot()
@@ -256,6 +263,9 @@ func (a *App) handleUserItemsLatest(w http.ResponseWriter, r *http.Request) {
 		gracePeriod:   time.Duration(cfg.Timeouts.LatestGracePeriod) * time.Millisecond,
 		globalTimeout: globalTimeout,
 	}, tasks)
+	if a.failAllMediaListUpstreams(w, r, collected) {
+		return
+	}
 	collected = a.hydrateMergeResults(r, collected)
 	allItems := a.mergeRoundRobinItems(collected, a.clientFacingUserIDFor(r), reqCtx)
 	if localFilter {
@@ -630,6 +640,34 @@ func paginateItems(merged []map[string]any, query url.Values) map[string]any {
 		"TotalRecordCount": totalCount,
 		"StartIndex":       startIndex,
 	}
+}
+
+// The Emby root may be expressed by omitted ParentId, 0, or root.
+func isRootMediaParent(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "0" || strings.EqualFold(value, "root")
+}
+
+func clearRootMediaParent(query url.Values) {
+	if isRootMediaParent(firstQueryValue(query, "ParentId", "parentId", "parentid")) {
+		query.Del("ParentId")
+		query.Del("parentId")
+		query.Del("parentid")
+	}
+}
+
+// Partial results are allowed; only an actual total failure among reachable,
+// authorized sources becomes 502. Empty successful pages and zero accessible
+// online sources retain their existing successful empty-list contract.
+func (a *App) failAllMediaListUpstreams(w http.ResponseWriter, r *http.Request, successful []upstreamItemsResult) bool {
+	if len(successful) > 0 || len(a.allowedClients(requestContextFrom(r.Context()))) == 0 {
+		return false
+	}
+	if r.Context().Err() != nil {
+		return true
+	}
+	writeJSON(w, http.StatusBadGateway, map[string]any{"message": "All available upstream media requests failed"})
+	return true
 }
 
 func firstQueryValue(values url.Values, keys ...string) string {
