@@ -171,6 +171,20 @@ func (a *App) handleFallbackProxyWithWatchEvent(w http.ResponseWriter, r *http.R
 	_, _ = w.Write(bodyBytes)
 }
 
+// Query keys are case-insensitive at the Emby API boundary, even though Go's
+// url.Values keys and the static simpleIDFields map use exact casing.
+func fallbackSimpleIDField(key string) bool {
+	if _, ok := simpleIDFields[key]; ok {
+		return true
+	}
+	for canonical := range simpleIDFields {
+		if strings.EqualFold(canonical, key) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) resolveFallbackTarget(r *http.Request, reqCtx *RequestContext) (*UpstreamClient, string, string, url.Values, bool) {
 	query := cloneValues(r.URL.Query())
 	segments := strings.Split(r.URL.Path, "/")
@@ -211,7 +225,7 @@ func (a *App) resolveFallbackTarget(r *http.Request, reqCtx *RequestContext) (*U
 	}
 	for key, values := range query {
 		explicitSource := strings.EqualFold(key, "MediaSourceId") || strings.EqualFold(key, "PlaySessionId") || strings.EqualFold(key, "SessionId")
-		_, simple := simpleIDFields[key]
+		simple := fallbackSimpleIDField(key)
 		if !simple && !explicitSource && !isBatchIDQueryKey(key) {
 			continue
 		}
@@ -266,7 +280,7 @@ func (a *App) resolveFallbackTarget(r *http.Request, reqCtx *RequestContext) (*U
 		}
 	}
 	for key, values := range query {
-		_, simple := simpleIDFields[key]
+		simple := fallbackSimpleIDField(key)
 		if !simple && !isBatchIDQueryKey(key) && !strings.EqualFold(key, "MediaSourceId") &&
 			!strings.EqualFold(key, "PlaySessionId") && !strings.EqualFold(key, "SessionId") {
 			continue

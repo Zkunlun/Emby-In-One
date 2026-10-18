@@ -401,11 +401,17 @@ func (a *App) handleItemImage(w http.ResponseWriter, r *http.Request) {
 	imageQuery.Del("ApiKey")
 	resp, err := resolved.Client.Stream(r.Context(), requestContextFrom(r.Context()), a.Identity, imagePath, imageQuery)
 	if err != nil {
+		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+	} else {
+		// An upstream outage or missing image must not be cached for a day.
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	for _, header := range []string{"Content-Type", "Content-Length", "ETag", "Last-Modified", "Content-Range"} {
 		if value := resp.Header.Get(header); value != "" {
 			w.Header().Set(header, value)

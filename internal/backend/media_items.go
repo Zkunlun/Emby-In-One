@@ -303,7 +303,8 @@ func (a *App) handleItemSimilar(w http.ResponseWriter, r *http.Request) {
 	filter, localFilter := a.prepareLocalUserFilter(w, r, query)
 	payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Items/"+resolved.OriginalID+"/Similar", query, nil)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
+		// RequestJSON errors can embed full upstream responses and private details.
+		writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Upstream similar items request failed"})
 		return
 	}
 	if !a.requireServerAccess(w, r, resolved) {
@@ -343,7 +344,9 @@ func (a *App) handleItemThemeMedia(w http.ResponseWriter, r *http.Request) {
 	query.Set("UserId", resolved.Client.clientUserID())
 	payload, err := resolved.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, http.MethodGet, "/Items/"+resolved.OriginalID+"/ThemeMedia", query, nil)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"message": err.Error()})
+		// Upstream HTTP errors contain raw response bodies. Do not return them
+		// to media clients; keep the genuine gateway failure status instead.
+		writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Upstream theme media request failed"})
 		return
 	}
 	if !a.requireServerAccess(w, r, resolved) {
