@@ -31,7 +31,7 @@
           <label class="block text-sm font-medium mb-1">密码</label>
           <input type="password" v-model="loginForm.pass" @keyup.enter="doLogin" class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
         </div>
-        <button @click="doLogin" class="w-full btn-primary py-2.5 rounded-lg font-medium">登录</button>
+        <button @click="doLogin" :disabled="loginPending" class="w-full btn-primary py-2.5 rounded-lg font-medium">登录</button>
       </div>
     </div>
   </div>
@@ -100,14 +100,16 @@
     <header class="flex flex-wrap justify-between items-center mb-6 md:mb-8 gap-2">
       <div><h2 class="text-xl md:text-2xl font-bold">{{ pageTitle }}</h2></div>
       <div class="flex flex-wrap gap-2">
-        <button v-if="currentPage === 'servers'" @click="openAddServer" class="btn-primary px-4 md:px-5 py-2 rounded-lg flex items-center space-x-2"><i data-lucide="plus" class="w-4 h-4"></i><span class="hidden sm:inline">添加服务器</span></button>
-        <button v-if="currentPage === 'proxies'" @click="openAddProxy" class="btn-primary px-4 md:px-5 py-2 rounded-lg flex items-center space-x-2"><i data-lucide="plus" class="w-4 h-4"></i><span class="hidden sm:inline">添加代理</span></button>
-        <button v-if="currentPage === 'users'" @click="openAddUser" class="btn-primary px-4 md:px-5 py-2 rounded-lg flex items-center space-x-2"><i data-lucide="plus" class="w-4 h-4"></i><span class="hidden sm:inline">添加用户</span></button>
+        <button v-if="currentPage === 'servers'" @click="openAddServer" :disabled="mutationPending" class="btn-primary px-4 md:px-5 py-2 rounded-lg flex items-center space-x-2"><i data-lucide="plus" class="w-4 h-4"></i><span class="hidden sm:inline">添加服务器</span></button>
+        <button v-if="currentPage === 'proxies'" @click="openAddProxy" :disabled="mutationPending" class="btn-primary px-4 md:px-5 py-2 rounded-lg flex items-center space-x-2"><i data-lucide="plus" class="w-4 h-4"></i><span class="hidden sm:inline">添加代理</span></button>
+        <button v-if="currentPage === 'users'" @click="openAddUser" :disabled="mutationPending" class="btn-primary px-4 md:px-5 py-2 rounded-lg flex items-center space-x-2"><i data-lucide="plus" class="w-4 h-4"></i><span class="hidden sm:inline">添加用户</span></button>
         <button v-if="currentPage === 'logs'" @click="refreshLogs" class="bg-white border px-4 md:px-5 py-2 rounded-lg flex items-center space-x-2"><i data-lucide="refresh-cw" class="w-4 h-4"></i><span class="hidden sm:inline">刷新</span></button>
-        <button v-if="currentPage === 'logs'" @click="downloadLogs" class="bg-white border px-4 md:px-5 py-2 rounded-lg flex items-center space-x-2"><i data-lucide="download" class="w-4 h-4"></i><span class="hidden sm:inline">下载日志</span></button>
-        <button v-if="currentPage === 'logs'" @click="clearLogs" class="bg-white border px-4 md:px-5 py-2 rounded-lg flex items-center space-x-2 text-red-600 hover:bg-red-50"><i data-lucide="trash-2" class="w-4 h-4"></i><span class="hidden sm:inline">清空日志</span></button>
+        <button v-if="currentPage === 'logs'" @click="downloadLogs" :disabled="downloadingLogs" class="bg-white border px-4 md:px-5 py-2 rounded-lg flex items-center space-x-2"><i data-lucide="download" class="w-4 h-4"></i><span class="hidden sm:inline">下载日志</span></button>
+        <button v-if="currentPage === 'logs'" @click="clearLogs" :disabled="mutationPending" class="bg-white border px-4 md:px-5 py-2 rounded-lg flex items-center space-x-2 text-red-600 hover:bg-red-50"><i data-lucide="trash-2" class="w-4 h-4"></i><span class="hidden sm:inline">清空日志</span></button>
       </div>
     </header>
+    <p v-if="mutationPending" role="status" aria-live="polite" class="text-sm text-blue-700 bg-blue-50 rounded-lg px-4 py-2 mb-4">正在提交管理操作，请等待服务器确认，请勿重复提交。</p>
+    <div v-if="readError" role="alert" class="text-sm text-amber-700 bg-amber-50 rounded-lg px-4 py-2 mb-4 flex justify-between gap-3"><span>{{ readError }}</span><button @click="refresh" class="underline">重试刷新</button></div>
 
     <!-- Dashboard -->
     <div v-if="currentPage === 'dashboard'" class="space-y-6">
@@ -138,8 +140,8 @@
         <tbody class="divide-y divide-slate-100">
           <tr v-for="(s, idx) in upstreamList" :key="s.id || s.index" class="hover:bg-slate-50/50">
             <td class="px-6 py-4 flex flex-col space-y-1">
-              <button @click="reorder(idx, idx-1)" :disabled="idx===0" class="hover:text-blue-600 disabled:opacity-20"><i data-lucide="chevron-up" class="w-4 h-4"></i></button>
-              <button @click="reorder(idx, idx+1)" :disabled="idx===upstreamList.length-1" class="hover:text-blue-600 disabled:opacity-20"><i data-lucide="chevron-down" class="w-4 h-4"></i></button>
+              <button @click="reorder(idx, idx-1)" :disabled="mutationPending || idx===0" class="hover:text-blue-600 disabled:opacity-20"><i data-lucide="chevron-up" class="w-4 h-4"></i></button>
+              <button @click="reorder(idx, idx+1)" :disabled="mutationPending || idx===upstreamList.length-1" class="hover:text-blue-600 disabled:opacity-20"><i data-lucide="chevron-down" class="w-4 h-4"></i></button>
             </td>
             <td class="px-6 py-4 font-medium">{{ s.name }}</td>
             <td class="px-6 py-4 text-slate-500 text-sm max-w-xs truncate">{{ s.url }}</td>
@@ -147,7 +149,7 @@
             <td class="px-6 py-4"><span v-if="s.priorityMetadata" class="px-2 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-bold">元数据优先</span></td>
             <td class="px-6 py-4 text-sm whitespace-nowrap" title="普通用户授权数量 / 授权容量；管理员不占名额">{{ capacityUsage(s) }}</td>
             <td class="px-6 py-4"><span :class="s.online ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'" class="px-2 py-1 rounded-full text-xs font-bold border">{{ s.online ? '在线' : '离线' }}</span></td>
-            <td class="px-6 py-4"><div class="flex space-x-2"><button @click="editServer(s)" class="p-2 text-slate-400 hover:text-blue-600"><i data-lucide="edit-3" class="w-4 h-4"></i></button><button @click="reconnectServer(s.id || s.index)" class="p-2 text-slate-400 hover:text-green-600"><i data-lucide="refresh-cw" class="w-4 h-4"></i></button><button @click="deleteServer(s.id || s.index)" class="p-2 text-slate-400 hover:text-red-600"><i data-lucide="trash-2" class="w-4 h-4"></i></button></div></td>
+            <td class="px-6 py-4"><div class="flex space-x-2"><button @click="editServer(s)" :disabled="mutationPending" class="p-2 text-slate-400 hover:text-blue-600"><i data-lucide="edit-3" class="w-4 h-4"></i></button><button @click="reconnectServer(s.id || s.index)" :disabled="mutationPending" class="p-2 text-slate-400 hover:text-green-600"><i data-lucide="refresh-cw" class="w-4 h-4"></i></button><button @click="deleteServer(s.id || s.index)" :disabled="mutationPending" class="p-2 text-slate-400 hover:text-red-600"><i data-lucide="trash-2" class="w-4 h-4"></i></button></div></td>
           </tr>
         </tbody>
       </table>
@@ -161,7 +163,7 @@
           <div class="min-w-0 flex-1 mr-3"><h4 class="font-bold text-lg">{{ p.name }}</h4><p class="text-sm text-slate-500 font-mono truncate">{{ p.url }}</p></div>
           <div class="flex items-center space-x-2 shrink-0">
             <button @click="testProxyCard(p)" :disabled="p.testing" class="p-3 text-blue-400 hover:bg-blue-50 rounded-xl transition-all" title="测试连通性"><i data-lucide="zap" class="w-5 h-5"></i></button>
-            <button @click="deleteProxy(p.id)" class="p-3 text-red-400 hover:bg-red-50 rounded-xl transition-all"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+            <button @click="deleteProxy(p.id)" :disabled="mutationPending" class="p-3 text-red-400 hover:bg-red-50 rounded-xl transition-all"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
           </div>
         </div>
       </div>
@@ -193,7 +195,7 @@
           <div><label class="block text-sm font-medium mb-1">最新添加宽恕期 (ms) <span class="text-slate-400 font-normal">0=禁用</span></label><input type="number" v-model.number="settings.timeouts.latestGracePeriod" min="0" max="30000" step="500" class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"></div>
         </div>
       </div>
-      <div class="pt-4 flex items-center space-x-4"><button @click="saveSettings" class="btn-primary px-8 py-2.5 rounded-xl font-bold">保存修改</button><span v-if="saveSuccess" class="text-green-600 text-sm flex items-center space-x-1"><i data-lucide="check-circle" class="w-4 h-4"></i><span>保存成功！</span></span></div>
+      <div class="pt-4 flex items-center space-x-4"><button @click="saveSettings" :disabled="mutationPending" class="btn-primary px-8 py-2.5 rounded-xl font-bold">保存修改</button><span v-if="saveSuccess" class="text-green-600 text-sm flex items-center space-x-1"><i data-lucide="check-circle" class="w-4 h-4"></i><span>保存成功！</span></span></div>
     </div>
 
     <!-- Users -->
@@ -203,7 +205,7 @@
           <h4 class="font-bold">管理员（我）</h4>
           <p class="text-sm text-slate-500">配置自己 Emby 客户端首页显示的媒体库</p>
         </div>
-        <button @click="openAdminHome" class="btn-primary px-4 py-2 rounded-lg flex items-center space-x-2"><i data-lucide="layout-grid" class="w-4 h-4"></i><span>首页库显示</span></button>
+        <button @click="openAdminHome" :disabled="mutationPending" class="btn-primary px-4 py-2 rounded-lg flex items-center space-x-2"><i data-lucide="layout-grid" class="w-4 h-4"></i><span>首页库显示</span></button>
       </div>
       <div v-if="userList.length === 0" class="card p-12 text-center text-slate-400 italic">暂未添加普通用户</div>
       <div v-else class="card overflow-x-auto">
@@ -219,9 +221,9 @@
               <td class="px-6 py-4"><span :class="u.enabled ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'" class="px-2 py-1 rounded-full text-xs font-bold border">{{ u.enabled ? '启用' : '禁用' }}</span></td>
               <td class="px-6 py-4 text-sm text-slate-500">{{ new Date(u.createdAt).toLocaleString() }}</td>
               <td class="px-6 py-4"><div class="flex space-x-2">
-                <button @click="editUser(u)" class="p-2 text-slate-400 hover:text-blue-600"><i data-lucide="edit-3" class="w-4 h-4"></i></button>
-                <button @click="toggleUser(u)" class="p-2" :class="u.enabled ? 'text-slate-400 hover:text-amber-600' : 'text-slate-400 hover:text-green-600'"><i :data-lucide="u.enabled ? 'user-x' : 'user-check'" class="w-4 h-4"></i></button>
-                <button @click="deleteUser(u.id)" class="p-2 text-slate-400 hover:text-red-600"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                <button @click="editUser(u)" :disabled="mutationPending" class="p-2 text-slate-400 hover:text-blue-600"><i data-lucide="edit-3" class="w-4 h-4"></i></button>
+                <button @click="toggleUser(u)" :disabled="mutationPending" class="p-2" :class="u.enabled ? 'text-slate-400 hover:text-amber-600' : 'text-slate-400 hover:text-green-600'"><i :data-lucide="u.enabled ? 'user-x' : 'user-check'" class="w-4 h-4"></i></button>
+                <button @click="deleteUser(u.id)" :disabled="mutationPending" class="p-2 text-slate-400 hover:text-red-600"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
               </div></td>
             </tr>
           </tbody>
@@ -246,7 +248,7 @@
   <!-- Server Modal -->
   <div v-if="showModal" class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-[500] p-4">
     <div class="card w-full max-w-lg p-4 md:p-8 space-y-6 animate-in zoom-in duration-200 max-h-[90vh] overflow-y-auto">
-      <div class="flex justify-between items-center text-xl font-bold"><h3>{{ editIndex === null ? '添加上游服务器' : '编辑服务器' }}</h3><button @click="showModal = false" class="text-slate-400"><i data-lucide="x" class="w-6 h-6"></i></button></div>
+      <div class="flex justify-between items-center text-xl font-bold"><h3>{{ editIndex === null ? '添加上游服务器' : '编辑服务器' }}</h3><button @click="showModal = false" :disabled="mutationPending" class="text-slate-400"><i data-lucide="x" class="w-6 h-6"></i></button></div>
       <div class="space-y-4">
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div class="sm:col-span-2"><label class="text-sm font-medium">服务器名称</label><input type="text" v-model="serverForm.name" class="w-full px-4 py-2 border rounded-lg outline-none"></div>
@@ -274,17 +276,18 @@
         </div>
         <div v-else><label class="text-sm font-medium">API Key</label><input type="text" v-model="serverForm.apiKey" class="w-full px-4 py-2 border rounded-lg outline-none"></div>
       </div>
-      <div class="flex justify-end space-x-3 pt-4"><button @click="showModal = false" class="px-6 py-2.5 rounded-xl text-slate-600 hover:bg-slate-100">取消</button><button @click="saveServer" class="btn-primary px-8 py-2.5 rounded-xl font-bold shadow-lg shadow-blue-500/20">保存设置</button></div>
+      <div class="flex justify-end space-x-3 pt-4"><button @click="showModal = false" :disabled="mutationPending" class="px-6 py-2.5 rounded-xl text-slate-600 hover:bg-slate-100">取消</button><button @click="saveServer" :disabled="mutationPending" class="btn-primary px-8 py-2.5 rounded-xl font-bold shadow-lg shadow-blue-500/20">保存设置</button></div>
     </div>
   </div>
 
   <!-- User Modal -->
   <div v-if="showUserModal" class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-[500] p-4">
     <div class="card w-full max-w-md p-4 md:p-8 space-y-6 animate-in zoom-in duration-200 max-h-[90vh] overflow-y-auto">
-      <div class="flex justify-between items-center text-xl font-bold"><h3>{{ editUserId ? '编辑用户' : '添加用户' }}</h3><button @click="showUserModal = false" class="text-slate-400"><i data-lucide="x" class="w-6 h-6"></i></button></div>
+      <div class="flex justify-between items-center text-xl font-bold"><h3>{{ editUserId ? '编辑用户' : '添加用户' }}</h3><button @click="showUserModal = false" :disabled="mutationPending" class="text-slate-400"><i data-lucide="x" class="w-6 h-6"></i></button></div>
       <div class="space-y-4">
         <div><label class="text-sm font-medium">用户名</label><input type="text" v-model="userForm.username" class="w-full px-4 py-2 border rounded-lg outline-none"></div>
-        <div><label class="text-sm font-medium">密码</label><input type="password" v-model="userForm.password" maxlength="128" placeholder="可留空；非空密码 8–128 字符" class="w-full px-4 py-2 border rounded-lg outline-none"><p class="mt-1 text-xs text-slate-400">可留空；非空密码长度需为 8–128 字符。编辑时清空并保存会将该用户密码设置为空。</p></div>
+        <div v-if="editUserId"><label class="text-sm font-medium">密码操作</label><select v-model="userPasswordMode" class="w-full px-4 py-2 border rounded-lg outline-none"><option value="keep">保持现有密码</option><option value="set">设置新密码</option><option value="clear">明确设为空密码</option></select><p class="mt-1 text-xs text-slate-400">修改用户其他设置不会改变原密码；只有选择“明确设为空密码”才会清空密码并撤销原登录会话。</p></div>
+        <div v-if="!editUserId || userPasswordMode === 'set'"><label class="text-sm font-medium">{{ editUserId ? '新密码' : '密码' }}</label><input type="password" v-model="userForm.password" maxlength="128" placeholder="可留空；非空密码 8–128 字符" class="w-full px-4 py-2 border rounded-lg outline-none"><p class="mt-1 text-xs text-slate-400">新建用户可以使用空密码；修改已有密码时必须输入 8–128 个字符。</p></div>
         <div v-if="editUserId" class="flex items-center space-x-2"><input type="checkbox" v-model="userForm.enabled" class="w-4 h-4 rounded border-slate-300 text-blue-600"><label class="text-sm font-medium">启用</label></div>
         <div><label class="text-sm font-medium block mb-2">允许访问的服务器</label>
           <p class="text-xs text-slate-400 mb-2">不勾选任何服务器表示无上游访问权限；每个勾选的服务器占用一个普通用户授权名额</p>
@@ -300,9 +303,9 @@
         <div v-if="editUserId">
           <label class="text-sm font-medium block mb-2">首页隐藏库</label>
           <p class="text-xs text-slate-400 mb-2">勾选 = 从该用户首页隐藏。隐藏仅影响首页库入口；搜索、最新添加、继续观看不受影响。</p>
-          <div v-if="libraryGroupsLoading" class="text-sm text-slate-400 italic py-2">正在加载库列表...</div>
-          <div v-else-if="userLibraryGroups.length === 0" class="text-sm text-slate-400 italic py-2">未授权任何服务器</div>
-          <div v-else class="space-y-3 max-h-64 overflow-y-auto">
+          <div v-if="libraryGroupsLoading" class="text-sm text-slate-400 italic py-2">正在加载媒体库；已返回的服务器会先显示。普通资料和授权仍可保存，未完成的隐藏库配置会保留。</div>
+          <div v-if="!libraryGroupsLoading && userLibraryGroups.length === 0" class="text-sm text-slate-400 italic py-2">未授权任何服务器</div>
+          <div v-if="userLibraryGroups.length > 0" class="space-y-3 max-h-64 overflow-y-auto">
             <div v-for="g in userLibraryGroups" :key="g.serverId" class="border border-slate-200 rounded-lg p-3">
               <div class="flex justify-between items-center mb-2">
                 <span class="text-sm font-bold">{{ g.name }}</span>
@@ -310,7 +313,7 @@
               </div>
               <div v-if="g.online" class="space-y-1">
                 <label v-for="lib in g.libraries" :key="lib.id" class="flex items-center space-x-2 cursor-pointer hover:bg-slate-50 p-1 rounded">
-                  <input type="checkbox" :value="lib.id" v-model="g.hiddenIds" class="w-4 h-4 rounded border-slate-300 text-blue-600">
+                  <input type="checkbox" :value="lib.id" v-model="g.hiddenIds" @change="markUserLibrariesDirty" class="w-4 h-4 rounded border-slate-300 text-blue-600">
                   <span class="text-sm">{{ lib.name }}</span>
                   <span v-if="lib.collectionType" class="text-xs text-slate-400">({{ lib.collectionType }})</span>
                 </label>
@@ -320,19 +323,19 @@
           </div>
         </div>
       </div>
-      <div class="flex justify-end space-x-3 pt-4"><button @click="showUserModal = false" class="px-6 py-2.5 rounded-xl text-slate-600 hover:bg-slate-100">取消</button><button @click="saveUser" :disabled="libraryGroupsLoading" class="btn-primary px-8 py-2.5 rounded-xl font-bold shadow-lg shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed">{{ editUserId ? '保存' : '创建' }}</button></div>
+      <div class="flex justify-end space-x-3 pt-4"><button @click="showUserModal = false" :disabled="mutationPending" class="px-6 py-2.5 rounded-xl text-slate-600 hover:bg-slate-100">取消</button><button @click="saveUser" :disabled="mutationPending || (libraryGroupsLoading && userLibraryDirty)" class="btn-primary px-8 py-2.5 rounded-xl font-bold shadow-lg shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed">{{ editUserId ? '保存' : '创建' }}</button></div>
     </div>
   </div>
 
   <!-- Admin Home Libraries Modal -->
   <div v-if="adminHomeOpen" class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-[500] p-4">
     <div class="card w-full max-w-lg p-4 md:p-8 space-y-6 animate-in zoom-in duration-200 max-h-[90vh] overflow-y-auto">
-      <div class="flex justify-between items-center text-xl font-bold"><h3>管理员首页库显示</h3><button @click="adminHomeOpen = false" class="text-slate-400"><i data-lucide="x" class="w-6 h-6"></i></button></div>
+      <div class="flex justify-between items-center text-xl font-bold"><h3>管理员首页库显示</h3><button @click="adminHomeOpen = false" :disabled="mutationPending" class="text-slate-400"><i data-lucide="x" class="w-6 h-6"></i></button></div>
       <div class="space-y-4">
         <p class="text-xs text-slate-400">勾选 = 从自己的首页隐藏。隐藏仅影响首页库入口；搜索、最新添加、继续观看不受影响。</p>
-        <div v-if="libraryGroupsLoading" class="text-sm text-slate-400 italic py-2">正在加载库列表...</div>
-        <div v-else-if="adminLibraryGroups.length === 0" class="text-sm text-slate-400 italic py-2">暂无已配置的上游服务器</div>
-        <div v-else class="space-y-3 max-h-64 overflow-y-auto">
+        <div v-if="adminLibraryGroupsLoading" class="text-sm text-slate-400 italic py-2">正在加载首页媒体库；已返回的服务器会先显示。</div>
+        <div v-if="!adminLibraryGroupsLoading && adminLibraryGroups.length === 0" class="text-sm text-slate-400 italic py-2">暂无已配置的上游服务器</div>
+        <div v-if="adminLibraryGroups.length > 0" class="space-y-3 max-h-64 overflow-y-auto">
           <div v-for="g in adminLibraryGroups" :key="g.serverId" class="border border-slate-200 rounded-lg p-3">
             <div class="flex justify-between items-center mb-2">
               <span class="text-sm font-bold">{{ g.name }}</span>
@@ -349,7 +352,7 @@
           </div>
         </div>
       </div>
-      <div class="flex justify-end space-x-3 pt-4"><button @click="adminHomeOpen = false" class="px-6 py-2.5 rounded-xl text-slate-600 hover:bg-slate-100">取消</button><button @click="saveAdminHome" class="btn-primary px-8 py-2.5 rounded-xl font-bold shadow-lg shadow-blue-500/20">保存</button></div>
+      <div class="flex justify-end space-x-3 pt-4"><button @click="adminHomeOpen = false" :disabled="mutationPending" class="px-6 py-2.5 rounded-xl text-slate-600 hover:bg-slate-100">取消</button><button @click="saveAdminHome" :disabled="mutationPending || adminLibraryGroupsLoading" class="btn-primary px-8 py-2.5 rounded-xl font-bold shadow-lg shadow-blue-500/20">保存</button></div>
     </div>
   </div>
 
@@ -366,7 +369,7 @@
           <span v-else>✗ 连通失败 — {{ proxyTestState.result.error }}</span>
         </div>
       </div>
-      <div class="flex justify-end space-x-3 pt-4"><button @click="showProxyModal = false" class="px-6 py-2.5 rounded-xl text-slate-600 hover:bg-slate-100">取消</button><button @click="testProxyModal" :disabled="proxyTestState.loading" class="px-6 py-2.5 rounded-xl border border-blue-300 text-blue-600 hover:bg-blue-50">测试连接</button><button @click="saveProxy" class="btn-primary px-8 py-2.5 rounded-xl font-bold shadow-lg shadow-blue-500/20">添加代理</button></div>
+      <div class="flex justify-end space-x-3 pt-4"><button @click="showProxyModal = false" :disabled="mutationPending" class="px-6 py-2.5 rounded-xl text-slate-600 hover:bg-slate-100">取消</button><button @click="testProxyModal" :disabled="proxyTestState.loading || mutationPending" class="px-6 py-2.5 rounded-xl border border-blue-300 text-blue-600 hover:bg-blue-50">测试连接</button><button @click="saveProxy" :disabled="mutationPending" class="btn-primary px-8 py-2.5 rounded-xl font-bold shadow-lg shadow-blue-500/20">添加代理</button></div>
     </div>
   </div>
 </div>

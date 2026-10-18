@@ -187,10 +187,10 @@ check('user edit revokes all grants and omits revoked library keys', async () =>
   h.app.api = async (_, opts) => { payload = JSON.parse(opts.body); return {}; };
   await h.app.saveUser();
   assert.deepEqual(payload.allowedServers, []); assert.deepEqual(payload.hiddenLibraries, {});
-  assert.equal(payload.password, '');
+  assert.equal('password' in payload, false); // unchanged credentials must not revoke tokens
 });
 check('edit preserves populated password and scopes online/offline library patch', async () => {
-  const h = panel(); noRefresh(h); editingUser(h, ['a', 'b']); h.app.userForm.password = 'existing-password';
+  const h = panel(); noRefresh(h); editingUser(h, ['a', 'b']); h.app.userPasswordMode = 'set'; h.app.userForm.password = 'existing-password';
   h.app.userLibraryGroups = [
     { serverId: 'a', online: true, hiddenIds: [] },
     { serverId: 'b', online: false, hiddenIds: ['offline-old'] },
@@ -214,7 +214,7 @@ check('editing zero grants performs no library fetch', async () => {
   h.app.api = async () => { reads++; return []; };
   await h.app.editUser({ id: 'u', username: 'alice', password: 'existing-password', enabled: true, allowedServers: [] });
   assert.equal(reads, 0); assert.deepEqual(plain(h.app.userLibraryGroups), []);
-  assert.equal(h.app.userForm.password, 'existing-password');
+  assert.equal(h.app.userForm.password, '');
 });
 check('checkbox changes library scope while retaining unsaved per-server choices', async () => {
   const h = panel(); h.app.upstreamList = servers(); const requests = [];
@@ -253,10 +253,19 @@ check('opening new-user modal invalidates pending edit response', async () => {
   assert.equal(h.app.editUserId, null); assert.equal(h.app.libraryGroupsLoading, false);
   assert.deepEqual(plain(h.app.userLibraryGroups), []);
 });
-check('pending save cannot send an outdated library patch', async () => {
-  const h = panel(); editingUser(h); h.app.libraryGroupsLoading = true; let writes = 0;
+check('pending ordinary user save omits hidden library patch and proceeds', async () => {
+  const h = panel(); editingUser(h); h.app.libraryGroupsLoading = true; let payload;
+  noRefresh(h);
+  h.app.api = async (_, opts) => { payload = JSON.parse(opts.body); return {}; };
+  await h.app.saveUser();
+  assert.deepEqual(payload.allowedServers, ['a']);
+  assert.equal('hiddenLibraries' in payload, false);
+  assert.equal(h.app.showUserModal, false);
+});
+check('pending explicitly edited hidden selection still blocks save', async () => {
+  const h = panel(); editingUser(h); h.app.libraryGroupsLoading = true; h.app.userLibraryDirty = true; let writes = 0;
   h.app.api = async () => { writes++; return {}; }; await h.app.saveUser();
-  assert.equal(writes, 0); assert.equal(h.app.showUserModal, true); assert.match(h.alerts[0], /正在加载/);
+  assert.equal(writes, 0); assert.equal(h.app.showUserModal, true);
 });
 check('successful user save refreshes backend capacity observations', async () => {
   const h = panel(); editingUser(h); h.app.upstreamList = servers(1);
@@ -328,7 +337,10 @@ check('rendered edit modal uses no-access library state and disabled pending sav
   assert.match(textOf(tree), /未授权任何服务器/);
   h.app.libraryGroupsLoading = true; tree = render(h.app, []);
   const save = nodes(tree).find(n => n.type === 'button' && textOf(n).trim() === '保存');
-  assert.ok(save); assert.equal(save.props.disabled, true);
+  assert.ok(save); assert.equal(save.props.disabled, false);
+  h.app.userLibraryDirty = true;
+  const guarded = nodes(render(h.app, [])).find(n => n.type === 'button' && textOf(n).trim() === textOf(save).trim());
+  assert.ok(guarded); assert.equal(guarded.props.disabled, true);
 });
 
 (async () => {
