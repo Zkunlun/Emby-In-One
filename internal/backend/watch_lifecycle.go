@@ -117,15 +117,19 @@ func configuredSourceIDs(cfg Config) map[string]bool {
 
 // Rebuild only after commit, with all stores still excluded. On failure the
 // pending operation remains and request authorization stays closed.
-func (a *App) reloadLifecycleStoresLocked() error {
+// Only upstream deletion changes persisted media mappings or merge groups;
+// user lifecycle mutations must not rebuild the entire unrelated ID index.
+func (a *App) reloadLifecycleStoresLocked(reloadMappings bool) error {
 	if err := a.UserStore.loadAll(); err != nil {
 		return err
 	}
-	a.IDStore.virtualToOriginal = map[string]*idEntry{}
-	a.IDStore.originalToVirtual = map[string]string{}
-	a.IDStore.originalIDToVirtual = map[string][]string{}
-	if err := a.IDStore.load(); err != nil {
-		return err
+	if reloadMappings {
+		a.IDStore.virtualToOriginal = map[string]*idEntry{}
+		a.IDStore.originalToVirtual = map[string]string{}
+		a.IDStore.originalIDToVirtual = map[string][]string{}
+		if err := a.IDStore.load(); err != nil {
+			return err
+		}
 	}
 	return a.HiddenLibraries.load()
 }
@@ -133,6 +137,7 @@ func (a *App) reloadLifecycleStoresLocked() error {
 func (a *App) applyServerCleanupSQL(db *sqliteDB, op watchCleanupOperation) error {
 	allowed := configuredSourceIDs(a.ConfigStore.Snapshot())
 	affected := make(map[string]bool)
+	var removedVirtualIDs []string
 	// The in-memory mappings are the committed snapshot while these locks are held.
 	for virtualID, entry := range a.IDStore.virtualToOriginal {
 		instances := append([]AdditionalInstance{{OriginalID: entry.OriginalID, ServerID: entry.ServerID}}, entry.OtherInstances...)
@@ -152,15 +157,7 @@ func (a *App) applyServerCleanupSQL(db *sqliteDB, op watchCleanupOperation) erro
 		}
 		affected[virtualID] = true
 		if len(remaining) == 0 {
-			for _, query := range []string{
-				`DELETE FROM user_watch_progress WHERE virtual_item_id = ?`,
-				`DELETE FROM id_additional_instances WHERE virtual_id = ?`,
-				`DELETE FROM id_mappings WHERE virtual_id = ?`,
-			} {
-				if err := db.execParams(query, virtualID); err != nil {
-					return err
-				}
-			}
+			removedVirtualIDs = append(removedVirtualIDs, virtualID)
 			continue
 		}
 		primary := remaining[0]
@@ -178,6 +175,18 @@ func (a *App) applyServerCleanupSQL(db *sqliteDB, op watchCleanupOperation) erro
 			}
 		}
 	}
+	// Simple source-owned mappings can be removed in bounded batches. Keep
+	// the original watch-progress -> additional -> primary deletion order,
+	// and run everything inside the same lifecycle transaction.
+	for _, query := range []string{
+		`DELETE FROM user_watch_progress WHERE virtual_item_id IN ({ids})`,
+		`DELETE FROM id_additional_instances WHERE virtual_id IN ({ids})`,
+		`DELETE FROM id_mappings WHERE virtual_id IN ({ids})`,
+	} {
+		if err := execLifecycleIDBatches(db, removedVirtualIDs, query, 1); err != nil {
+			return err
+		}
+	}
 	// Include rows whose last playback used A even when A was a secondary instance.
 	if err := db.execParams(`DELETE FROM user_watch_progress WHERE server_id = ?
  AND NOT EXISTS (SELECT 1 FROM id_mappings m WHERE m.virtual_id = virtual_item_id)`, op.Target); err != nil {
@@ -190,9 +199,14 @@ func (a *App) applyServerCleanupSQL(db *sqliteDB, op watchCleanupOperation) erro
  WHERE server_id = ?`, op.Target); err != nil {
 		return err
 	}
+	// Both a migrated film and a removed/promoted series can change a locator.
+	// Group the same update across affected IDs: the SQL result is unchanged but
+	// the statement count no longer grows linearly with the number of mappings.
+	ids := make([]string, 0, len(affected))
 	for virtualID := range affected {
-		// Both a migrated film and a removed/promoted series can change a locator.
-		if err := db.execParams(`UPDATE user_watch_progress SET series_original_id = COALESCE(
+		ids = append(ids, virtualID)
+	}
+	if err := execLifecycleIDBatches(db, ids, `UPDATE user_watch_progress SET series_original_id = COALESCE(
    (SELECT original_id FROM (
     SELECT virtual_id, server_id, original_id FROM id_mappings
     UNION ALL SELECT virtual_id, server_id, original_id FROM id_additional_instances
@@ -200,9 +214,8 @@ func (a *App) applyServerCleanupSQL(db *sqliteDB, op watchCleanupOperation) erro
     AND i.server_id = user_watch_progress.server_id LIMIT 1), ''),
    series_virtual_id = CASE WHEN EXISTS(SELECT 1 FROM id_mappings m WHERE m.virtual_id = user_watch_progress.series_virtual_id)
     THEN series_virtual_id ELSE '' END
-   WHERE virtual_item_id = ? OR series_virtual_id = ?`, virtualID, virtualID); err != nil {
-			return err
-		}
+   WHERE virtual_item_id IN ({ids}) OR series_virtual_id IN ({ids})`, 2); err != nil {
+		return err
 	}
 	if err := db.execParams(`UPDATE users SET auth_revision = auth_revision + 1
  WHERE id IN (SELECT user_id FROM user_servers WHERE server_id = ?)`, op.Target); err != nil {
@@ -218,6 +231,33 @@ func (a *App) applyServerCleanupSQL(db *sqliteDB, op watchCleanupOperation) erro
 		}
 	}
 	return a.IDStore.writeMergeRemovalSQL(a.IDStore.planMergeSourceRemovalLocked(op.Target, allowed))
+}
+
+// execLifecycleIDBatches reduces SQLite prepare/execute overhead for an
+// already-selected set of virtual IDs. Each statement stays in the caller's
+// lifecycle transaction; neither a separate transaction nor async cleanup is used.
+// The placeholder budget is limited for older SQLite variable limits.
+func execLifecycleIDBatches(db *sqliteDB, ids []string, sqlTemplate string, occurrences int) error {
+	const chunkSize = 200
+	for start := 0; start < len(ids); start += chunkSize {
+		end := start + chunkSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		query := strings.ReplaceAll(sqlTemplate, "{ids}", placeholders)
+		args := make([]any, 0, len(batch)*occurrences)
+		for i := 0; i < occurrences; i++ {
+			for _, id := range batch {
+				args = append(args, id)
+			}
+		}
+		if err := db.execParams(query, args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Config absence is the durable commit intent. A failed database cleanup never
@@ -255,7 +295,7 @@ func (a *App) finishCleanupLocked(op watchCleanupOperation) error {
 		})
 	}
 	if err == nil {
-		err = a.reloadLifecycleStoresLocked()
+		err = a.reloadLifecycleStoresLocked(op.Kind == "server_delete")
 	}
 	unlock()
 	if err != nil {
