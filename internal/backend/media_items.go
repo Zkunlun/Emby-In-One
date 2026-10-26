@@ -25,7 +25,7 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 			if !a.requireServerAccess(w, r, resolved) {
 				return
 			}
-			if a.handleMultiInstanceParentItems(w, r, resolved, query, false) {
+			if a.handleMultiInstanceParentItems(w, r, resolved, query) {
 				return
 			}
 		}
@@ -120,7 +120,9 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleMultiInstanceParentItems merges all original parents before paging.
-func (a *App) handleMultiInstanceParentItems(w http.ResponseWriter, r *http.Request, resolved *routeResolution, query url.Values, userPath bool) bool {
+// The upstream endpoint follows the Hills-tested /Users/{id}/Items contract,
+// even when the client-facing route is /Items?ParentId=...
+func (a *App) handleMultiInstanceParentItems(w http.ResponseWriter, r *http.Request, resolved *routeResolution, query url.Values) bool {
 	reqCtx := requestContextFrom(r.Context())
 	instances := a.collectAllowedInstances(reqCtx, resolved)
 	if len(instances) < 2 {
@@ -139,13 +141,8 @@ func (a *App) handleMultiInstanceParentItems(w http.ResponseWriter, r *http.Requ
 		q.Del("parentid")
 		q.Set("ParentId", inst.OriginalID)
 		full := requestMergeFields(q)
-		path := "/Items"
-		if userPath {
-			path = "/Users/" + inst.Client.clientUserID() + "/Items"
-			removePathScopedItemsUserQuery(q)
-		} else {
-			q.Set("UserId", inst.Client.clientUserID())
-		}
+		removePathScopedItemsUserQuery(q)
+		path := "/Users/" + inst.Client.clientUserID() + "/Items"
 		payload, err := inst.Client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, path, q, nil)
 		if err != nil || !a.isServerAllowed(reqCtx, inst.ServerID) {
 			continue
@@ -182,7 +179,7 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 		if !a.requireServerAccess(w, r, resolved) {
 			return
 		}
-		if a.handleMultiInstanceParentItems(w, r, resolved, query, true) {
+		if a.handleMultiInstanceParentItems(w, r, resolved, query) {
 			return
 		}
 		query.Set("ParentId", resolved.OriginalID)

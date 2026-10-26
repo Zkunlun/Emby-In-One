@@ -39,6 +39,10 @@ func TestShowsEpisodesSameServerSeasonPairs(t *testing.T) {
 			}})
 		case "/Items", "/Users/user-a/Items":
 			parent := r.URL.Query().Get("ParentId")
+			if r.URL.Path == "/Items" && parent != "" {
+				http.Error(w, "raw Items/ParentId is not supported", http.StatusNotFound)
+				return
+			}
 			if parent == "" {
 				_ = json.NewEncoder(w).Encode(map[string]any{"Items": []any{}})
 				return
@@ -117,7 +121,8 @@ func TestShowsEpisodesSameServerSeasonPairs(t *testing.T) {
 				}
 			}
 			sort.Strings(calls)
-			if len(calls) != 2 || calls[0] != path+"?ParentId=season-a" || calls[1] != path+"?ParentId=season-b" {
+			userItemsPath := "/Users/user-a/Items"
+			if len(calls) != 2 || calls[0] != userItemsPath+"?ParentId=season-a" || calls[1] != userItemsPath+"?ParentId=season-b" {
 				t.Errorf("%s requested %v", path, calls)
 			}
 		}
