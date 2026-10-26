@@ -11,6 +11,25 @@ import (
 
 func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 	query := cloneValues(r.URL.Query())
+	// Multi-instance parents need all original parents, even on one server.
+	if parent := firstQueryValue(query, "ParentId", "parentId", "parentid"); !hasBatchIDQuery(query) && parent != "" && !isRootMediaParent(parent) {
+		if mapped := a.IDStore.ResolveVirtualID(parent); mapped != nil && len(mapped.OtherInstances) > 0 {
+			resolved, ok := a.resolveRequestRouteID(w, r, parent)
+			if !ok {
+				return
+			}
+			if resolved == nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"message": "No upstream for parent"})
+				return
+			}
+			if !a.requireServerAccess(w, r, resolved) {
+				return
+			}
+			if a.handleMultiInstanceParentItems(w, r, resolved, query, false) {
+				return
+			}
+		}
+	}
 	if !hasBatchIDQuery(query) {
 		filter, localFilter := a.prepareLocalUserFilter(w, r, query)
 		if !localFilter {
@@ -100,6 +119,54 @@ func (a *App) handleItemsCollection(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, merged)
 }
 
+// handleMultiInstanceParentItems merges all original parents before paging.
+func (a *App) handleMultiInstanceParentItems(w http.ResponseWriter, r *http.Request, resolved *routeResolution, query url.Values, userPath bool) bool {
+	reqCtx := requestContextFrom(r.Context())
+	instances := a.collectAllowedInstances(reqCtx, resolved)
+	if len(instances) < 2 {
+		return false
+	}
+	filter, localFilter := a.prepareLocalUserFilter(w, r, query)
+	requestMergedCandidateSet(query)
+	var results []upstreamItemsResult
+	succeeded := 0
+	for _, inst := range instances {
+		if !a.isServerAllowed(reqCtx, inst.ServerID) {
+			continue
+		}
+		q := cloneValues(query)
+		q.Del("parentId")
+		q.Del("parentid")
+		q.Set("ParentId", inst.OriginalID)
+		full := requestMergeFields(q)
+		path := "/Items"
+		if userPath {
+			path = "/Users/" + inst.Client.clientUserID() + "/Items"
+			removePathScopedItemsUserQuery(q)
+		} else {
+			q.Set("UserId", inst.Client.clientUserID())
+		}
+		payload, err := inst.Client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, path, q, nil)
+		if err != nil || !a.isServerAllowed(reqCtx, inst.ServerID) {
+			continue
+		}
+		succeeded++
+		results = append(results, upstreamItemsResult{ServerID: inst.ServerID, Items: asItems(payload), FullSources: full, RequestScope: reqCtx})
+	}
+	if succeeded == 0 {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Upstream parent items request failed"})
+		return true
+	}
+	results = a.hydrateMergeResults(r, results)
+	items := a.mergeRoundRobinItems(results, a.clientFacingUserIDFor(r), reqCtx)
+	if localFilter {
+		var recency map[string]int64
+		items, recency = a.filterItemsByLocalUserState(r, items, filter)
+		localItemSort(items, r.URL.Query(), recency)
+	}
+	a.writePagedUserItems(w, r, items)
+	return true
+}
 func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 	query := cloneValues(r.URL.Query())
 	parentID := firstQueryValue(query, "ParentId", "parentId", "parentid")
@@ -113,6 +180,9 @@ func (a *App) handleUserItems(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !a.requireServerAccess(w, r, resolved) {
+			return
+		}
+		if a.handleMultiInstanceParentItems(w, r, resolved, query, true) {
 			return
 		}
 		query.Set("ParentId", resolved.OriginalID)

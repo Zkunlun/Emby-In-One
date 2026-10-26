@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -162,39 +163,48 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 		}
 	}
 	var results []upstreamItemsResult
+	attempted, succeeded := 0, 0
 	for _, inst := range a.collectAllowedInstances(reqCtx, resolved) {
 		if !a.isServerAllowed(reqCtx, inst.ServerID) {
 			continue
 		}
-		query := cloneValues(queryTemplate)
-		query.Set("UserId", inst.Client.clientUserID())
+		seasons := []string{""}
 		if seasonID != "" {
-			raw := resolvedOriginalIDForServer(a.IDStore.ResolveVirtualID(seasonID), inst.ServerID)
-			if raw == "" {
+			seasons = a.seasonIDsForSeriesInstance(reqCtx, seasonID, inst)
+		}
+		for _, originalSeason := range seasons {
+			query := cloneValues(queryTemplate)
+			query.Set("UserId", inst.Client.clientUserID())
+			if seasonID != "" {
+				query.Del("seasonId")
+				query.Del("seasonid")
+				query.Set("SeasonId", originalSeason)
+			}
+			attempted++
+			payload, err := inst.Client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Shows/"+inst.OriginalID+"/"+endpoint, query, nil)
+			if err != nil || !a.isServerAllowed(reqCtx, inst.ServerID) {
 				continue
 			}
-			query.Del("seasonId")
-			query.Del("seasonid")
-			query.Set("SeasonId", raw)
-		}
-		payload, err := inst.Client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Shows/"+inst.OriginalID+"/"+endpoint, query, nil)
-		if err != nil || !a.isServerAllowed(reqCtx, inst.ServerID) {
-			continue
-		}
-		if err := a.observeLegacyShowsParent(reqCtx, inst.ServerID, inst.OriginalID); err != nil {
-			a.logMergeHTTPError(err)
-			continue
-		}
-		items := asItems(payload)
-		for _, item := range items {
-			if _, exists := item["Type"]; !exists {
-				item["Type"] = kind
+			if err := a.observeLegacyShowsParent(reqCtx, inst.ServerID, inst.OriginalID); err != nil {
+				a.logMergeHTTPError(err)
+				continue
 			}
-			if _, exists := item["SeriesId"]; !exists {
-				item["SeriesId"] = inst.OriginalID
+			succeeded++
+			items := asItems(payload)
+			for _, item := range items {
+				if _, exists := item["Type"]; !exists {
+					item["Type"] = kind
+				}
+				if _, exists := item["SeriesId"]; !exists {
+					item["SeriesId"] = inst.OriginalID
+				}
 			}
+			results = append(results, upstreamItemsResult{ServerID: inst.ServerID, Items: items, FullSources: full, RequestScope: reqCtx})
 		}
-		results = append(results, upstreamItemsResult{ServerID: inst.ServerID, Items: items, FullSources: full, RequestScope: reqCtx})
+	}
+	if attempted > 0 && succeeded == 0 {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Upstream shows request failed"})
+		return
 	}
 	results = a.hydrateMergeResults(r, results)
 	items := a.mergeRoundRobinItems(results, a.clientFacingUserIDFor(r), reqCtx)
@@ -223,6 +233,44 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 	}
 	a.overlayLocalUserDataItems(r, items)
 	writeJSON(w, http.StatusOK, paginateItems(items, r.URL.Query()))
+}
+
+// seasonIDsForSeriesInstance keeps the upstream SeriesId/SeasonId pair intact.
+// Multiple original seasons may share one virtual season even on the same server.
+func (a *App) seasonIDsForSeriesInstance(reqCtx *RequestContext, virtualSeason string, series seriesInstance) []string {
+	season, err := a.resolveAuthorizedRouteID(reqCtx, virtualSeason)
+	if err != nil || season == nil {
+		return nil
+	}
+	allowed := map[string]bool{}
+	for _, instance := range a.collectAllowedInstances(reqCtx, season) {
+		if instance.ServerID == series.ServerID {
+			allowed[instance.OriginalID] = true
+		}
+	}
+	if len(allowed) == 0 {
+		return nil
+	}
+	group := a.IDStore.ResolveMergeGroup(virtualSeason)
+	if group != nil && group.MediaType == "Season" {
+		var matched []string
+		for _, member := range group.Members {
+			if member.Ref.ServerID == series.ServerID && member.Parent != nil &&
+				member.Parent.SeriesID == series.OriginalID && allowed[member.Ref.ItemID] {
+				if !slices.Contains(matched, member.Ref.ItemID) {
+					matched = append(matched, member.Ref.ItemID)
+				}
+			}
+		}
+		return matched
+	}
+	// A legacy, non-merged season may have only one candidate per server.
+	if len(allowed) == 1 {
+		for id := range allowed {
+			return []string{id}
+		}
+	}
+	return nil
 }
 
 // Only 404/405 for the exact endpoint authorize compatibility fallback.
@@ -404,6 +452,29 @@ func (a *App) handleItemImage(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusBadGateway)
 		return
+	}
+	// A merged item may have its poster only on a secondary original item.
+	// Retry only a genuine 404, and only against authorized instances.
+	if resp.StatusCode == http.StatusNotFound {
+		for _, instance := range a.collectAllowedInstances(requestContextFrom(r.Context()), resolved) {
+			if instance.ServerID == resolved.ServerID && instance.OriginalID == resolved.OriginalID {
+				continue
+			}
+			altPath := "/Items/" + instance.OriginalID + "/Images/" + r.PathValue("imageType")
+			if imageIndex := r.PathValue("imageIndex"); imageIndex != "" {
+				altPath += "/" + imageIndex
+			}
+			alternative, altErr := instance.Client.Stream(r.Context(), requestContextFrom(r.Context()), a.Identity, altPath, imageQuery)
+			if altErr != nil {
+				continue
+			}
+			if alternative.StatusCode >= http.StatusOK && alternative.StatusCode < http.StatusMultipleChoices {
+				_ = resp.Body.Close()
+				resp = alternative
+				break
+			}
+			_ = alternative.Body.Close()
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
