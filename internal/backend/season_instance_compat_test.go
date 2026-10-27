@@ -23,6 +23,14 @@ func TestShowsEpisodesSameServerSeasonPairs(t *testing.T) {
 				return
 			}
 			calls = append(calls, r.URL.Path+"?SeasonId="+r.URL.Query().Get("SeasonId"))
+			if r.URL.Path == "/Shows/series-a/Episodes" && r.URL.Query().Get("SeasonId") == "season-single" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{
+					{"Id": "ep-single", "Type": "Episode", "SeriesId": "series-a",
+						"ParentId": "season-single", "ParentIndexNumber": 1, "IndexNumber": 1,
+						"Name": "Episode 1"},
+				}})
+				return
+			}
 			want := "season-a"
 			id := "ep-a"
 			series := "series-a"
@@ -138,14 +146,23 @@ func TestShowsEpisodesSameServerSeasonPairs(t *testing.T) {
 			len(group.Members) != 1 || group.Members[0].Parent != nil {
 			t.Fatal("test setup must retain a singleton Season group without parent evidence")
 		}
-		got := app.seasonIDsForSeriesInstance(nil, singleSeason,
-			seriesInstance{OriginalID: "series-a", ServerID: client.ID, Client: client})
-		if len(got) != 1 || got[0] != "season-single" {
-			t.Errorf("unparented singleton season IDs = %v, want season-single", got)
+		calls = nil
+		unparentedURL := "/Shows/" + virtualSeries + "/Episodes?SeasonId=" + singleSeason
+		unparented := doJSONRequest(t, handler, http.MethodGet, unparentedURL, nil, token)
+		if unparented.Code != http.StatusOK {
+			t.Fatalf("singleton season returned %d: %s", unparented.Code, unparented.Body.String())
 		}
-		if mismatched := app.seasonIDsForSeriesInstance(nil, virtualSeason,
-			seriesInstance{OriginalID: "unrelated-series", ServerID: client.ID, Client: client}); len(mismatched) != 0 {
-			t.Errorf("known mismatched parent should not fall back: %v", mismatched)
+		var singlePayload struct {
+			Items []map[string]any `json:"Items"`
+		}
+		if err := json.Unmarshal(unparented.Body.Bytes(), &singlePayload); err != nil {
+			t.Fatal(err)
+		}
+		if len(singlePayload.Items) != 1 || singlePayload.Items[0]["Type"] != "Episode" {
+			t.Errorf("singleton season returned %d episodes, want 1", len(singlePayload.Items))
+		}
+		if len(calls) != 1 || calls[0] != "/Shows/series-a/Episodes?SeasonId=season-single" {
+			t.Errorf("singleton season requested %v", calls)
 		}
 		failShows = true
 		rr = doJSONRequest(t, handler, http.MethodGet, requestURL, nil, token)
