@@ -17,15 +17,15 @@ func TestShowsEpisodesSameServerSeasonPairs(t *testing.T) {
 		switch r.URL.Path {
 		case "/Users/AuthenticateByName":
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "upstream-token", "User": map[string]any{"Id": "user-a"}})
-		case "/Shows/series-a/Episodes", "/Shows/series-b/Episodes":
+		case "/Shows/series-a/Episodes", "/Shows/series-b/Episodes", "/Shows/series-single/Episodes":
 			if failShows {
 				http.Error(w, "upstream unavailable", http.StatusBadGateway)
 				return
 			}
 			calls = append(calls, r.URL.Path+"?SeasonId="+r.URL.Query().Get("SeasonId"))
-			if r.URL.Path == "/Shows/series-a/Episodes" && r.URL.Query().Get("SeasonId") == "season-single" {
+			if r.URL.Path == "/Shows/series-single/Episodes" && r.URL.Query().Get("SeasonId") == "season-single" {
 				_ = json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{
-					{"Id": "ep-single", "Type": "Episode", "SeriesId": "series-a",
+					{"Id": "ep-single", "Type": "Episode", "SeriesId": "series-single",
 						"ParentId": "season-single", "ParentIndexNumber": 1, "IndexNumber": 1,
 						"Name": "Episode 1"},
 				}})
@@ -80,6 +80,7 @@ func TestShowsEpisodesSameServerSeasonPairs(t *testing.T) {
 		client := app.Upstream.Clients()[0]
 		virtualSeries := app.IDStore.GetOrCreateVirtualID("series-a", client.ID)
 		app.IDStore.AssociateAdditionalInstance(virtualSeries, "series-b", client.ID)
+		virtualSingleSeries := app.IDStore.GetOrCreateVirtualID("series-single", client.ID)
 
 		parentA := &mergeSeriesEvidence{ServerID: client.ID, SeriesID: "series-a",
 			Identity: mergeIdentity{Type: "Series", Name: "Tom and Jerry in New York"}}
@@ -147,7 +148,7 @@ func TestShowsEpisodesSameServerSeasonPairs(t *testing.T) {
 			t.Fatal("test setup must retain a singleton Season group without parent evidence")
 		}
 		calls = nil
-		unparentedURL := "/Shows/" + virtualSeries + "/Episodes?SeasonId=" + singleSeason
+		unparentedURL := "/Shows/" + virtualSingleSeries + "/Episodes?SeasonId=" + singleSeason
 		unparented := doJSONRequest(t, handler, http.MethodGet, unparentedURL, nil, token)
 		if unparented.Code != http.StatusOK {
 			t.Fatalf("singleton season returned %d: %s", unparented.Code, unparented.Body.String())
@@ -161,8 +162,14 @@ func TestShowsEpisodesSameServerSeasonPairs(t *testing.T) {
 		if len(singlePayload.Items) != 1 || singlePayload.Items[0]["Type"] != "Episode" {
 			t.Errorf("singleton season returned %d episodes, want 1", len(singlePayload.Items))
 		}
-		if len(calls) != 1 || calls[0] != "/Shows/series-a/Episodes?SeasonId=season-single" {
+		if len(calls) != 1 || calls[0] != "/Shows/series-single/Episodes?SeasonId=season-single" {
 			t.Errorf("singleton season requested %v", calls)
+		}
+		calls = nil
+		ambiguous := doJSONRequest(t, handler, http.MethodGet,
+			"/Shows/"+virtualSeries+"/Episodes?SeasonId="+singleSeason, nil, token)
+		if ambiguous.Code != http.StatusOK || len(calls) != 0 {
+			t.Errorf("missing parent must not cross-pair multiple same-server series: status=%d calls=%v", ambiguous.Code, calls)
 		}
 		failShows = true
 		rr = doJSONRequest(t, handler, http.MethodGet, requestURL, nil, token)

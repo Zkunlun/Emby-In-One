@@ -164,13 +164,18 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 	}
 	var results []upstreamItemsResult
 	attempted, succeeded := 0, 0
-	for _, inst := range a.collectAllowedInstances(reqCtx, resolved) {
+	instances := a.collectAllowedInstances(reqCtx, resolved)
+	seriesPerServer := make(map[string]int, len(instances))
+	for _, inst := range instances {
+		seriesPerServer[inst.ServerID]++
+	}
+	for _, inst := range instances {
 		if !a.isServerAllowed(reqCtx, inst.ServerID) {
 			continue
 		}
 		seasons := []string{""}
 		if seasonID != "" {
-			seasons = a.seasonIDsForSeriesInstance(reqCtx, seasonID, inst)
+			seasons = a.seasonIDsForSeriesInstance(reqCtx, seasonID, inst, seriesPerServer[inst.ServerID] == 1)
 		}
 		for _, originalSeason := range seasons {
 			query := cloneValues(queryTemplate)
@@ -237,7 +242,7 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 
 // seasonIDsForSeriesInstance keeps the upstream SeriesId/SeasonId pair intact.
 // Multiple original seasons may share one virtual season even on the same server.
-func (a *App) seasonIDsForSeriesInstance(reqCtx *RequestContext, virtualSeason string, series seriesInstance) []string {
+func (a *App) seasonIDsForSeriesInstance(reqCtx *RequestContext, virtualSeason string, series seriesInstance, unambiguousSeries bool) []string {
 	season, err := a.resolveAuthorizedRouteID(reqCtx, virtualSeason)
 	if err != nil || season == nil {
 		return nil
@@ -265,13 +270,13 @@ func (a *App) seasonIDsForSeriesInstance(reqCtx *RequestContext, virtualSeason s
 				matched = append(matched, member.Ref.ItemID)
 			}
 		}
-		if hasParentEvidence {
+		if hasParentEvidence || !unambiguousSeries {
 			return matched
 		}
 	}
-	// A single original season without parent evidence is unambiguous; an
-	// explicit parent pointing to a different series must never be remapped.
-	if len(allowed) == 1 {
+	// Without parent evidence, both the original season and original series
+	// must be unique on this upstream. Never cross-pair merged same-server series.
+	if unambiguousSeries && len(allowed) == 1 {
 		for id := range allowed {
 			return []string{id}
 		}
