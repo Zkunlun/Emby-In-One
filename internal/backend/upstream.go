@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ const upstreamHeaderTimeout = 5 * time.Minute
 
 var sharedTransport = &http.Transport{
 	Proxy:                 http.ProxyFromEnvironment,
+	TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, // Intentionally skip upstream TLS certificate validation.
 	MaxIdleConns:          64,
 	MaxIdleConnsPerHost:   16,
 	IdleConnTimeout:       90 * time.Second,
@@ -332,6 +334,7 @@ func buildProxyTransport(proxyURL string, logger *Logger, serverName string) (ht
 	}
 	return &http.Transport{
 		Proxy:                 http.ProxyURL(parsed),
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, // Intentionally skip upstream TLS certificate validation.
 		MaxIdleConns:          64,
 		MaxIdleConnsPerHost:   16,
 		IdleConnTimeout:       90 * time.Second,

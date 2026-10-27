@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -162,39 +163,53 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 		}
 	}
 	var results []upstreamItemsResult
-	for _, inst := range a.collectAllowedInstances(reqCtx, resolved) {
+	attempted, succeeded := 0, 0
+	instances := a.collectAllowedInstances(reqCtx, resolved)
+	seriesPerServer := make(map[string]int, len(instances))
+	for _, inst := range instances {
+		seriesPerServer[inst.ServerID]++
+	}
+	for _, inst := range instances {
 		if !a.isServerAllowed(reqCtx, inst.ServerID) {
 			continue
 		}
-		query := cloneValues(queryTemplate)
-		query.Set("UserId", inst.Client.clientUserID())
+		seasons := []string{""}
 		if seasonID != "" {
-			raw := resolvedOriginalIDForServer(a.IDStore.ResolveVirtualID(seasonID), inst.ServerID)
-			if raw == "" {
+			seasons = a.seasonIDsForSeriesInstance(reqCtx, seasonID, inst, seriesPerServer[inst.ServerID] == 1)
+		}
+		for _, originalSeason := range seasons {
+			query := cloneValues(queryTemplate)
+			query.Set("UserId", inst.Client.clientUserID())
+			if seasonID != "" {
+				query.Del("seasonId")
+				query.Del("seasonid")
+				query.Set("SeasonId", originalSeason)
+			}
+			attempted++
+			payload, err := inst.Client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Shows/"+inst.OriginalID+"/"+endpoint, query, nil)
+			if err != nil || !a.isServerAllowed(reqCtx, inst.ServerID) {
 				continue
 			}
-			query.Del("seasonId")
-			query.Del("seasonid")
-			query.Set("SeasonId", raw)
-		}
-		payload, err := inst.Client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Shows/"+inst.OriginalID+"/"+endpoint, query, nil)
-		if err != nil || !a.isServerAllowed(reqCtx, inst.ServerID) {
-			continue
-		}
-		if err := a.observeLegacyShowsParent(reqCtx, inst.ServerID, inst.OriginalID); err != nil {
-			a.logMergeHTTPError(err)
-			continue
-		}
-		items := asItems(payload)
-		for _, item := range items {
-			if _, exists := item["Type"]; !exists {
-				item["Type"] = kind
+			if err := a.observeLegacyShowsParent(reqCtx, inst.ServerID, inst.OriginalID); err != nil {
+				a.logMergeHTTPError(err)
+				continue
 			}
-			if _, exists := item["SeriesId"]; !exists {
-				item["SeriesId"] = inst.OriginalID
+			succeeded++
+			items := asItems(payload)
+			for _, item := range items {
+				if _, exists := item["Type"]; !exists {
+					item["Type"] = kind
+				}
+				if _, exists := item["SeriesId"]; !exists {
+					item["SeriesId"] = inst.OriginalID
+				}
 			}
+			results = append(results, upstreamItemsResult{ServerID: inst.ServerID, Items: items, FullSources: full, RequestScope: reqCtx})
 		}
-		results = append(results, upstreamItemsResult{ServerID: inst.ServerID, Items: items, FullSources: full, RequestScope: reqCtx})
+	}
+	if attempted > 0 && succeeded == 0 {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Upstream shows request failed"})
+		return
 	}
 	results = a.hydrateMergeResults(r, results)
 	items := a.mergeRoundRobinItems(results, a.clientFacingUserIDFor(r), reqCtx)
@@ -223,6 +238,50 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 	}
 	a.overlayLocalUserDataItems(r, items)
 	writeJSON(w, http.StatusOK, paginateItems(items, r.URL.Query()))
+}
+
+// seasonIDsForSeriesInstance keeps the upstream SeriesId/SeasonId pair intact.
+// Multiple original seasons may share one virtual season even on the same server.
+func (a *App) seasonIDsForSeriesInstance(reqCtx *RequestContext, virtualSeason string, series seriesInstance, unambiguousSeries bool) []string {
+	season, err := a.resolveAuthorizedRouteID(reqCtx, virtualSeason)
+	if err != nil || season == nil {
+		return nil
+	}
+	allowed := map[string]bool{}
+	for _, instance := range a.collectAllowedInstances(reqCtx, season) {
+		if instance.ServerID == series.ServerID {
+			allowed[instance.OriginalID] = true
+		}
+	}
+	if len(allowed) == 0 {
+		return nil
+	}
+	group := a.IDStore.ResolveMergeGroup(virtualSeason)
+	if group != nil && group.MediaType == "Season" {
+		var matched []string
+		hasParentEvidence := false
+		for _, member := range group.Members {
+			if member.Ref.ServerID != series.ServerID || !allowed[member.Ref.ItemID] ||
+				member.Parent == nil || member.Parent.SeriesID == "" {
+				continue
+			}
+			hasParentEvidence = true
+			if member.Parent.SeriesID == series.OriginalID && !slices.Contains(matched, member.Ref.ItemID) {
+				matched = append(matched, member.Ref.ItemID)
+			}
+		}
+		if hasParentEvidence || !unambiguousSeries {
+			return matched
+		}
+	}
+	// Without parent evidence, both the original season and original series
+	// must be unique on this upstream. Never cross-pair merged same-server series.
+	if unambiguousSeries && len(allowed) == 1 {
+		for id := range allowed {
+			return []string{id}
+		}
+	}
+	return nil
 }
 
 // Only 404/405 for the exact endpoint authorize compatibility fallback.
@@ -400,6 +459,31 @@ func (a *App) handleItemImage(w http.ResponseWriter, r *http.Request) {
 	imageQuery.Del("api_key")
 	imageQuery.Del("ApiKey")
 	resp, err := resolved.Client.Stream(r.Context(), requestContextFrom(r.Context()), a.Identity, imagePath, imageQuery)
+	// A merged item may have its image on a healthy secondary original item.
+	// Never try other sources for authentication failures or a canceled request.
+	if r.Context().Err() == nil && (err != nil || resp.StatusCode == http.StatusNotFound || resp.StatusCode >= http.StatusInternalServerError) {
+		for _, instance := range a.collectAllowedInstances(requestContextFrom(r.Context()), resolved) {
+			if instance.ServerID == resolved.ServerID && instance.OriginalID == resolved.OriginalID {
+				continue
+			}
+			altPath := "/Items/" + instance.OriginalID + "/Images/" + r.PathValue("imageType")
+			if imageIndex := r.PathValue("imageIndex"); imageIndex != "" {
+				altPath += "/" + imageIndex
+			}
+			alternative, altErr := instance.Client.Stream(r.Context(), requestContextFrom(r.Context()), a.Identity, altPath, imageQuery)
+			if altErr != nil {
+				continue
+			}
+			if alternative.StatusCode >= http.StatusOK && alternative.StatusCode < http.StatusMultipleChoices {
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				resp, err = alternative, nil
+				break
+			}
+			_ = alternative.Body.Close()
+		}
+	}
 	if err != nil {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusBadGateway)
