@@ -156,6 +156,14 @@ func (a *App) handleMultiInstanceParentItems(w http.ResponseWriter, r *http.Requ
 	}
 	results = a.hydrateMergeResults(r, results)
 	items := a.mergeRoundRobinItems(results, a.clientFacingUserIDFor(r), reqCtx)
+	// Scoped Episode listings must reference the virtual Season requested by
+	// the client, even when an upstream's ParentId points to another raw alias.
+	parentID := firstQueryValue(r.URL.Query(), "ParentId", "parentId", "parentid")
+	for _, item := range items {
+		if item["Type"] == "Episode" && item["SeasonId"] == parentID {
+			item["ParentId"] = parentID
+		}
+	}
 	if localFilter {
 		var recency map[string]int64
 		items, recency = a.filterItemsByLocalUserState(r, items, filter)

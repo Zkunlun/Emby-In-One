@@ -65,7 +65,7 @@ func TestShowsEpisodesSameServerSeasonPairs(t *testing.T) {
 				series, id = "series-b", "ep-b"
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{
-				{"Id": id, "Type": "Episode", "SeriesId": series, "ParentId": parent, "ParentIndexNumber": 1, "IndexNumber": 1,
+				{"Id": id, "Type": "Episode", "SeriesId": series, "SeasonId": parent, "ParentId": "unrelated-upstream-parent", "ParentIndexNumber": 1, "IndexNumber": 1,
 					"Name": "Episode 1", "MediaSources": []any{map[string]any{"Id": id + "-source", "RunTimeTicks": 1000}}},
 			}, "TotalRecordCount": 1, "StartIndex": 0})
 		default:
