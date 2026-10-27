@@ -254,17 +254,23 @@ func (a *App) seasonIDsForSeriesInstance(reqCtx *RequestContext, virtualSeason s
 	group := a.IDStore.ResolveMergeGroup(virtualSeason)
 	if group != nil && group.MediaType == "Season" {
 		var matched []string
+		hasParentEvidence := false
 		for _, member := range group.Members {
-			if member.Ref.ServerID == series.ServerID && member.Parent != nil &&
-				member.Parent.SeriesID == series.OriginalID && allowed[member.Ref.ItemID] {
-				if !slices.Contains(matched, member.Ref.ItemID) {
-					matched = append(matched, member.Ref.ItemID)
-				}
+			if member.Ref.ServerID != series.ServerID || !allowed[member.Ref.ItemID] ||
+				member.Parent == nil || member.Parent.SeriesID == "" {
+				continue
+			}
+			hasParentEvidence = true
+			if member.Parent.SeriesID == series.OriginalID && !slices.Contains(matched, member.Ref.ItemID) {
+				matched = append(matched, member.Ref.ItemID)
 			}
 		}
-		return matched
+		if hasParentEvidence {
+			return matched
+		}
 	}
-	// A legacy, non-merged season may have only one candidate per server.
+	// A single original season without parent evidence is unambiguous; an
+	// explicit parent pointing to a different series must never be remapped.
 	if len(allowed) == 1 {
 		for id := range allowed {
 			return []string{id}
@@ -448,14 +454,9 @@ func (a *App) handleItemImage(w http.ResponseWriter, r *http.Request) {
 	imageQuery.Del("api_key")
 	imageQuery.Del("ApiKey")
 	resp, err := resolved.Client.Stream(r.Context(), requestContextFrom(r.Context()), a.Identity, imagePath, imageQuery)
-	if err != nil {
-		w.Header().Set("Cache-Control", "no-store")
-		w.WriteHeader(http.StatusBadGateway)
-		return
-	}
-	// A merged item may have its poster only on a secondary original item.
-	// Retry only a genuine 404, and only against authorized instances.
-	if resp.StatusCode == http.StatusNotFound {
+	// A merged item may have its image on a healthy secondary original item.
+	// Never try other sources for authentication failures or a canceled request.
+	if r.Context().Err() == nil && (err != nil || resp.StatusCode == http.StatusNotFound || resp.StatusCode >= http.StatusInternalServerError) {
 		for _, instance := range a.collectAllowedInstances(requestContextFrom(r.Context()), resolved) {
 			if instance.ServerID == resolved.ServerID && instance.OriginalID == resolved.OriginalID {
 				continue
@@ -469,12 +470,19 @@ func (a *App) handleItemImage(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if alternative.StatusCode >= http.StatusOK && alternative.StatusCode < http.StatusMultipleChoices {
-				_ = resp.Body.Close()
-				resp = alternative
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				resp, err = alternative, nil
 				break
 			}
 			_ = alternative.Body.Close()
 		}
+	}
+	if err != nil {
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusBadGateway)
+		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {

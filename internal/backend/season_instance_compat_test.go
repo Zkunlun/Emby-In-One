@@ -126,6 +126,27 @@ func TestShowsEpisodesSameServerSeasonPairs(t *testing.T) {
 				t.Errorf("%s requested %v", path, calls)
 			}
 		}
+		// Older persisted singleton Season groups have no Parent.SeriesID.
+		// Their one original season must still be sent upstream.
+		singleSeason, err := app.IDStore.RegisterMergeItem(newMergeCandidate(client.ID,
+			map[string]any{"Id": "season-single", "Type": "Season", "Name": "Season 1", "IndexNumber": 1},
+			nil, false), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if group := app.IDStore.ResolveMergeGroup(singleSeason); group == nil || group.MediaType != "Season" ||
+			len(group.Members) != 1 || group.Members[0].Parent != nil {
+			t.Fatal("test setup must retain a singleton Season group without parent evidence")
+		}
+		got := app.seasonIDsForSeriesInstance(nil, singleSeason,
+			seriesInstance{OriginalID: "series-a", ServerID: client.ID, Client: client})
+		if len(got) != 1 || got[0] != "season-single" {
+			t.Errorf("unparented singleton season IDs = %v, want season-single", got)
+		}
+		if mismatched := app.seasonIDsForSeriesInstance(nil, virtualSeason,
+			seriesInstance{OriginalID: "unrelated-series", ServerID: client.ID, Client: client}); len(mismatched) != 0 {
+			t.Errorf("known mismatched parent should not fall back: %v", mismatched)
+		}
 		failShows = true
 		rr = doJSONRequest(t, handler, http.MethodGet, requestURL, nil, token)
 		if rr.Code != http.StatusBadGateway {
@@ -140,7 +161,14 @@ func TestMergedItemImageFallbackOn404(t *testing.T) {
 		case "/Users/AuthenticateByName":
 			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "source-token", "User": map[string]any{"Id": "user-a"}})
 		case "/Items/primary/Images/Primary":
-			http.NotFound(w, r)
+			switch r.URL.Query().Get("ImageFault") {
+			case "500":
+				http.Error(w, "source image failed", http.StatusInternalServerError)
+			case "403":
+				http.Error(w, "source access denied", http.StatusForbidden)
+			default:
+				http.NotFound(w, r)
+			}
 		case "/Items/secondary/Images/Primary":
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write([]byte("secondary-image"))
@@ -158,6 +186,14 @@ func TestMergedItemImageFallbackOn404(t *testing.T) {
 		rr := doJSONRequest(t, handler, http.MethodGet, "/Items/"+virtual+"/Images/Primary", nil, token)
 		if rr.Code != http.StatusOK || rr.Body.String() != "secondary-image" {
 			t.Errorf("image fallback status=%d body=%q", rr.Code, rr.Body.String())
+		}
+		failed := doJSONRequest(t, handler, http.MethodGet, "/Items/"+virtual+"/Images/Primary?ImageFault=500", nil, token)
+		if failed.Code != http.StatusOK || failed.Body.String() != "secondary-image" {
+			t.Errorf("image fallback on upstream 500 status=%d body=%q", failed.Code, failed.Body.String())
+		}
+		forbidden := doJSONRequest(t, handler, http.MethodGet, "/Items/"+virtual+"/Images/Primary?ImageFault=403", nil, token)
+		if forbidden.Code != http.StatusForbidden {
+			t.Errorf("authentication failure must not fallback: %d", forbidden.Code)
 		}
 	})
 }
