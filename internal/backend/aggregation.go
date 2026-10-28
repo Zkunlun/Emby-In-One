@@ -8,8 +8,9 @@ import (
 
 // aggregationConfig controls the behavior of parallel upstream aggregation.
 type aggregationConfig struct {
-	gracePeriod   time.Duration // 0 = wait for all
-	globalTimeout time.Duration // hard deadline for background goroutines (prevents zombie goroutines)
+	gracePeriod     time.Duration // 0 = wait for all
+	globalTimeout   time.Duration // hard deadline for background goroutines and the caller
+	graceAfterItems bool          // only start grace after a non-empty success (Shows)
 }
 
 // indexedResult pairs a server index with its upstream fetch result.
@@ -55,9 +56,15 @@ func (a *App) aggregateUpstreams(parentCtx context.Context, cfg aggregationConfi
 			if res.result.Err == nil {
 				collected = append(collected, res.result)
 			}
-			if graceTimer == nil && len(collected) > 0 && cfg.gracePeriod > 0 {
+			if graceTimer == nil && cfg.gracePeriod > 0 &&
+				(!cfg.graceAfterItems && len(collected) > 0 || cfg.graceAfterItems && res.result.Err == nil && len(res.result.Items) > 0) {
 				graceTimer = time.After(cfg.gracePeriod)
 			}
+		case <-bgCtx.Done():
+			// A client timeout is not the only possible deadline. Even an
+			// upstream adapter that ignores context must not block forever.
+			bgCancel()
+			return collected
 		case <-graceTimer:
 			if a.Logger != nil && received < len(tasks) {
 				a.Logger.Debugf("Aggregation grace period expired: %d/%d servers responded", received, len(tasks))

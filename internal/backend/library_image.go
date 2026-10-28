@@ -195,6 +195,11 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 				if !a.isServerAllowed(reqCtx, current.ServerID) {
 					return upstreamItemsResult{Err: errMediaAccessDenied}
 				}
+				if !validShowsCollection(payload) {
+					// HTTP 200 with a malformed body is not proof of a
+					// genuinely empty season or episode list.
+					return upstreamItemsResult{Err: errors.New("invalid upstream Shows collection")}
+				}
 				if err := a.observeLegacyShowsParent(reqCtx, current.ServerID, current.OriginalID); err != nil {
 					a.logMergeHTTPError(err)
 					return upstreamItemsResult{Err: err}
@@ -214,12 +219,22 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 	}
 	cfg := a.ConfigStore.Snapshot()
 	results := a.aggregateUpstreams(r.Context(), aggregationConfig{
-		gracePeriod:   time.Duration(cfg.Timeouts.MetadataGracePeriod) * time.Millisecond,
-		globalTimeout: time.Duration(cfg.Timeouts.Global) * time.Millisecond,
+		gracePeriod:     time.Duration(cfg.Timeouts.MetadataGracePeriod) * time.Millisecond,
+		globalTimeout:   time.Duration(cfg.Timeouts.Global) * time.Millisecond,
+		graceAfterItems: true,
 	}, tasks)
-	if len(tasks) > 0 && len(results) == 0 {
+	hasItems := false
+	for _, result := range results {
+		if len(result.Items) > 0 {
+			hasItems = true
+			break
+		}
+	}
+	// If every received response was empty but one or more requested sources
+	// failed/timed out, the aggregate is unknown, not an empty series.
+	if len(tasks) > 0 && (len(results) == 0 || (!hasItems && len(results) < len(tasks))) {
 		if r.Context().Err() == nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "All available upstream shows requests failed"})
+			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "Upstream shows collection incomplete"})
 		}
 		return
 	}
@@ -253,6 +268,32 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 		a.overlayLocalSeasonUnplayedCounts(r, resolved, items)
 	}
 	writeJSON(w, http.StatusOK, paginateItems(items, r.URL.Query()))
+}
+
+// A 200 response without an Items array cannot be interpreted as "no seasons".
+// Allow both the standard Emby collection envelope and an array-only response.
+func validShowsCollection(payload any) bool {
+	raw := payload
+	if wrapper, ok := payload.(map[string]any); ok {
+		var present bool
+		raw, present = wrapper["Items"]
+		if !present {
+			raw, present = wrapper["items"]
+		}
+		if !present {
+			return false
+		}
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		if _, ok := item.(map[string]any); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // Only 404/405 for the exact endpoint authorize compatibility fallback.
