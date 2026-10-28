@@ -9,7 +9,7 @@
 
 本项目基于 [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One) 持续开发与维护。
 
-**版本说明：** **V1.4.12** 改善后台操作、媒体列表及继续观看故障处理、扩展 API 和错误信息保护；仍有两项已知的 Hills Lite 媒体列表加载问题。以 [GitHub Releases](https://github.com/Zkunlun/Emby-In-One/releases) 为准，详见[更新日志](Update.md)和[验证及已知问题](docs/release-v1.4.12-validation.md)。
+**版本说明：** **V1.4.13** 改善多上游季/集列表并发、失败与真实空结果区分，以及普通用户观看状态和合并元数据的客户端兼容性。以 [GitHub Releases](https://github.com/Zkunlun/Emby-In-One/releases) 为准，详见[更新日志](Update.md)和[发布验证范围](docs/release-v1.4.13-validation.md)。
 
 ## 适用场景
 

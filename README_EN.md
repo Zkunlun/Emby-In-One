@@ -9,7 +9,7 @@ A multi-upstream aggregation proxy for Emby clients: one entry point for multipl
 
 This project continues development and maintenance of [ArizeSky/Emby-In-One](https://github.com/ArizeSky/Emby-In-One).
 
-**Version note:** **V1.4.12** improves admin operations, media lists and Resume/NextUp failure reporting, extended API routing and error-response safety. Two Hills Lite media list issues remain unresolved. See [GitHub Releases](https://github.com/Zkunlun/Emby-In-One/releases) for the official version, the [changelog](Update.md) and [validation and known issues](docs/en/release-v1.4.12-validation.md).
+**Version note:** **V1.4.13** improves concurrent multi-upstream Seasons/Episodes retrieval, distinguishing real empty results from upstream failures, and client compatibility for local user state and merged metadata. See [GitHub Releases](https://github.com/Zkunlun/Emby-In-One/releases), the [changelog](Update.md) and [validation scope](docs/en/release-v1.4.13-validation.md).
 
 ## Who this is for
 
