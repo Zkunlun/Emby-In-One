@@ -167,12 +167,12 @@ func applyUserDataState(ud map[string]any, progress *WatchProgress) {
 	if ud == nil {
 		return
 	}
-	// These fields are personal state too, but EIO does not yet maintain an
-	// independent value for them. Removing them is safer than leaking the shared
-	// upstream account's value into a regular user's response.
+	// WatchStore records whether this proxy user played the item, not the full
+	// number of plays. Expose a local 0/1 count for Emby client compatibility;
+	// never forward the shared upstream account's count or rating.
 	delete(ud, "Rating")
-	delete(ud, "PlayCount")
 	delete(ud, "UnplayedItemCount")
+	ud["PlayCount"] = int64(0)
 
 	if progress == nil {
 		ud["PlaybackPositionTicks"] = int64(0)
@@ -185,6 +185,9 @@ func applyUserDataState(ud map[string]any, progress *WatchProgress) {
 
 	ud["PlaybackPositionTicks"] = progress.PositionTicks
 	ud["Played"] = progress.Played
+	if progress.Played {
+		ud["PlayCount"] = int64(1)
+	}
 	ud["IsFavorite"] = progress.IsFavorite
 	ud["PlayedPercentage"] = localPlayedPercentage(progress)
 	if progress.LastPlayed > 0 {

@@ -59,7 +59,10 @@ func TestUserViewsUsesCompleteLocalUserStateForRegularUsers(t *testing.T) {
 		if got, _ := ud["LastPlayedDate"].(string); got != "2026-09-25T08:32:05Z" {
 			t.Fatalf("regular LastPlayedDate=%q", got)
 		}
-		for _, key := range []string{"PlayCount", "UnplayedItemCount", "Rating"} {
+		if got, ok := numericInt64(ud["PlayCount"]); !ok || got != 0 {
+			t.Fatalf("regular PlayCount=%v, want local 0", ud["PlayCount"])
+		}
+		for _, key := range []string{"UnplayedItemCount", "Rating"} {
 			if _, ok := ud[key]; ok {
 				t.Fatalf("regular response leaked upstream %s: %#v", key, ud)
 			}
@@ -119,8 +122,8 @@ func TestFallbackProxyClearsSharedUserDataForRegularUser(t *testing.T) {
 		if _, ok := ud["LastPlayedDate"]; ok {
 			t.Fatalf("fallback leaked LastPlayedDate: %#v", ud)
 		}
-		if _, ok := ud["PlayCount"]; ok {
-			t.Fatalf("fallback leaked PlayCount: %#v", ud)
+		if got, ok := numericInt64(ud["PlayCount"]); !ok || got != 0 {
+			t.Fatalf("fallback PlayCount=%v, want local 0", ud["PlayCount"])
 		}
 	})
 }
