@@ -222,6 +222,9 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 		}
 	}
 	a.overlayLocalUserDataItems(r, items)
+	if kind == "Season" {
+		a.overlayLocalSeasonUnplayedCounts(r, resolved, items)
+	}
 	writeJSON(w, http.StatusOK, paginateItems(items, r.URL.Query()))
 }
 
