@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type indexedItem struct {
@@ -161,8 +163,11 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 			return
 		}
 	}
-	var results []upstreamItemsResult
-	for _, inst := range a.collectAllowedInstances(reqCtx, resolved) {
+	// A slow secondary must not hold the entire show's season/episode list.
+	// Reuse the bounded parallel aggregator already used by other media lists.
+	instances := a.collectAllowedInstances(reqCtx, resolved)
+	tasks := make([]upstreamTask, 0, len(instances))
+	for _, inst := range instances {
 		if !a.isServerAllowed(reqCtx, inst.ServerID) {
 			continue
 		}
@@ -177,24 +182,46 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 			query.Del("seasonid")
 			query.Set("SeasonId", raw)
 		}
-		payload, err := inst.Client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Shows/"+inst.OriginalID+"/"+endpoint, query, nil)
-		if err != nil || !a.isServerAllowed(reqCtx, inst.ServerID) {
-			continue
+		current := inst
+		queryCopy := query
+		tasks = append(tasks, upstreamTask{
+			index: len(tasks),
+			fn: func(ctx context.Context) upstreamItemsResult {
+				payload, err := current.Client.RequestJSON(ctx, reqCtx, a.Identity, http.MethodGet,
+					"/Shows/"+current.OriginalID+"/"+endpoint, queryCopy, nil)
+				if err != nil {
+					return upstreamItemsResult{Err: err}
+				}
+				if !a.isServerAllowed(reqCtx, current.ServerID) {
+					return upstreamItemsResult{Err: errMediaAccessDenied}
+				}
+				if err := a.observeLegacyShowsParent(reqCtx, current.ServerID, current.OriginalID); err != nil {
+					a.logMergeHTTPError(err)
+					return upstreamItemsResult{Err: err}
+				}
+				items := asItems(payload)
+				for _, item := range items {
+					if _, exists := item["Type"]; !exists {
+						item["Type"] = kind
+					}
+					if _, exists := item["SeriesId"]; !exists {
+						item["SeriesId"] = current.OriginalID
+					}
+				}
+				return upstreamItemsResult{ServerID: current.ServerID, Items: items, FullSources: full, RequestScope: reqCtx}
+			},
+		})
+	}
+	cfg := a.ConfigStore.Snapshot()
+	results := a.aggregateUpstreams(r.Context(), aggregationConfig{
+		gracePeriod:   time.Duration(cfg.Timeouts.MetadataGracePeriod) * time.Millisecond,
+		globalTimeout: time.Duration(cfg.Timeouts.Global) * time.Millisecond,
+	}, tasks)
+	if len(tasks) > 0 && len(results) == 0 {
+		if r.Context().Err() == nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"message": "All available upstream shows requests failed"})
 		}
-		if err := a.observeLegacyShowsParent(reqCtx, inst.ServerID, inst.OriginalID); err != nil {
-			a.logMergeHTTPError(err)
-			continue
-		}
-		items := asItems(payload)
-		for _, item := range items {
-			if _, exists := item["Type"]; !exists {
-				item["Type"] = kind
-			}
-			if _, exists := item["SeriesId"]; !exists {
-				item["SeriesId"] = inst.OriginalID
-			}
-		}
-		results = append(results, upstreamItemsResult{ServerID: inst.ServerID, Items: items, FullSources: full, RequestScope: reqCtx})
+		return
 	}
 	results = a.hydrateMergeResults(r, results)
 	items := a.mergeRoundRobinItems(results, a.clientFacingUserIDFor(r), reqCtx)

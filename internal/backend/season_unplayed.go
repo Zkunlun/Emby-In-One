@@ -1,8 +1,10 @@
 package backend
 
 import (
+	"context"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 // A season's local unplayed count needs the complete *visible* episode set.
@@ -13,6 +15,10 @@ func (a *App) overlayLocalSeasonUnplayedCounts(r *http.Request, resolved *routeR
 	if a.WatchStore == nil || !isRegularProxyUser(r) || resolved == nil || len(seasons) == 0 {
 		return
 	}
+	// The unplayed count is optional compatibility metadata. Never delay
+	// the real Season list on a slow or unavailable Episode endpoint.
+	countCtx, cancel := context.WithTimeout(r.Context(), 2500*time.Millisecond)
+	defer cancel()
 	reqCtx := requestContextFrom(r.Context())
 	instances := a.collectAllowedInstances(reqCtx, resolved)
 	if len(instances) == 0 {
@@ -30,7 +36,7 @@ func (a *App) overlayLocalSeasonUnplayedCounts(r *http.Request, resolved *routeR
 			"Limit":      {"5000"},
 		}
 		full := requestMergeFields(query)
-		payload, err := inst.Client.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet,
+		payload, err := inst.Client.RequestJSON(countCtx, reqCtx, a.Identity, http.MethodGet,
 			"/Shows/"+inst.OriginalID+"/Episodes", query, nil)
 		if err != nil || !a.isServerAllowed(reqCtx, inst.ServerID) {
 			return
@@ -68,7 +74,10 @@ func (a *App) overlayLocalSeasonUnplayedCounts(r *http.Request, resolved *routeR
 	// These episodes are fetched only for local counts. Do not inherit the
 	// public Seasons request's optional Fields (notably Path), which can
 	// trigger unnecessary per-episode metadata hydration.
-	results = a.hydrateMergeResults((&http.Request{}).WithContext(r.Context()), results)
+	results = a.hydrateMergeResults((&http.Request{}).WithContext(countCtx), results)
+	if countCtx.Err() != nil {
+		return
+	}
 	episodes := a.mergeRoundRobinItems(results, a.clientFacingUserIDFor(r), reqCtx)
 	mergedIDs := make(map[string]bool, len(episodes))
 	for _, episode := range episodes {
