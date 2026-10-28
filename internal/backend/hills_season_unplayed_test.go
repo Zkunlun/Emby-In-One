@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
 
 func TestHillsSeasonUnplayedUsesCompleteVisibleLocalEpisodes(t *testing.T) {
 	var complete atomic.Bool
+	var episodeMetadataQueries atomic.Int32
 	complete.Store(true)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -24,14 +26,19 @@ func TestHillsSeasonUnplayedUsesCompleteVisibleLocalEpisodes(t *testing.T) {
 			}})
 		case r.Method == http.MethodGet && r.URL.Path == "/Shows/series-a/Episodes":
 			episodes := []any{
-				map[string]any{"Id": "ep-one", "Type": "Episode", "Name": "S1 E1", "SeasonId": "season-one", "SeriesId": "series-a", "ParentIndexNumber": 1, "IndexNumber": 1},
-				map[string]any{"Id": "ep-two", "Type": "Episode", "Name": "S1 E2", "SeasonId": "season-one", "SeriesId": "series-a", "ParentIndexNumber": 1, "IndexNumber": 2},
-				map[string]any{"Id": "ep-three", "Type": "Episode", "Name": "S2 E1", "SeasonId": "season-two", "SeriesId": "series-a", "ParentIndexNumber": 2, "IndexNumber": 1},
+				map[string]any{"Id": "ep-one", "Type": "Episode", "Name": "S1 E1", "SeasonId": "season-one", "SeriesId": "series-a", "ParentIndexNumber": 1, "IndexNumber": 1, "MediaSources": []any{map[string]any{"Id": "ms-one"}}},
+				map[string]any{"Id": "ep-two", "Type": "Episode", "Name": "S1 E2", "SeasonId": "season-one", "SeriesId": "series-a", "ParentIndexNumber": 1, "IndexNumber": 2, "MediaSources": []any{map[string]any{"Id": "ms-two"}}},
+				map[string]any{"Id": "ep-three", "Type": "Episode", "Name": "S2 E1", "SeasonId": "season-two", "SeriesId": "series-a", "ParentIndexNumber": 2, "IndexNumber": 1, "MediaSources": []any{map[string]any{"Id": "ms-three"}}},
 			}
 			if !complete.Load() {
 				episodes = episodes[:2]
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"Items": episodes, "TotalRecordCount": 3})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			if strings.Contains(r.URL.Query().Get("Ids"), "ep-") {
+				episodeMetadataQueries.Add(1)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"Items": []any{}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -69,6 +76,15 @@ func TestHillsSeasonUnplayedUsesCompleteVisibleLocalEpisodes(t *testing.T) {
 		}
 		check(user, map[string]int64{seasonOne: 1, seasonTwo: 1}, true)
 		check(admin, map[string]int64{seasonOne: 99, seasonTwo: 99}, true)
+		// A client may request Path on the public Seasons DTO, but the
+		// private episode scan used for counts does not need file paths.
+		rr := doJSONRequest(t, handler, http.MethodGet, "/Shows/"+series+"/Seasons?Fields=Path", nil, user)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("path-requested seasons status = %d", rr.Code)
+		}
+		if got := episodeMetadataQueries.Load(); got != 0 {
+			t.Fatalf("unplayed count made %d unnecessary episode Path metadata lookups", got)
+		}
 		complete.Store(false)
 		check(user, map[string]int64{seasonOne: 0, seasonTwo: 0}, false)
 	})

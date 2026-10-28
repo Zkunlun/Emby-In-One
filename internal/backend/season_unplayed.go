@@ -65,7 +65,10 @@ func (a *App) overlayLocalSeasonUnplayedCounts(r *http.Request, resolved *routeR
 		})
 	}
 
-	results = a.hydrateMergeResults(r, results)
+	// These episodes are fetched only for local counts. Do not inherit the
+	// public Seasons request's optional Fields (notably Path), which can
+	// trigger unnecessary per-episode metadata hydration.
+	results = a.hydrateMergeResults((&http.Request{}).WithContext(r.Context()), results)
 	episodes := a.mergeRoundRobinItems(results, a.clientFacingUserIDFor(r), reqCtx)
 	mergedIDs := make(map[string]bool, len(episodes))
 	for _, episode := range episodes {
