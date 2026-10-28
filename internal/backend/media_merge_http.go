@@ -467,8 +467,11 @@ func (a *App) mergeHTTPItems(results []upstreamItemsResult, clientUserID string,
 		if pos, ok := seen[id]; ok {
 			combined := mergeProjectedSources(merged[pos]["MediaSources"], item["MediaSources"])
 			if isBetterMetadata(merged[pos], servers[id], item, unit.ServerID, cfg) {
+				retainKnownProductionYear(item, merged[pos])
 				merged[pos] = item
 				servers[id] = unit.ServerID
+			} else {
+				retainKnownProductionYear(merged[pos], item)
 			}
 			if len(combined) > 0 {
 				merged[pos]["MediaSources"] = combined
@@ -481,6 +484,18 @@ func (a *App) mergeHTTPItems(results []upstreamItemsResult, clientUserID string,
 		merged = append(merged, item)
 	}
 	return merged
+}
+
+// Preserve a real, positive production year from another confirmed member of
+// the same merged work when the preferred Overview's source lacks one. Do not
+// combine parent IDs, season indices, child counts, or other source-scoped data.
+func retainKnownProductionYear(selected, alternative map[string]any) {
+	if year, ok := numericInt(selected["ProductionYear"]); ok && year > 0 {
+		return
+	}
+	if year, ok := numericInt(alternative["ProductionYear"]); ok && year > 0 {
+		selected["ProductionYear"] = alternative["ProductionYear"]
+	}
 }
 
 // Virtual source IDs include both upstream and original item identity.
