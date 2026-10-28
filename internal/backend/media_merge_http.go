@@ -59,6 +59,21 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
+	requestedPath := false
+	if r.URL != nil {
+		for key, values := range r.URL.Query() {
+			if !strings.EqualFold(key, "Fields") {
+				continue
+			}
+			for _, value := range values {
+				for _, field := range strings.Split(value, ",") {
+					if strings.EqualFold(strings.TrimSpace(field), "Path") {
+						requestedPath = true
+					}
+				}
+			}
+		}
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	for i := range results {
@@ -85,15 +100,30 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 				result.Parents[id] = parent
 			}
 			sources, _ := item["MediaSources"].([]any)
-			if id != "" && (kind == "" || ((kind == "Movie" || kind == "Episode") && len(sources) == 0)) && !seen[id] {
+			path, _ := item["Path"].(string)
+			needsFull := kind == "" || ((kind == "Movie" || kind == "Episode") && len(sources) == 0)
+			needsPath := requestedPath && (kind == "Movie" || kind == "Episode") && path == ""
+			if id != "" && (needsFull || needsPath) && !seen[id] {
 				missing = append(missing, id)
 				seen[id] = true
 			}
 		}
-		metadata := a.fetchEncounteredMergeMetadata(ctx, reqCtx, client, missing)
+		metadata := a.fetchEncounteredMergeMetadata(ctx, reqCtx, client, missing, requestedPath)
 		for _, item := range result.Items {
 			id := mergeWireItemID(item)
 			if data := metadata[id]; data != nil {
+				kind, _ := item["Type"].(string)
+				sources, _ := item["MediaSources"].([]any)
+				if (kind == "Movie" || kind == "Episode") && len(sources) > 0 {
+					// The list already has authorized source candidates. A Path-only
+					// lookup must not replace their version list or other metadata.
+					if requestedPath {
+						if path, ok := data["Path"].(string); ok && path != "" {
+							item["Path"] = path
+						}
+					}
+					continue
+				}
 				for key, value := range data {
 					item[key] = value
 				}
@@ -129,7 +159,7 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 				missing = append(missing, parentID)
 			}
 		}
-		for id, item := range a.fetchEncounteredMergeMetadata(ctx, reqCtx, client, missing) {
+		for id, item := range a.fetchEncounteredMergeMetadata(ctx, reqCtx, client, missing, false) {
 			if parent := newMergeSeriesEvidence(result.ServerID, item); parent != nil {
 				result.Parents[id] = parent
 			}
@@ -165,7 +195,7 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 	return results
 }
 
-func (a *App) fetchEncounteredMergeMetadata(ctx context.Context, reqCtx *RequestContext, client *UpstreamClient, ids []string) map[string]map[string]any {
+func (a *App) fetchEncounteredMergeMetadata(ctx context.Context, reqCtx *RequestContext, client *UpstreamClient, ids []string, includePath bool) map[string]map[string]any {
 	metadata := map[string]map[string]any{}
 	for start := 0; start < len(ids); start += maxBatchIDCount {
 		if ctx.Err() != nil || !a.isServerAllowed(reqCtx, client.ID) {
@@ -180,6 +210,9 @@ func (a *App) fetchEncounteredMergeMetadata(ctx context.Context, reqCtx *Request
 			requested[id] = true
 		}
 		q := url.Values{"Ids": {strings.Join(ids[start:end], ",")}, "UserId": {client.clientUserID()}}
+		if includePath {
+			q.Set("Fields", "Path")
+		}
 		requestMergeFields(q)
 		payload, err := client.RequestJSON(ctx, reqCtx, a.Identity, http.MethodGet, "/Items", q, nil)
 		if err != nil || !a.isServerAllowed(reqCtx, client.ID) {
