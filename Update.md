@@ -1,5 +1,24 @@
 # Emby-In-One 更新日志
 
+## V1.4.14
+
+发布日期：以 GitHub Release 页面为准（V1.4.14）
+
+> 基于 V1.4.13，仅解决真实 VividPlayer 客户端打开部分上游媒体库时 HTTP 502 的通用兼容问题。保持授权、映射、媒体源选择、播放转发及 SQLite 存储契约不变，不按上游、库名或数字 ID 特判。
+
+### 上游媒体库详情身份兼容
+
+- 某些上游以媒体库视图 GUID 返回 /Users/{user}/Views，但按该 GUID 请求 /Users/{user}/Items/{id} 时返回另一条 CollectionFolder，其 Id 是独立数字 ID。原 EIO 正确地拒绝错配，却因唯一结果被丢弃而返回 502。
+- 仅对 CollectionFolder/UserView 详情错配，在同一已授权上游、同一上游用户范围内再次获取 /Users/{user}/Views；仅接纳 Id 与原始映射完全一致且类型是媒体库视图的结果，随后沿用既有虚拟 ID 投影。普通 Movie/Series/Episode、无匹配或错误类型仍拒绝错配，避免误绑其他媒体库。
+- 定向测试覆盖 GUID 正常详情、匹配的视图回退、无匹配、类型错误以及普通影片拒绝回退；无生产媒体 ID 或上游名称硬编码。VividPlayer 用户已实机验收媒体库打开功能。
+
+### 独立部署环境修复（不属于 EIO 二进制）
+
+- DMIT 的 MMWX 自动生成 nginx 站点启用 TLS 1.2/1.3，却只配置 ECDHE-ECDSA 套件；EIO 域名使用 RSA 证书，导致 WinHTTP 在 TLS 1.2 握手失败（12175），不同上游影片均无法播放。为 EIO 站点追加 ECDHE-RSA-AES128-GCM-SHA256 / ECDHE-RSA-AES256-GCM-SHA384 后，WinHTTP、TLS1.2 与 TLS1.3 请求恢复，VividPlayer 播放已实机验收。
+- 由 MMWX 管理的站点可能重新生成，因此 DMIT 专门运行 eio-tls12-compat.path/.service 与 /usr/local/sbin/eio-tls12-compat.sh：仅在 EIO 站点的已知模板丢失 ECDHE-RSA 时恢复配置，nginx -t 通过才 reload。模拟覆盖后的自动恢复已验证。其他站点/节点未修改。今后 MMWX 修复生成模板后可撤销该本地兼容措施。
+- 升级时保留 config/、data/、SQLite WAL、Token 和 user-password.key；正式 CI/Release 资产与 DMIT 部署验证以实际执行结果为准。
+
+---
 ## V1.4.13
 
 发布日期：以 GitHub Release 页面为准（V1.4.13）

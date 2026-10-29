@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -90,7 +91,20 @@ func (a *App) handleMergeItemDetail(w http.ResponseWriter, r *http.Request, user
 					return upstreamItemsResult{Err: errMediaMappingMissing}
 				}
 				if returned, _ := data["Id"].(string); returned != "" && returned != instance.OriginalID {
-					return upstreamItemsResult{Err: errMediaMappingMissing}
+					// Some upstreams resolve a library view's GUID to a distinct
+					// CollectionFolder ID. Never alias the two IDs: only accept
+					// the exact view issued to this upstream user by /Views.
+					if kind, _ := data["Type"].(string); selected == nil && isLibraryViewType(kind) {
+						if verified := a.matchingLibraryViewDetail(ctx, reqCtx, instance); verified != nil {
+							data = verified
+						}
+					}
+					if actual, _ := data["Id"].(string); actual != instance.OriginalID {
+						if a.Logger != nil {
+							a.Logger.Warnf("Item detail ID mismatch: item=%s upstream=%s expected=%s returned=%s type=%v", id, instance.ServerID, instance.OriginalID, returned, data["Type"])
+						}
+						return upstreamItemsResult{Err: errMediaMappingMissing}
+					}
 				}
 				data["Id"] = instance.OriginalID
 				if selected == nil {
@@ -190,6 +204,32 @@ func (a *App) handleMergeItemDetail(w http.ResponseWriter, r *http.Request, user
 	}
 	a.overlayLocalUserData(r, id, base)
 	writeJSON(w, http.StatusOK, base)
+}
+
+// An upstream may return a different physical CollectionFolder for a view GUID.
+// Use only the exact user-visible view, not the mismatched DTO or its numeric ID.
+func (a *App) matchingLibraryViewDetail(ctx context.Context, reqCtx *RequestContext, instance seriesInstance) map[string]any {
+	if instance.Client == nil || instance.OriginalID == "" || !a.isServerAllowed(reqCtx, instance.ServerID) {
+		return nil
+	}
+	user := instance.Client.clientUserID()
+	if user == "" {
+		return nil
+	}
+	query := url.Values{}
+	query.Set("UserId", user)
+	payload, err := instance.Client.RequestJSON(ctx, reqCtx, a.Identity, http.MethodGet, "/Users/"+user+"/Views", query, nil)
+	if err != nil {
+		return nil
+	}
+	for _, view := range asItems(payload) {
+		viewID, _ := view["Id"].(string)
+		kind, _ := view["Type"].(string)
+		if viewID == instance.OriginalID && isLibraryViewType(kind) {
+			return view
+		}
+	}
+	return nil
 }
 
 func (a *App) prepareMergePlaybackItem(r *http.Request, id string, resolved *routeResolution) error {
