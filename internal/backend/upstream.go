@@ -35,6 +35,7 @@ var sharedTransport = &http.Transport{
 	// Disable automatic decompression to ensure we don't return decompressed bytes
 	// with mismatching Content-Length headers back to the client.
 	DisableCompression: true,
+	ForceAttemptHTTP2:  true,
 }
 
 var embyClientHeaders = map[string]string{
@@ -340,6 +341,7 @@ func buildProxyTransport(proxyURL string, logger *Logger, serverName string) (ht
 		ResponseHeaderTimeout: upstreamHeaderTimeout,
 		DialContext:           upstreamTransportDialer(),
 		DisableCompression:    true,
+		ForceAttemptHTTP2:     true,
 	}, true
 }
 
