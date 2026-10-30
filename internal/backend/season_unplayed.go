@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 )
 
@@ -25,8 +26,16 @@ func (a *App) overlayLocalSeasonUnplayedCounts(r *http.Request, resolved *routeR
 		return
 	}
 
-	results := make([]upstreamItemsResult, 0, len(instances))
-	for _, inst := range instances {
+	// Only independent HTTP fetches run in workers. Episode validation, merge
+	// provenance and local UserData projections remain deterministic and serial.
+	type episodeScanResult struct {
+		payload any
+		err     error
+		full    bool
+	}
+	requests := make([]url.Values, len(instances))
+	fullSources := make([]bool, len(instances))
+	for i, inst := range instances {
 		if !a.isServerAllowed(reqCtx, inst.ServerID) {
 			return
 		}
@@ -35,12 +44,44 @@ func (a *App) overlayLocalSeasonUnplayedCounts(r *http.Request, resolved *routeR
 			"StartIndex": {"0"},
 			"Limit":      {"5000"},
 		}
-		full := requestMergeFields(query)
-		payload, err := inst.Client.RequestJSON(countCtx, reqCtx, a.Identity, http.MethodGet,
-			"/Shows/"+inst.OriginalID+"/Episodes", query, nil)
-		if err != nil || !a.isServerAllowed(reqCtx, inst.ServerID) {
+		fullSources[i] = requestMergeFields(query)
+		requests[i] = query
+	}
+	fetched := make([]episodeScanResult, len(instances))
+	workers := len(instances)
+	if workers > 4 {
+		workers = 4
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				if countCtx.Err() != nil {
+					fetched[index].err = countCtx.Err()
+					continue
+				}
+				inst := instances[index]
+				fetched[index].payload, fetched[index].err = inst.Client.RequestJSON(
+					countCtx, reqCtx, a.Identity, http.MethodGet,
+					"/Shows/"+inst.OriginalID+"/Episodes", requests[index], nil)
+			}
+		}()
+	}
+	for i := range instances {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	results := make([]upstreamItemsResult, 0, len(instances))
+	for i, inst := range instances {
+		if !a.isServerAllowed(reqCtx, inst.ServerID) || fetched[i].err != nil {
 			return
 		}
+		payload, full := fetched[i].payload, fullSources[i]
 		page, ok := payload.(map[string]any)
 		if !ok {
 			return

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -76,6 +77,55 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
+
+	// Only independent first-pass metadata HTTP requests fan out. All parent
+	// proof, DTO mutation, IDStore reads/writes, and merge publication below
+	// remain in stable source order on this goroutine.
+	prefetched := make([]map[string]map[string]any, len(results))
+	workers := len(results)
+	if workers > 4 {
+		workers = 4
+	}
+	jobs := make(chan int)
+	var group sync.WaitGroup
+	for n := 0; n < workers; n++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for index := range jobs {
+				result := &results[index]
+				if !a.isServerAllowed(reqCtx, result.ServerID) || ctx.Err() != nil {
+					continue
+				}
+				client := a.Upstream.ClientByID(result.ServerID)
+				if client == nil || !client.IsOnline() {
+					continue
+				}
+				missing := []string{}
+				seen := map[string]bool{}
+				for _, item := range result.Items {
+					id := mergeWireItemID(item)
+					kind, _ := item["Type"].(string)
+					sources, _ := item["MediaSources"].([]any)
+					path, _ := item["Path"].(string)
+					needsFull := kind == "" || ((kind == "Movie" || kind == "Episode") && len(sources) == 0)
+					needsPath := requestedPath && (kind == "Movie" || kind == "Episode") && path == ""
+					if id != "" && (needsFull || needsPath) && !seen[id] {
+						missing = append(missing, id)
+						seen[id] = true
+					}
+				}
+				if len(missing) > 0 {
+					prefetched[index] = a.fetchEncounteredMergeMetadata(ctx, reqCtx, client, missing, requestedPath)
+				}
+			}
+		}()
+	}
+	for i := range results {
+		jobs <- i
+	}
+	close(jobs)
+	group.Wait()
 	for i := range results {
 		result := &results[i]
 		if !a.isServerAllowed(reqCtx, result.ServerID) {
@@ -108,7 +158,7 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 				seen[id] = true
 			}
 		}
-		metadata := a.fetchEncounteredMergeMetadata(ctx, reqCtx, client, missing, requestedPath)
+		metadata := prefetched[i]
 		for _, item := range result.Items {
 			id := mergeWireItemID(item)
 			if data := metadata[id]; data != nil {
