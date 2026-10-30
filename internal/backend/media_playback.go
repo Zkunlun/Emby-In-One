@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 )
 
 func directStreamTargetPath(rawDirectURL, streamBaseURL string) string {
@@ -167,14 +168,19 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 	basePlaySessionID := ""
 	clientPlaySessionID := ""
 	allMediaSources := []map[string]any{}
-	for _, inst := range instances {
+	// Build all upstream request carriers in source order. This phase is
+	// intentionally serial: only the independent network round trips below
+	// run concurrently, never the ID/mapping/session or lease mutations.
+	type playbackUpstreamRequest struct {
+		params  url.Values
+		body    any
+		allowed bool
+	}
+	requests := make([]playbackUpstreamRequest, len(instances))
+	for i, inst := range instances {
 		if !a.isServerAllowed(reqCtx, inst.ServerID) {
 			continue
 		}
-		// GET PlaybackInfo declares UserId in Query and no request body. POST
-		// declares UserId/MediaSourceId in PlaybackInfoRequest's JSON Body.
-		// Keep the upstream's own user and selected source in the correct
-		// carrier: forwarding EIO's virtual user to Emby can produce a 500.
 		instQuery := cloneValues(query)
 		if selected == nil {
 			if source := a.defaultMergeSource(r.PathValue("itemId"), inst.ServerID, inst.OriginalID); source != "" {
@@ -204,7 +210,52 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 			}
 			outboundBody = instBody
 		}
-		payload, err := inst.Client.RequestJSON(r.Context(), requestContextFrom(r.Context()), a.Identity, r.Method, "/Items/"+inst.OriginalID+"/PlaybackInfo", instQuery, outboundBody)
+		requests[i] = playbackUpstreamRequest{params: instQuery, body: outboundBody, allowed: true}
+	}
+	type playbackUpstreamResult struct {
+		payload any
+		err     error
+	}
+	results := make([]playbackUpstreamResult, len(instances))
+	workerCount := len(instances)
+	if workerCount > 4 {
+		workerCount = 4
+	}
+	jobs := make(chan int)
+	var fetchers sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		fetchers.Add(1)
+		go func() {
+			defer fetchers.Done()
+			for idx := range jobs {
+				if !requests[idx].allowed {
+					continue
+				}
+				if err := r.Context().Err(); err != nil {
+					results[idx].err = err
+					continue
+				}
+				inst := instances[idx]
+				request := requests[idx]
+				results[idx].payload, results[idx].err = inst.Client.RequestJSON(
+					r.Context(), reqCtx, a.Identity, r.Method,
+					"/Items/"+inst.OriginalID+"/PlaybackInfo", request.params, request.body)
+			}
+		}()
+	}
+	for i := range instances {
+		jobs <- i
+	}
+	close(jobs)
+	fetchers.Wait()
+
+	// Preserve deterministic source priority, MediaSource routing, session
+	// ownership and provisional lease handling regardless of network order.
+	for i, inst := range instances {
+		if !requests[i].allowed || !a.isServerAllowed(reqCtx, inst.ServerID) {
+			continue
+		}
+		payload, err := results[i].payload, results[i].err
 		if err != nil {
 			if a.Logger != nil {
 				a.Logger.Warnf("PlaybackInfo: server=[%s] originalId=%s failed: %s", inst.Client.Name, inst.OriginalID, redactURLInError(err))
