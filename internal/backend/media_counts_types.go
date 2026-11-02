@@ -30,6 +30,7 @@ var (
 
 // A successful zero is a complete value; absence is represented by HasSnapshot,
 // never by a fabricated zero-valued mediaCounts.
+// Optional official fields are retained separately, never guessed from these three.
 type mediaCounts struct {
 	MovieCount   int64 `json:"MovieCount"`
 	SeriesCount  int64 `json:"SeriesCount"`
@@ -93,7 +94,7 @@ func countsObjectFields(payload []byte, wanted map[string]bool) (map[string]json
 		if err := decoder.Decode(&raw); err != nil {
 			return nil, errInvalidCounts
 		}
-		if wanted[name] {
+		if _, selected := wanted[name]; selected {
 			if _, duplicate := fields[name]; duplicate {
 				return nil, errInvalidCounts
 			}
@@ -108,42 +109,73 @@ func countsObjectFields(payload []byte, wanted map[string]bool) (map[string]json
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return nil, errInvalidCounts
 	}
-	for name := range wanted {
-		if _, exists := fields[name]; !exists {
+	for name, required := range wanted {
+		if _, exists := fields[name]; required && !exists {
 			return nil, errInvalidCounts
 		}
 	}
 	return fields, nil
 }
 
-func decodeMediaCounts(payload []byte) (mediaCounts, error) {
-	if len(payload) > countsPayloadLimit {
-		return mediaCounts{}, errInvalidCounts
+var officialOptionalCounts = [...]string{
+	"AlbumCount", "ArtistCount", "BookCount", "BoxSetCount", "GameCount",
+	"GameSystemCount", "ItemCount", "MusicVideoCount", "ProgramCount",
+	"SongCount", "TrailerCount",
+}
+
+func parseCountsNumber(raw []byte) (int64, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return 0, errInvalidCounts
 	}
-	fields, err := countsObjectFields(payload, map[string]bool{
-		"MovieCount": true, "SeriesCount": true, "EpisodeCount": true,
-	})
+	for _, digit := range raw {
+		if digit < '0' || digit > '9' {
+			return 0, errInvalidCounts
+		}
+	}
+	value, err := strconv.ParseInt(string(raw), 10, 64)
+	if err != nil || value > countsSourceMax {
+		return 0, errCountsOutOfRange
+	}
+	return value, nil
+}
+
+func decodeMediaCountsWithExtras(payload []byte) (mediaCounts, map[string]int64, error) {
+	if len(payload) > countsPayloadLimit {
+		return mediaCounts{}, nil, errInvalidCounts
+	}
+	wanted := map[string]bool{"MovieCount": true, "SeriesCount": true, "EpisodeCount": true}
+	for _, name := range officialOptionalCounts {
+		wanted[name] = false
+	}
+	fields, err := countsObjectFields(payload, wanted)
 	if err != nil {
-		return mediaCounts{}, err
+		return mediaCounts{}, nil, err
 	}
 	var values [3]int64
 	for i, name := range []string{"MovieCount", "SeriesCount", "EpisodeCount"} {
-		raw := bytes.TrimSpace(fields[name])
-		if len(raw) == 0 {
-			return mediaCounts{}, errInvalidCounts
+		values[i], err = parseCountsNumber(fields[name])
+		if err != nil {
+			return mediaCounts{}, nil, err
 		}
-		for _, digit := range raw {
-			if digit < '0' || digit > '9' {
-				return mediaCounts{}, errInvalidCounts
-			}
-		}
-		value, err := strconv.ParseInt(string(raw), 10, 64)
-		if err != nil || value > countsSourceMax {
-			return mediaCounts{}, errCountsOutOfRange
-		}
-		values[i] = value
 	}
-	return mediaCounts{values[0], values[1], values[2]}, nil
+	extras := make(map[string]int64)
+	for _, name := range officialOptionalCounts {
+		if raw, ok := fields[name]; ok {
+			value, parseErr := parseCountsNumber(raw)
+			if parseErr == nil {
+				extras[name] = value
+			}
+			// Optional data from an Emby-compatible source must never turn
+			// otherwise valid core counts into an HTTP 503.
+		}
+	}
+	return mediaCounts{values[0], values[1], values[2]}, extras, nil
+}
+
+func decodeMediaCounts(payload []byte) (mediaCounts, error) {
+	value, _, err := decodeMediaCountsWithExtras(payload)
+	return value, err
 }
 
 func validCountsProbe(payload []byte) bool {
@@ -198,6 +230,7 @@ func (wait countsWait) merge(other countsWait) countsWait {
 }
 
 type countsAttempt struct {
+	Extra                 map[string]int64
 	Value                 mediaCounts
 	Success               bool
 	Sent                  bool // Application transport attempt, not wire requests/packets.
@@ -208,6 +241,7 @@ type countsAttempt struct {
 }
 
 type countsRoundResult struct {
+	Extra        map[string]int64
 	Value        mediaCounts
 	Success      bool
 	Class        countsErrorClass
@@ -220,6 +254,7 @@ type countsRoundResult struct {
 }
 
 type countsSnapshot struct {
+	Extra          map[string]int64
 	Value          mediaCounts
 	SucceededAt    time.Time
 	DataGeneration uint64

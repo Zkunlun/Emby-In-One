@@ -340,7 +340,7 @@ func requestCountsAttempt(ctx context.Context, source countsSourceSpec, probe bo
 	if probe {
 		attempt.Success = validCountsProbe(body)
 	} else {
-		attempt.Value, err = decodeMediaCounts(body)
+		attempt.Value, attempt.Extra, err = decodeMediaCountsWithExtras(body)
 		attempt.Success = err == nil
 	}
 	if !attempt.Success {
@@ -410,7 +410,7 @@ func (collector *countsUpstreamCollector) collect(ctx context.Context, source co
 		return result
 	}
 	if first.Success {
-		result.Value, result.Success, result.Class = first.Value, true, countsOK
+		result.Value, result.Extra, result.Success, result.Class = first.Value, first.Extra, true, countsOK
 		return result
 	}
 	// Preparation/retirement never produced a Counts transport attempt.
@@ -454,7 +454,7 @@ func (collector *countsUpstreamCollector) collect(ctx context.Context, source co
 		return result
 	}
 	if second.Success {
-		result.Value, result.Success, result.Class = second.Value, true, countsOK
+		result.Value, result.Extra, result.Success, result.Class = second.Value, second.Extra, true, countsOK
 	}
 	return result
 }

@@ -255,12 +255,13 @@ func (a *App) handleItemsCounts(w http.ResponseWriter, r *http.Request) {
 // -> clients, in sorted stable-ID order. Resolve pool/config BEFORE holding
 // client locks: pool listener installation takes pool -> client and must not
 // be acquired in reverse. No identity, grants, snapshots or caches are mutated.
-func (a *App) readCountsScopeLocked(scope mediaAccessScope) (mediaCounts, string, func()) {
+func (a *App) readCountsScopeLocked(scope mediaAccessScope) (map[string]int64, string, func()) {
+	empty := map[string]int64{"MovieCount": 0, "SeriesCount": 0, "EpisodeCount": 0}
 	if len(scope.serverIDs) == 0 {
-		return mediaCounts{}, "", nil
+		return empty, "", nil
 	}
 	if a.Upstream == nil {
-		return mediaCounts{}, "COUNTS_UNAVAILABLE", nil
+		return nil, "COUNTS_UNAVAILABLE", nil
 	}
 	cfg := a.ConfigStore.Snapshot()
 	configured := make(map[string]UpstreamConfig, len(cfg.Upstream))
@@ -271,7 +272,7 @@ func (a *App) readCountsScopeLocked(scope mediaAccessScope) (mediaCounts, string
 	for _, id := range scope.serverIDs {
 		client := a.Upstream.ClientByID(id)
 		if client == nil {
-			return mediaCounts{}, "COUNTS_UNAVAILABLE", nil
+			return nil, "COUNTS_UNAVAILABLE", nil
 		}
 		clients = append(clients, client)
 	}
@@ -294,16 +295,18 @@ func (a *App) readCountsScopeLocked(scope mediaAccessScope) (mediaCounts, string
 		}
 	}
 	total := mediaCounts{}
+	optionalTotals := map[string]int64{}
+	onlineCount := 0
 	for _, client := range clients {
 		source, exists := configured[client.ID]
 		if !exists || client.retired || !reflect.DeepEqual(source, client.Config) {
-			return mediaCounts{}, "COUNTS_UNAVAILABLE", release
+			return nil, "COUNTS_UNAVAILABLE", release
 		}
 		if !client.Online {
 			continue
 		}
 		if cache == nil || cache.closed || a.mediaCounts.closed.Load() {
-			return mediaCounts{}, "COUNTS_UNAVAILABLE", release
+			return nil, "COUNTS_UNAVAILABLE", release
 		}
 		proxyURL := ""
 		if proxy := findProxy(cfg.Proxies, source.ProxyID); proxy != nil {
@@ -316,18 +319,40 @@ func (a *App) readCountsScopeLocked(scope mediaAccessScope) (mediaCounts, string
 			client.countsLoginConfig != client.configuredCountsLoginBinding() ||
 			state.spec.Auth.UserID != client.UserID ||
 			state.spec.DataSignature != countsDataSignature(client, client.UserID, proxyURL, cache.key) {
-			return mediaCounts{}, "COUNTS_UNAVAILABLE", release
+			return nil, "COUNTS_UNAVAILABLE", release
 		}
-		// The account and generation are current. An old complete success remains
-		// valid during same-account re-login, ordinary failure or rate limiting.
+		// A valid older snapshot is still usable across transient failures.
 		if !state.snapshot.Value.validSource() {
-			return mediaCounts{}, "COUNTS_OUT_OF_RANGE", release
+			return nil, "COUNTS_OUT_OF_RANGE", release
 		}
 		value, err := total.add(state.snapshot.Value)
 		if err != nil {
-			return mediaCounts{}, "COUNTS_OUT_OF_RANGE", release
+			return nil, "COUNTS_OUT_OF_RANGE", release
 		}
 		total = value
+		// An optional field is returned only when every counted online
+		// upstream actually supplied it. No source is assumed to be zero.
+		if onlineCount == 0 {
+			for name, count := range state.snapshot.Extra {
+				optionalTotals[name] = count
+			}
+		} else {
+			for name, count := range optionalTotals {
+				other, ok := state.snapshot.Extra[name]
+				if !ok {
+					delete(optionalTotals, name)
+					continue
+				}
+				if count < 0 || other < 0 || count > countsJSONSafeMax || other > countsJSONSafeMax-count {
+					return nil, "COUNTS_OUT_OF_RANGE", release
+				}
+				optionalTotals[name] = count + other
+			}
+		}
+		onlineCount++
 	}
-	return total, "", release
+	optionalTotals["MovieCount"] = total.MovieCount
+	optionalTotals["SeriesCount"] = total.SeriesCount
+	optionalTotals["EpisodeCount"] = total.EpisodeCount
+	return optionalTotals, "", release
 }

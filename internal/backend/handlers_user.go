@@ -1,6 +1,9 @@
 package backend
 
-import "net/http"
+import (
+	"net/http"
+	"time"
+)
 
 func (a *App) handleAuthenticateByName(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r, a.ConfigStore.Snapshot().Server.TrustProxy)
@@ -151,30 +154,33 @@ func (a *App) handleUserViews(w http.ResponseWriter, r *http.Request) {
 	multiSource := len(onlineClients) > 1
 	hidden := a.hiddenLibrariesFor(reqCtx)
 
-	groups := fanOutClients(onlineClients, func(c *UpstreamClient) []map[string]any {
-		query := cloneValues(r.URL.Query())
-		query.Set("UserId", c.clientUserID())
-		payload, err := c.RequestJSON(r.Context(), reqCtx, a.Identity, http.MethodGet, "/Users/"+c.clientUserID()+"/Views", query, nil)
-		if err != nil {
-			return nil
-		}
-		var items []map[string]any
-		for _, item := range asItems(payload) {
-			if isHiddenLibraryItem(hidden, c.ID, item) {
+	// A slow source must not hold back every already-completed library.
+	// Never mistake an all-failed request for a genuine empty success.
+	groups, successes := a.collectUserViews(r, reqCtx, onlineClients, hidden,
+		time.Duration(cfg.Timeouts.Global)*time.Millisecond)
+	if r.Context().Err() != nil {
+		return
+	}
+	if len(onlineClients) > 0 && successes == 0 {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"message": "All available upstream Views requests failed"})
+		return
+	}
+	allViews := make([]map[string]any, 0)
+	for i, client := range onlineClients {
+		for _, item := range groups[i] {
+			if isHiddenLibraryItem(hidden, client.ID, item) {
 				continue
 			}
 			rewritten := deepCloneMap(item)
-			rewriteResponseIDs(rewritten, c.ID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
+			rewriteResponseIDs(rewritten, client.ID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
 			if multiSource {
 				if name, _ := rewritten["Name"].(string); name != "" {
-					rewritten["Name"] = name + " (" + c.Name + ")"
+					rewritten["Name"] = name + " (" + client.Name + ")"
 				}
 			}
-			items = append(items, rewritten)
+			allViews = append(allViews, rewritten)
 		}
-		return items
-	})
-	allViews := flattenItems(groups)
+	}
 	payload := map[string]any{
 		"Items":            toAnySlice(allViews),
 		"TotalRecordCount": len(allViews),

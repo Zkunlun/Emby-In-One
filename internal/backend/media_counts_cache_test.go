@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func TestMediaCountsCacheAtomicReplacementAndFailure(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		now = now.Add(time.Hour)
 		cache.refresh(context.Background(), "a")
-		if got := cache.read("a"); !got.HasSnapshot || got.Snapshot != original {
+		if got := cache.read("a"); !got.HasSnapshot || !reflect.DeepEqual(got.Snapshot, original) {
 			t.Fatal("failure/invalid triple damaged complete success")
 		}
 	}
@@ -55,7 +56,7 @@ func TestMediaCountsCacheGenerationAndCooldown(t *testing.T) {
 	client.apiObservation++
 	client.mu.Unlock()
 	cache.syncSource(cache.prepareSource(client, nil, ""))
-	if got := cache.read("a"); !got.HasSnapshot || got.Snapshot != original.Snapshot || got.WorkGeneration == original.WorkGeneration {
+	if got := cache.read("a"); !got.HasSnapshot || !reflect.DeepEqual(got.Snapshot, original.Snapshot) || got.WorkGeneration == original.WorkGeneration {
 		t.Fatal("same account token rotation lost old success or retained work lease")
 	}
 	cache.mu.Lock()
@@ -209,7 +210,7 @@ func TestMediaCountsCacheOfflineObservationDoesNotBeatNewLogin(t *testing.T) {
 			if client.IsOnline() != newLogin {
 				t.Fatal("offline result superseded a newer login or failed to publish")
 			}
-			if got := cache.read("a"); !got.HasSnapshot || got.Snapshot != old {
+			if got := cache.read("a"); !got.HasSnapshot || !reflect.DeepEqual(got.Snapshot, old) {
 				t.Fatal("offline observation destroyed old complete value")
 			}
 		})

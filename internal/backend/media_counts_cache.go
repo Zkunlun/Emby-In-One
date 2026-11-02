@@ -34,7 +34,9 @@ type countsSourceState struct {
 	inFlight        *countsFlight
 	pending         bool
 	nextAllowedAt   time.Time
+	retryUntil      time.Time
 	limitedFailures uint8
+	retryFailures   uint8
 }
 
 type countsCacheView struct {
@@ -119,6 +121,13 @@ func (cache *countsCache) syncSource(source countsSourceSpec) bool {
 		return false
 	}
 	if dataChanged {
+		// A new source generation must not inherit the old source's transient
+		// retry. Keep authoritative rate-limit waits, if any, untouched.
+		if !state.retryUntil.IsZero() && state.nextAllowedAt.Equal(state.retryUntil) {
+			state.nextAllowedAt = time.Time{}
+		}
+		state.retryUntil = time.Time{}
+		state.retryFailures = 0
 		state.dataGeneration = cache.nextGenerationLocked()
 		state.snapshot, state.hasSnapshot = countsSnapshot{}, false
 	}
@@ -330,14 +339,33 @@ func (cache *countsCache) finish(id string, flight *countsFlight, ctx context.Co
 	if current {
 		state.lastErrorClass = result.Class
 		if result.Success && result.Value.validSource() {
-			state.snapshot = countsSnapshot{Value: result.Value, SucceededAt: cache.now(),
+			state.snapshot = countsSnapshot{Value: result.Value, Extra: result.Extra, SucceededAt: cache.now(),
 				DataGeneration: state.dataGeneration}
 			state.hasSnapshot = true
 			state.limitedFailures = 0
+			state.retryFailures = 0
+			state.retryUntil = time.Time{}
 			state.nextAllowedAt = time.Time{}
 			state.lastErrorClass = countsOK
 		} else if result.Success {
 			result.Success, result.Class, state.lastErrorClass = false, countsPayload, countsPayload
+		}
+		// A transient initial failure must not strand the user at 503 until
+		// the next hourly sweep. Schedule background retries with bounded
+		// backoff; reads remain network-free and no missing value becomes zero.
+		if !result.Success && !state.hasSnapshot && !result.Wait.Limited &&
+			result.Class != countsChanged && result.Class != countsCanceled &&
+			result.Class != countsNotReady && result.Reachability != countsReachabilityOffline {
+			if state.retryFailures < 4 {
+				state.retryFailures++
+			}
+			delay := 5 * time.Minute * time.Duration(1<<(state.retryFailures-1))
+			until := cache.now().Add(delay)
+			state.retryUntil = until
+			if until.After(state.nextAllowedAt) {
+				state.nextAllowedAt = until
+			}
+			state.pending = true
 		}
 		if result.Reachability == countsReachabilityOffline {
 			if !flight.source.Client.publishCountsOfflineLocked(flight.source.Auth, flight.source.Observation) {
@@ -356,8 +384,8 @@ func (cache *countsCache) finish(id string, flight *countsFlight, ctx context.Co
 	}
 	if validIncarnation && state.inFlight == flight {
 		state.inFlight = nil
-		// No implicit retry for ordinary failure. A known cooldown or changed
-		// source leaves only the already recorded pending intent.
+		// A failed initial round retains only one pending retry intent; no
+		// extra collection is started by the handler or this completion.
 	}
 	flight.result = result
 	close(flight.done)
