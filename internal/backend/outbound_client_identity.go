@@ -148,7 +148,7 @@ func isCurrentDeviceQueryEndpoint(businessPath, method string, stream bool) bool
 		return false
 	}
 	parts := strings.Split(strings.TrimPrefix(businessPath, "/"), "/")
-	if len(parts) < 3 || (parts[0] != "Videos" && parts[0] != "Audio") || parts[1] == "" {
+	if len(parts) < 3 || (!strings.EqualFold(parts[0], "Videos") && !strings.EqualFold(parts[0], "Audio")) || parts[1] == "" {
 		return false
 	}
 	for _, part := range parts[2:] {
@@ -170,12 +170,12 @@ func isCurrentDeviceQueryEndpoint(businessPath, method string, stream bool) bool
 	case "stream", "master.m3u8":
 		return true
 	case "universal":
-		return parts[0] == "Audio"
+		return strings.EqualFold(parts[0], "Audio")
 	case "live.m3u8", "main.m3u8":
 		return method == http.MethodGet
 	}
 	if strings.HasPrefix(file, "universal.") {
-		return parts[0] == "Audio" && len(file) > len("universal.")
+		return strings.EqualFold(parts[0], "Audio") && len(file) > len("universal.")
 	}
 	// The official single StreamFileName route includes named media files.
 	// Keep unknown extensionless operations outside this conservative matcher.

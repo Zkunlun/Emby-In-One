@@ -128,3 +128,57 @@ func TestCredentialEndpointHasNoCrossOriginGrant(t *testing.T) {
 		}
 	})
 }
+
+// TestPrefixCompatMediaCaseBoundary ensures only the video/audio namespace is
+// normalized. The resource ID, rest, escaped slashes, query, and auth headers
+// must not be changed when a client uses a non-canonical media route spelling.
+func TestPrefixCompatMediaCaseBoundary(t *testing.T) {
+	cases := []struct {
+		name, method, target, wantPath, wantEscaped string
+	}{
+		{"prefixed lowercase video", http.MethodGet, "/emby/videos/ItemABC/stream.mp4?Static=true", "/Videos/ItemABC/stream.mp4", "/Videos/ItemABC/stream.mp4"},
+		{"prefixed mixed video", http.MethodGet, "/emby/ViDeOs/ABC/HLS1/main.m3u8", "/Videos/ABC/HLS1/main.m3u8", "/Videos/ABC/HLS1/main.m3u8"},
+		{"unprefixed lowercase video", http.MethodGet, "/videos/item/master.m3u8", "/Videos/item/master.m3u8", "/Videos/item/master.m3u8"},
+		{"prefixed lowercase audio", http.MethodGet, "/emby/audio/AudioID/stream.mp3", "/Audio/AudioID/stream.mp3", "/Audio/AudioID/stream.mp3"},
+		{"unprefixed mixed audio HEAD", http.MethodHead, "/aUdIo/AudioID/universal", "/Audio/AudioID/universal", "/Audio/AudioID/universal"},
+		{"case-sensitive item and resource", http.MethodGet, "/emby/VIDeos/XyZ123/STREAM.MP4", "/Videos/XyZ123/STREAM.MP4", "/Videos/XyZ123/STREAM.MP4"},
+		{"encoded rest preserved", http.MethodGet, "/emby/videos/Id/original%2Ffile.mkv?Range=0", "/Videos/Id/original/file.mkv", "/Videos/Id/original%2Ffile.mkv"},
+		{"encoded item preserved", http.MethodGet, "/videos/id%2Fsegment/stream.mp4", "/Videos/id/segment/stream.mp4", "/Videos/id%2Fsegment/stream.mp4"},
+		{"unknown top-level route unchanged", http.MethodGet, "/emby/library/videos/id/stream.mp4", "/library/videos/id/stream.mp4", "/library/videos/id/stream.mp4"},
+		{"not a stream route", http.MethodGet, "/emby/videos/ItemABC", "/videos/ItemABC", "/videos/ItemABC"},
+		{"empty stream tail", http.MethodGet, "/emby/videos/ItemABC/", "/videos/ItemABC/", "/videos/ItemABC/"},
+		{"other API unaffected", http.MethodGet, "/emby/Users/abc/Views", "/Users/abc/Views", "/Users/abc/Views"},
+		{"POST does not gain stream route", http.MethodPost, "/emby/videos/ItemABC/stream.mp4", "/videos/ItemABC/stream.mp4", "/videos/ItemABC/stream.mp4"},
+		{"DELETE cancel route unchanged", http.MethodDelete, "/emby/videos/ActiveEncodings", "/videos/ActiveEncodings", "/videos/ActiveEncodings"},
+		{"prefix root", http.MethodGet, "/emby", "/", "/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.target, nil)
+			originalPath, originalRaw := req.URL.Path, req.URL.RawPath
+			query := req.URL.RawQuery
+			req.Header.Set("X-Emby-Token", "fixture-local-token")
+			req.Header.Set("Range", "bytes=0-3")
+			calls := 0
+			handler := (&App{}).prefixCompatMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.URL.Path != tc.wantPath || r.URL.EscapedPath() != tc.wantEscaped {
+					t.Errorf("routed Path=%q EscapedPath=%q, want %q %q",
+						r.URL.Path, r.URL.EscapedPath(), tc.wantPath, tc.wantEscaped)
+				}
+				if r.URL.RawQuery != query || r.Header.Get("X-Emby-Token") != "fixture-local-token" || r.Header.Get("Range") != "bytes=0-3" {
+					t.Error("query or headers were unexpectedly changed")
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if calls != 1 || rr.Code != http.StatusNoContent {
+				t.Errorf("handler called %d times, status %d", calls, rr.Code)
+			}
+			if req.URL.Path != originalPath || req.URL.RawPath != originalRaw {
+				t.Error("middleware mutated the caller's original request URL")
+			}
+		})
+	}
+}

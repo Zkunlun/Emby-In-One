@@ -408,3 +408,67 @@ func TestOutboundClientQueryFallbackAndIsolation(t *testing.T) {
 		t.Fatalf("retry/isolation failed: %v", counts)
 	}
 }
+
+// TestSenPlayerDeviceQueryCaseScope covers the lower-case media namespace
+// observed in Phase 0B. This intentionally does not normalize unrelated API
+// parameters or expand identity processing to image or unknown non-stream APIs.
+func TestSenPlayerDeviceQueryCaseScope(t *testing.T) {
+	identity := outboundClientIdentity{
+		Client: "Hills", Version: "1.9.1", DeviceName: "fuxi", DeviceID: "hills-spoof-id",
+	}
+	cases := []struct {
+		name, path, method           string
+		stream, hasDevice, normalize bool
+	}{
+		{"canonical video", "/Videos/id/stream.mp4", http.MethodGet, false, true, true},
+		{"lowercase video", "/videos/id/stream.mp4", http.MethodGet, false, true, true},
+		{"mixed-case video", "/ViDeOs/id/stream.mp4", http.MethodGet, false, true, true},
+		{"lowercase video stream", "/videos/id/stream.mp4", http.MethodGet, true, true, true},
+		{"lowercase HLS manifest", "/videos/id/master.m3u8", http.MethodGet, false, true, true},
+		{"lowercase nested HLS stream", "/videos/id/hls/main/segment.ts", http.MethodGet, true, true, true},
+		{"lowercase audio", "/audio/id/stream.mp3", http.MethodGet, false, true, true},
+		{"mixed-case audio universal", "/AuDiO/id/universal", http.MethodGet, false, true, true},
+		{"lowercase audio universal extension", "/audio/id/universal.mp3", http.MethodHead, false, true, true},
+		{"already absent DeviceId", "/videos/id/stream.mp4", http.MethodGet, false, false, false},
+		{"unrelated image stream", "/Items/id/Images/Primary", http.MethodGet, true, true, false},
+		{"other nested API", "/Items/id/videos/item/stream.mp4", http.MethodGet, true, true, false},
+		{"unknown extensionless operation", "/videos/id/status", http.MethodGet, false, true, false},
+		{"unknown nested non-stream API", "/videos/id/unknown/operation", http.MethodGet, false, true, false},
+		{"wrong method POST", "/videos/id/stream.mp4", http.MethodPost, false, true, false},
+		{"wrong method DELETE", "/audio/id/stream.mp3", http.MethodDelete, true, true, false},
+		{"empty resource", "/videos//stream.mp4", http.MethodGet, true, true, false},
+		{"empty stream rest", "/videos/id/", http.MethodGet, true, true, false},
+		{"canonical cancel preserved", "/Videos/ActiveEncodings", http.MethodDelete, false, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			params := url.Values{
+				"MediaSourceId": {"media-id"}, "PlaySessionId": {"session-id"},
+				"Static": {"true"}, "marker": {"case-sensitive"},
+			}
+			if tc.hasDevice {
+				params.Set("DeviceId", "senplayer-fixture-device")
+			}
+			before := copyValues(params)
+			got, changed := identity.applyQuery(params, tc.path, tc.method, tc.stream)
+			want := before.Get("DeviceId")
+			if tc.normalize {
+				want = identity.DeviceID
+			}
+			if actual := got.Get("DeviceId"); actual != want {
+				t.Errorf("DeviceId=%q, want %q", actual, want)
+			}
+			if changed != tc.normalize {
+				t.Errorf("query changed=%t, want %t", changed, tc.normalize)
+			}
+			for _, key := range []string{"MediaSourceId", "PlaySessionId", "Static", "marker"} {
+				if got.Get(key) != before.Get(key) {
+					t.Errorf("business query %s mutated", key)
+				}
+			}
+			if !reflect.DeepEqual(params, before) {
+				t.Fatal("caller query mutated")
+			}
+		})
+	}
+}

@@ -144,28 +144,73 @@ func identifyTokenSource(r *http.Request) string {
 	return "none"
 }
 
+// canonicalStreamRoutePath changes only the leading media namespace on paths
+// handled by the dedicated GET /Videos/{itemId}/{rest...} and /Audio route.
+// Resource IDs and the rest of the path remain case-sensitive and untouched.
+func canonicalStreamRoutePath(path string) string {
+	if !strings.HasPrefix(path, "/") {
+		return path
+	}
+	namespace, suffix, found := strings.Cut(path[1:], "/")
+	if !found {
+		return path
+	}
+	itemID, rest, found := strings.Cut(suffix, "/")
+	if !found || itemID == "" || rest == "" {
+		return path
+	}
+	switch {
+	case strings.EqualFold(namespace, "Videos"):
+		return "/Videos/" + suffix
+	case strings.EqualFold(namespace, "Audio"):
+		return "/Audio/" + suffix
+	default:
+		return path
+	}
+}
+
 func (a *App) prefixCompatMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/emby" || r.URL.Path == "/emby/" {
-			clone := r.Clone(r.Context())
-			copiedURL := *clone.URL
-			clone.URL = &copiedURL
-			clone.URL.Path = "/"
-			next.ServeHTTP(w, clone)
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/emby/") {
-			clone := r.Clone(r.Context())
-			copiedURL := *clone.URL
-			clone.URL = &copiedURL
-			clone.URL.Path = strings.TrimPrefix(r.URL.Path, "/emby")
-			if clone.URL.Path == "" {
-				clone.URL.Path = "/"
+		path := r.URL.Path
+		escaped := r.URL.RawPath
+		if path == "/emby" || path == "/emby/" {
+			path = "/"
+		} else if strings.HasPrefix(path, "/emby/") {
+			path = strings.TrimPrefix(path, "/emby")
+			if escaped != "" {
+				escaped = strings.TrimPrefix(escaped, "/emby")
 			}
-			next.ServeHTTP(w, clone)
+		}
+		// GET media paths must reach their dedicated handlers even if a client
+		// uses lowercase /videos or /audio. Other methods retain their routing.
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			canonical := canonicalStreamRoutePath(path)
+			if canonical != path {
+				path = canonical
+				if escaped != "" {
+					if slash := strings.IndexByte(escaped[1:], '/'); slash >= 0 {
+						namespace, _, _ := strings.Cut(path[1:], "/")
+						escaped = "/" + namespace + escaped[slash+1:]
+					} else {
+						escaped = ""
+					}
+				}
+			}
+		}
+		if path == r.URL.Path {
+			next.ServeHTTP(w, r)
 			return
 		}
-		next.ServeHTTP(w, r)
+		clone := r.Clone(r.Context())
+		copiedURL := *clone.URL
+		clone.URL = &copiedURL
+		clone.URL.Path = path
+		clone.URL.RawPath = escaped
+		// A non-canonical escaped path must never override the rewritten path.
+		if escaped != "" && clone.URL.EscapedPath() != escaped {
+			clone.URL.RawPath = ""
+		}
+		next.ServeHTTP(w, clone)
 	})
 }
 
