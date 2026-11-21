@@ -115,7 +115,8 @@ func TestPhase1SenPlayerViewsPartialFailureRetainsSuccessfulLibrary(t *testing.T
 func TestPhase1SenPlayerViewsSlowSourceMustNotBlockFastSource(t *testing.T) {
 	fast := phase1SenPlayerViewsSource(t, "ok")
 	slow := phase1SenPlayerViewsSource(t, "blocked")
-	withTempAppConfig(t, dualUpstreamConfig(fast.URL, slow.URL), func(app *App, handler http.Handler) {
+	config := strings.Replace(dualUpstreamConfig(fast.URL, slow.URL), "global: 15000", "global: 15000\n  metadataGracePeriod: 150", 1)
+	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
 		token := loginToken(t, handler, "secret")
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()

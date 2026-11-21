@@ -6,11 +6,6 @@ import (
 	"time"
 )
 
-// After the first non-empty Views response, give other fast upstreams a brief
-// window. An empty success must not prematurely suppress a slower library.
-// This is independent of search/metadata merging: libraries stay per-upstream.
-const userViewsGracePeriod = 150 * time.Millisecond
-
 type upstreamViewsResponse struct {
 	index int
 	items []map[string]any
@@ -22,6 +17,11 @@ type upstreamViewsResponse struct {
 // success. The separate success count prevents an upstream outage from being
 // mistaken for a genuinely empty library.
 //
+// When gracePeriod > 0, once an upstream returns at least one non-hidden
+// library, remaining slower upstreams get a bounded window (gracePeriod) before
+// returning partial results. When gracePeriod <= 0, early return is disabled
+// and collection waits for all upstreams up to globalTimeout.
+//
 // Requests are tied to the incoming HTTP request and bounded by globalTimeout.
 // Once a response is ready, outstanding requests are canceled; unlike generic
 // media-item aggregation, there is no background mapping or source fallback.
@@ -30,6 +30,7 @@ func (a *App) collectUserViews(
 	reqCtx *RequestContext,
 	clients []*UpstreamClient,
 	hidden map[string]map[string]struct{},
+	gracePeriod time.Duration,
 	globalTimeout time.Duration,
 ) ([][]map[string]any, int) {
 	groups := make([][]map[string]any, len(clients))
@@ -57,20 +58,25 @@ func (a *App) collectUserViews(
 
 	received, successes := 0, 0
 	var graceTimer *time.Timer
+	defer func() {
+		if graceTimer != nil {
+			graceTimer.Stop()
+		}
+	}()
 	var graceDone <-chan time.Time
-	accept := func(result upstreamViewsResponse) {
+	accept := func(result upstreamViewsResponse, allowGrace bool) {
 		received++
 		if result.err != nil {
 			return
 		}
 		successes++
 		groups[result.index] = result.items
-		if graceTimer == nil && received < len(clients) {
+		if allowGrace && gracePeriod > 0 && graceTimer == nil && received < len(clients) {
 			// A fast-but-hidden library is not useful to this user. Do
 			// not let it suppress an accessible library on a slower source.
 			for _, item := range result.items {
 				if !isHiddenLibraryItem(hidden, clients[result.index].ID, item) {
-					graceTimer = time.NewTimer(userViewsGracePeriod)
+					graceTimer = time.NewTimer(gracePeriod)
 					graceDone = graceTimer.C
 					break
 				}
@@ -82,22 +88,19 @@ collect:
 	for received < len(clients) {
 		select {
 		case result := <-results:
-			accept(result)
+			accept(result, true)
 		case <-graceDone:
 			break collect
 		case <-ctx.Done():
 			break collect
 		}
 	}
-	if graceTimer != nil {
-		defer graceTimer.Stop()
-	}
 	// Drain completed results at the deadline, without delaying the response
 	// for an upstream that has not actually finished.
 	for received < len(clients) {
 		select {
 		case result := <-results:
-			accept(result)
+			accept(result, false)
 		default:
 			return groups, successes
 		}

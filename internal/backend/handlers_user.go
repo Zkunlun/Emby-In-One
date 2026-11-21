@@ -157,6 +157,7 @@ func (a *App) handleUserViews(w http.ResponseWriter, r *http.Request) {
 	// A slow source must not hold back every already-completed library.
 	// Never mistake an all-failed request for a genuine empty success.
 	groups, successes := a.collectUserViews(r, reqCtx, onlineClients, hidden,
+		time.Duration(cfg.Timeouts.MetadataGracePeriod)*time.Millisecond,
 		time.Duration(cfg.Timeouts.Global)*time.Millisecond)
 	if r.Context().Err() != nil {
 		return

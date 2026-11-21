@@ -1,5 +1,26 @@
 # Emby-In-One 更新日志
 
+## V1.4.18
+
+发布日期：以 GitHub Release 页面为准（V1.4.18）
+
+> 基于 V1.4.17，修复多上游场景下首页媒体库（`/Users/{userId}/Views`）因硬编码 150ms 宽恕期导致响应略慢的上游媒体库被提前取消、偶发缺库的问题。本版本不引入缓存、不新增配置项与前端字段，也不改变既有鉴权、隐藏库规则及慢上游超时保护策略。
+
+### 首页媒体库 Views 聚合宽恕期修复
+
+- 移除 `collectUserViews` 中硬编码的 `150ms` `userViewsGracePeriod` 常量，改为复用现有 `timeouts.metadataGracePeriod`（默认 `3000ms`，已在 `config.yaml` 与管理面板暴露）。
+- 首个包含用户可见媒体库的上游返回后，其余未完成上游拥有完整的 `metadataGracePeriod` 窗口返回；所有上游均在窗口内完成时立即返回，不产生额外等待。
+- 当运行期将 `metadataGracePeriod` 设为 `0` 时，禁用提前截断并等待全部在线上游完成或达到 `timeouts.global`；当某上游异常卡死或超时时，仍由 `metadataGracePeriod` / `globalTimeout` 兜底，避免无限阻塞首页。
+- 修复 `collectUserViews` 在退出后 drain 阶段可能误建未停止定时器（timer）的边界问题，并在函数入口统一 `defer` 清理定时器。
+
+### 回归测试与实机验收
+
+- 保留全部 V1.4.16 SenPlayer Views 契约测试语义（4 项时序测试显式使用 `metadataGracePeriod: 150` 验证快速截断、空库与隐藏库不误触发宽恕期）。
+- 新增 3 项回归测试：3 上游（20ms / 250ms / 400ms）默认配置下完整保留且按源顺序返回；正常上游保留同时截断卡死上游；运行期 `metadataGracePeriod: 0` 等待慢上游返回。
+- `go vet ./...`、定向 Views/SenPlayer `-race -count=2` 回归及 `cmd` 测试全部通过；DMIT 生产环境实机复测 3 绑定上游用户连续 10 次 `/Users/{id}/Views` 均 10/10 完整返回全部可见媒体库（耗时 227–543ms），原 `context canceled` 截断消失。
+
+---
+
 ## V1.4.17
 
 发布日期：以 GitHub Release 页面为准（V1.4.17）
