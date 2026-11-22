@@ -571,9 +571,78 @@ func writeImageStreamResponse(w http.ResponseWriter, r *http.Request, resp *http
 	_, _ = io.CopyBuffer(w, resp.Body, *bufPtr)
 }
 
-func (a *App) streamItemImageDirect(w http.ResponseWriter, r *http.Request, resolved *routeResolution, imagePath string, imageQuery url.Values, extraHeaders http.Header) {
-	resp, err := resolved.Client.StreamWithMethod(r.Context(), requestContextFrom(r.Context()), a.Identity, r.Method, imagePath, imageQuery, extraHeaders)
-	if err != nil {
+func buildItemImagePath(originalID, imageType, imageIndex string) string {
+	imagePath := "/Items/" + originalID + "/Images/" + imageType
+	if imageIndex != "" {
+		imagePath += "/" + imageIndex
+	}
+	return imagePath
+}
+
+func (a *App) collectImageCandidates(reqCtx *RequestContext, resolved *routeResolution) []seriesInstance {
+	if resolved == nil {
+		return nil
+	}
+	if reqCtx != nil && reqCtx.ProxyUser != nil {
+		return a.collectAllowedInstances(reqCtx, resolved)
+	}
+	candidates := make([]seriesInstance, 0, 1+len(resolved.OtherInstances))
+	seen := make(map[string]struct{}, 1+len(resolved.OtherInstances))
+	if resolved.Client != nil && resolved.Client.IsOnline() {
+		key := resolved.ServerID + "\x00" + resolved.OriginalID
+		seen[key] = struct{}{}
+		candidates = append(candidates, seriesInstance{
+			OriginalID: resolved.OriginalID,
+			ServerID:   resolved.ServerID,
+			Client:     resolved.Client,
+		})
+	}
+	for _, other := range resolved.OtherInstances {
+		key := other.ServerID + "\x00" + other.OriginalID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		alt := a.Upstream.ClientByID(other.ServerID)
+		if alt != nil && alt.IsOnline() {
+			seen[key] = struct{}{}
+			candidates = append(candidates, seriesInstance{
+				OriginalID: other.OriginalID,
+				ServerID:   other.ServerID,
+				Client:     alt,
+			})
+		}
+	}
+	return candidates
+}
+
+func shouldFallbackImageStatus(statusCode int) bool {
+	return statusCode == http.StatusNotFound || statusCode >= http.StatusInternalServerError
+}
+
+func (a *App) fetchItemImageWithFallback(ctx context.Context, reqCtx *RequestContext, method string, candidates []seriesInstance, imageType, imageIndex string, imageQuery url.Values, extraHeaders http.Header) (*http.Response, error) {
+	var lastErr error
+	for i, cand := range candidates {
+		imagePath := buildItemImagePath(cand.OriginalID, imageType, imageIndex)
+		resp, err := cand.Client.StreamWithMethod(ctx, reqCtx, a.Identity, method, imagePath, imageQuery, extraHeaders)
+		if err != nil {
+			lastErr = err
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			continue
+		}
+		if i < len(candidates)-1 && shouldFallbackImageStatus(resp.StatusCode) {
+			_ = resp.Body.Close()
+			continue
+		}
+		return resp, nil
+	}
+	return nil, lastErr
+}
+
+func (a *App) streamItemImageDirect(w http.ResponseWriter, r *http.Request, candidates []seriesInstance, imageType, imageIndex string, imageQuery url.Values, extraHeaders http.Header) {
+	resp, err := a.fetchItemImageWithFallback(r.Context(), requestContextFrom(r.Context()), r.Method, candidates, imageType, imageIndex, imageQuery, extraHeaders)
+	if err != nil || resp == nil {
 		if r.Context().Err() == nil {
 			w.Header().Set("Cache-Control", "no-store")
 			w.WriteHeader(http.StatusBadGateway)
@@ -606,30 +675,43 @@ func (a *App) handleItemImage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
 		return
 	}
+	candidates := a.collectImageCandidates(reqCtx, resolved)
+	if len(candidates) == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 	imageType := r.PathValue("imageType")
 	imageIndex := r.PathValue("imageIndex")
-	imagePath := "/Items/" + resolved.OriginalID + "/Images/" + imageType
-	if imageIndex != "" {
-		imagePath += "/" + imageIndex
-	}
 	imageQuery := cloneValues(r.URL.Query())
 	imageQuery.Del("api_key")
 	imageQuery.Del("ApiKey")
 
 	conditionalHeaders := imageForwardConditionalHeaders(r.Header)
 	if r.Method == http.MethodHead || len(conditionalHeaders) > 0 {
-		a.streamItemImageDirect(w, r, resolved, imagePath, imageQuery, conditionalHeaders)
+		a.streamItemImageDirect(w, r, candidates, imageType, imageIndex, imageQuery, conditionalHeaders)
 		return
 	}
 
-	flightKey := resolved.ServerID + "\x00" + resolved.OriginalID + "\x00" + imageType + "\x00" + imageIndex + "\x00" + imageQuery.Encode()
+	var flightKeyBuilder strings.Builder
+	for _, cand := range candidates {
+		flightKeyBuilder.WriteString(cand.ServerID)
+		flightKeyBuilder.WriteByte(0)
+		flightKeyBuilder.WriteString(cand.OriginalID)
+		flightKeyBuilder.WriteByte(1)
+	}
+	flightKeyBuilder.WriteString(imageType)
+	flightKeyBuilder.WriteByte(0)
+	flightKeyBuilder.WriteString(imageIndex)
+	flightKeyBuilder.WriteByte(0)
+	flightKeyBuilder.WriteString(imageQuery.Encode())
+	flightKey := flightKeyBuilder.String()
 	call, leader := a.imageFlight.acquire(flightKey)
 	if leader {
 		defer close(call.leaderDone)
 		fetchCtx, fetchCancel := context.WithTimeout(context.WithoutCancel(r.Context()), imageFlightTimeout)
 		go func() {
-			resp, err := resolved.Client.StreamWithMethod(fetchCtx, reqCtx, a.Identity, http.MethodGet, imagePath, imageQuery)
-			if err != nil {
+			resp, err := a.fetchItemImageWithFallback(fetchCtx, reqCtx, http.MethodGet, candidates, imageType, imageIndex, imageQuery, nil)
+			if err != nil || resp == nil {
 				fetchCancel()
 				call.err = err
 				a.imageFlight.release(flightKey, call)
@@ -691,7 +773,7 @@ func (a *App) handleItemImage(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		a.streamItemImageDirect(w, r, resolved, imagePath, imageQuery, nil)
+		a.streamItemImageDirect(w, r, candidates, imageType, imageIndex, imageQuery, nil)
 		return
 	}
 	if call.err != nil || call.result == nil {

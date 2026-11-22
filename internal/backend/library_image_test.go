@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 	"testing"
 )
 
@@ -325,6 +327,262 @@ func TestImageProxyStreamsBytesAndSupportsEmbyPrefix(t *testing.T) {
 		}
 		if rr.Body.String() != "jpeg-bytes" {
 			t.Fatalf("unexpected image body: %q", rr.Body.String())
+		}
+	})
+}
+
+func TestHandleItemImageFallbackOnPrimary404(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-a", "User": map[string]any{"Id": "user-a"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer primary.Close()
+
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-b", "User": map[string]any{"Id": "user-b"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-b/Images/Primary":
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write([]byte("secondary-poster"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer secondary.Close()
+
+	config := fmt.Sprintf("server:\n  port: 8096\n  name: \"Test Server\"\n  id: \"server-1\"\n\nadmin:\n  username: \"admin\"\n  password: \"secret\"\n\nplayback:\n  mode: \"proxy\"\n\ntimeouts:\n  api: 30000\n  global: 15000\n  login: 10000\n  healthCheck: 10000\n  healthInterval: 60000\n\nproxies: []\nupstream:\n  - name: \"A\"\n    url: %q\n    username: \"u1\"\n    password: \"p1\"\n  - name: \"B\"\n    url: %q\n    username: \"u2\"\n    password: \"p2\"\n", primary.URL, secondary.URL)
+
+	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		virtualItem := app.IDStore.GetOrCreateVirtualID("item-a", app.Upstream.Clients()[0].ID)
+		app.IDStore.AssociateAdditionalInstance(virtualItem, "item-b", app.Upstream.Clients()[1].ID)
+
+		req := httptest.NewRequest(http.MethodGet, "/emby/Items/"+virtualItem+"/Images/Primary", nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+		}
+		if rr.Body.String() != "secondary-poster" {
+			t.Fatalf("body = %q, want %q", rr.Body.String(), "secondary-poster")
+		}
+	})
+}
+
+func TestHandleItemImageFallbackAll404Returns404WithNoStore(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-a", "User": map[string]any{"Id": "user-a"}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer primary.Close()
+
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-b", "User": map[string]any{"Id": "user-b"}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer secondary.Close()
+
+	config := fmt.Sprintf("server:\n  port: 8096\n  name: \"Test Server\"\n  id: \"server-1\"\n\nadmin:\n  username: \"admin\"\n  password: \"secret\"\n\nplayback:\n  mode: \"proxy\"\n\ntimeouts:\n  api: 30000\n  global: 15000\n  login: 10000\n  healthCheck: 10000\n  healthInterval: 60000\n\nproxies: []\nupstream:\n  - name: \"A\"\n    url: %q\n    username: \"u1\"\n    password: \"p1\"\n  - name: \"B\"\n    url: %q\n    username: \"u2\"\n    password: \"p2\"\n", primary.URL, secondary.URL)
+
+	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		virtualItem := app.IDStore.GetOrCreateVirtualID("item-a", app.Upstream.Clients()[0].ID)
+		app.IDStore.AssociateAdditionalInstance(virtualItem, "item-b", app.Upstream.Clients()[1].ID)
+
+		req := httptest.NewRequest(http.MethodGet, "/emby/Items/"+virtualItem+"/Images/Primary", nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", rr.Code)
+		}
+		if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("Cache-Control = %q, want no-store", got)
+		}
+	})
+}
+
+func TestHandleItemImageFallbackRespectsUserAccess(t *testing.T) {
+	var secondaryHits atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-a", "User": map[string]any{"Id": "user-a"}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer primary.Close()
+
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-b", "User": map[string]any{"Id": "user-b"}})
+			return
+		}
+		if strings.Contains(r.URL.Path, "/Images/") {
+			secondaryHits.Add(1)
+		}
+		_, _ = w.Write([]byte("forbidden-secondary-poster"))
+	}))
+	defer secondary.Close()
+
+	config := fmt.Sprintf("server:\n  port: 8096\n  name: \"Test Server\"\n  id: \"server-1\"\n\nadmin:\n  username: \"admin\"\n  password: \"secret\"\n\nplayback:\n  mode: \"proxy\"\n\ntimeouts:\n  api: 30000\n  global: 15000\n  login: 10000\n  healthCheck: 10000\n  healthInterval: 60000\n\nproxies: []\nupstream:\n  - name: \"A\"\n    url: %q\n    username: \"u1\"\n    password: \"p1\"\n  - name: \"B\"\n    url: %q\n    username: \"u2\"\n    password: \"p2\"\n", primary.URL, secondary.URL)
+
+	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		primaryID := app.Upstream.Clients()[0].ID
+		secondaryID := app.Upstream.Clients()[1].ID
+		adminToken := loginToken(t, handler, "secret")
+		createRR := doAuthJSON(t, handler, http.MethodPost, "/admin/api/users", map[string]any{
+			"username": "viewer", "password": "password123", "allowedServers": []string{primaryID},
+		}, adminToken)
+		if createRR.Code != http.StatusCreated {
+			t.Fatalf("create user: status=%d body=%s", createRR.Code, createRR.Body.String())
+		}
+		token := loginTokenAs(t, handler, "viewer", "password123")
+
+		virtualItem := app.IDStore.GetOrCreateVirtualID("item-a", primaryID)
+		app.IDStore.AssociateAdditionalInstance(virtualItem, "item-b", secondaryID)
+
+		req := httptest.NewRequest(http.MethodGet, "/emby/Items/"+virtualItem+"/Images/Primary?api_key="+token, nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404", rr.Code)
+		}
+		if hits := secondaryHits.Load(); hits != 0 {
+			t.Fatalf("secondary hits = %d, want 0 (unauthorized server must not be queried)", hits)
+		}
+	})
+}
+
+func TestHandleItemImageFallbackConditionalRequest304(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-a", "User": map[string]any{"Id": "user-a"}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer primary.Close()
+
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-b", "User": map[string]any{"Id": "user-b"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-b/Images/Primary":
+			if r.Header.Get("If-None-Match") == `"etag-b"` {
+				w.Header().Set("ETag", `"etag-b"`)
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write([]byte("secondary-poster"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer secondary.Close()
+
+	config := fmt.Sprintf("server:\n  port: 8096\n  name: \"Test Server\"\n  id: \"server-1\"\n\nadmin:\n  username: \"admin\"\n  password: \"secret\"\n\nplayback:\n  mode: \"proxy\"\n\ntimeouts:\n  api: 30000\n  global: 15000\n  login: 10000\n  healthCheck: 10000\n  healthInterval: 60000\n\nproxies: []\nupstream:\n  - name: \"A\"\n    url: %q\n    username: \"u1\"\n    password: \"p1\"\n  - name: \"B\"\n    url: %q\n    username: \"u2\"\n    password: \"p2\"\n", primary.URL, secondary.URL)
+
+	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		virtualItem := app.IDStore.GetOrCreateVirtualID("item-a", app.Upstream.Clients()[0].ID)
+		app.IDStore.AssociateAdditionalInstance(virtualItem, "item-b", app.Upstream.Clients()[1].ID)
+
+		req := httptest.NewRequest(http.MethodGet, "/emby/Items/"+virtualItem+"/Images/Primary", nil)
+		req.Header.Set("If-None-Match", `"etag-b"`)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotModified {
+			t.Fatalf("status = %d, want 304", rr.Code)
+		}
+		if got := rr.Header().Get("ETag"); got != `"etag-b"` {
+			t.Fatalf("ETag = %q, want %q", got, `"etag-b"`)
+		}
+	})
+}
+
+func TestHandleItemImageFallbackSingleflightCoalescesRecovered200(t *testing.T) {
+	var secondaryHits atomic.Int32
+	gate := make(chan struct{})
+	started := make(chan struct{}, 1)
+
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-a", "User": map[string]any{"Id": "user-a"}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer primary.Close()
+
+	secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-b", "User": map[string]any{"Id": "user-b"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items/item-b/Images/Primary":
+			secondaryHits.Add(1)
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-gate
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write([]byte("coalesced-secondary-poster"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer secondary.Close()
+
+	config := fmt.Sprintf("server:\n  port: 8096\n  name: \"Test Server\"\n  id: \"server-1\"\n\nadmin:\n  username: \"admin\"\n  password: \"secret\"\n\nplayback:\n  mode: \"proxy\"\n\ntimeouts:\n  api: 30000\n  global: 15000\n  login: 10000\n  healthCheck: 10000\n  healthInterval: 60000\n\nproxies: []\nupstream:\n  - name: \"A\"\n    url: %q\n    username: \"u1\"\n    password: \"p1\"\n  - name: \"B\"\n    url: %q\n    username: \"u2\"\n    password: \"p2\"\n", primary.URL, secondary.URL)
+
+	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		virtualItem := app.IDStore.GetOrCreateVirtualID("item-a", app.Upstream.Clients()[0].ID)
+		app.IDStore.AssociateAdditionalInstance(virtualItem, "item-b", app.Upstream.Clients()[1].ID)
+
+		var wg sync.WaitGroup
+		codes := make([]int, 2)
+		bodies := make([]string, 2)
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/emby/Items/"+virtualItem+"/Images/Primary", nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			codes[0] = rr.Code
+			bodies[0] = rr.Body.String()
+		}()
+
+		<-started
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/emby/Items/"+virtualItem+"/Images/Primary", nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			codes[1] = rr.Code
+			bodies[1] = rr.Body.String()
+		}()
+
+		time.Sleep(15 * time.Millisecond)
+		close(gate)
+		wg.Wait()
+		for i := range codes {
+			if codes[i] != http.StatusOK || bodies[i] != "coalesced-secondary-poster" {
+				t.Fatalf("req[%d] got status=%d body=%q, want 200 coalesced-secondary-poster", i, codes[i], bodies[i])
+			}
+		}
+		if hits := secondaryHits.Load(); hits != 1 {
+			t.Fatalf("secondary hits = %d, want 1 (singleflight should coalesce recovered 200)", hits)
 		}
 	})
 }
