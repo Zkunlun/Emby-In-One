@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -444,14 +445,156 @@ func (a *App) handleSearchHints(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+const (
+	imageCopyBufferSize     = 32 * 1024
+	imageFlightMaxBytes     = 2 << 20
+	imageFlightTimeout      = 30 * time.Second
+	imageTagCacheControl    = "public, max-age=2592000, immutable"
+	imageNoTagCacheControl  = "public, max-age=86400"
+)
+
+var imageCopyBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, imageCopyBufferSize)
+		return &buf
+	},
+}
+
+type imageFlightResult struct {
+	statusCode int
+	headers    http.Header
+	body       []byte
+}
+
+type imagePassthroughResp struct {
+	resp   *http.Response
+	cancel context.CancelFunc
+}
+
+type imageFlightCall struct {
+	done         chan struct{}
+	result       *imageFlightResult
+	err          error
+	passthrough  bool
+	leaderRespCh chan imagePassthroughResp
+	leaderDone   chan struct{}
+}
+
+// imageFlightGroup coalesces concurrent in-flight fetches for the exact same
+// upstream image key and immediately forgets the key once the fetch completes.
+// Strictly zero caching.
+type imageFlightGroup struct {
+	mu    sync.Mutex
+	calls map[string]*imageFlightCall
+}
+
+func (g *imageFlightGroup) acquire(key string) (call *imageFlightCall, leader bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.calls != nil {
+		if existing, ok := g.calls[key]; ok {
+			return existing, false
+		}
+	} else {
+		g.calls = make(map[string]*imageFlightCall)
+	}
+	call = &imageFlightCall{
+		done:         make(chan struct{}),
+		leaderRespCh: make(chan imagePassthroughResp),
+		leaderDone:   make(chan struct{}),
+	}
+	g.calls[key] = call
+	return call, true
+}
+
+func (g *imageFlightGroup) release(key string, call *imageFlightCall) {
+	g.mu.Lock()
+	if g.calls[key] == call {
+		delete(g.calls, key)
+	}
+	g.mu.Unlock()
+}
+
+func imageCacheControl(query url.Values) string {
+	if strings.TrimSpace(firstQueryValue(query, "tag", "Tag")) != "" {
+		return imageTagCacheControl
+	}
+	return imageNoTagCacheControl
+}
+
+func imageForwardConditionalHeaders(src http.Header) http.Header {
+	var out http.Header
+	for _, name := range []string{"If-None-Match", "If-Modified-Since"} {
+		if value := src.Get(name); value != "" {
+			if out == nil {
+				out = make(http.Header, 2)
+			}
+			out.Set(name, value)
+		}
+	}
+	return out
+}
+
+func copyImageResponseHeaders(dst, src http.Header, names []string) {
+	for _, header := range names {
+		if value := src.Get(header); value != "" {
+			dst.Set(header, value)
+		}
+	}
+}
+
+var (
+	image304Headers = []string{"ETag", "Last-Modified", "Expires"}
+	image2xxHeaders = []string{"Content-Type", "Content-Length", "ETag", "Last-Modified", "Expires", "Content-Range"}
+)
+
+func writeImageStreamResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, imageQuery url.Values) {
+	if resp.StatusCode == http.StatusNotModified {
+		copyImageResponseHeaders(w.Header(), resp.Header, image304Headers)
+		w.Header().Set("Cache-Control", imageCacheControl(imageQuery))
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		w.Header().Set("Cache-Control", imageCacheControl(imageQuery))
+	} else {
+		// An upstream outage or missing image must not be cached.
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	copyImageResponseHeaders(w.Header(), resp.Header, image2xxHeaders)
+	w.WriteHeader(resp.StatusCode)
+	if r.Method == http.MethodHead {
+		return
+	}
+	bufPtr := imageCopyBufferPool.Get().(*[]byte)
+	defer imageCopyBufferPool.Put(bufPtr)
+	_, _ = io.CopyBuffer(w, resp.Body, *bufPtr)
+}
+
+func (a *App) streamItemImageDirect(w http.ResponseWriter, r *http.Request, resolved *routeResolution, imagePath string, imageQuery url.Values, extraHeaders http.Header) {
+	resp, err := resolved.Client.StreamWithMethod(r.Context(), requestContextFrom(r.Context()), a.Identity, r.Method, imagePath, imageQuery, extraHeaders)
+	if err != nil {
+		if r.Context().Err() == nil {
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusBadGateway)
+		}
+		return
+	}
+	defer resp.Body.Close()
+	writeImageStreamResponse(w, r, resp, imageQuery)
+}
+
 func (a *App) handleItemImage(w http.ResponseWriter, r *http.Request) {
-	resolved := a.resolveRouteID(r.PathValue("itemId"))
-	if ctx := requestContextFrom(r.Context()); ctx != nil && ctx.ProxyUser != nil {
+	reqCtx := requestContextFrom(r.Context())
+	var resolved *routeResolution
+	if reqCtx != nil && reqCtx.ProxyUser != nil {
 		var routeOK bool
 		resolved, routeOK = a.resolveRequestRouteID(w, r, r.PathValue("itemId"))
 		if !routeOK {
 			return
 		}
+	} else {
+		resolved = a.resolveRouteID(r.PathValue("itemId"))
 	}
 	if resolved == nil {
 		w.WriteHeader(http.StatusNotFound)
@@ -459,37 +602,107 @@ func (a *App) handleItemImage(w http.ResponseWriter, r *http.Request) {
 	}
 	// Image URLs are embedded by clients and stay reachable without a token, so
 	// the server access check only applies to authenticated requests.
-	if reqCtx := requestContextFrom(r.Context()); reqCtx != nil && reqCtx.ProxyUser != nil && !a.isServerAllowed(reqCtx, resolved.ServerID) {
+	if reqCtx != nil && reqCtx.ProxyUser != nil && !a.isServerAllowed(reqCtx, resolved.ServerID) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"message": "Access denied"})
 		return
 	}
-	imagePath := "/Items/" + resolved.OriginalID + "/Images/" + r.PathValue("imageType")
-	if imageIndex := r.PathValue("imageIndex"); imageIndex != "" {
+	imageType := r.PathValue("imageType")
+	imageIndex := r.PathValue("imageIndex")
+	imagePath := "/Items/" + resolved.OriginalID + "/Images/" + imageType
+	if imageIndex != "" {
 		imagePath += "/" + imageIndex
 	}
 	imageQuery := cloneValues(r.URL.Query())
 	imageQuery.Del("api_key")
 	imageQuery.Del("ApiKey")
-	resp, err := resolved.Client.Stream(r.Context(), requestContextFrom(r.Context()), a.Identity, imagePath, imageQuery)
-	if err != nil {
+
+	conditionalHeaders := imageForwardConditionalHeaders(r.Header)
+	if r.Method == http.MethodHead || len(conditionalHeaders) > 0 {
+		a.streamItemImageDirect(w, r, resolved, imagePath, imageQuery, conditionalHeaders)
+		return
+	}
+
+	flightKey := resolved.ServerID + "\x00" + resolved.OriginalID + "\x00" + imageType + "\x00" + imageIndex + "\x00" + imageQuery.Encode()
+	call, leader := a.imageFlight.acquire(flightKey)
+	if leader {
+		defer close(call.leaderDone)
+		fetchCtx, fetchCancel := context.WithTimeout(context.WithoutCancel(r.Context()), imageFlightTimeout)
+		go func() {
+			resp, err := resolved.Client.StreamWithMethod(fetchCtx, reqCtx, a.Identity, http.MethodGet, imagePath, imageQuery)
+			if err != nil {
+				fetchCancel()
+				call.err = err
+				a.imageFlight.release(flightKey, call)
+				close(call.done)
+				return
+			}
+			if resp.StatusCode == http.StatusOK && resp.ContentLength > 0 && resp.ContentLength <= imageFlightMaxBytes {
+				body, readErr := io.ReadAll(io.LimitReader(resp.Body, imageFlightMaxBytes+1))
+				_ = resp.Body.Close()
+				fetchCancel()
+				if readErr == nil && int64(len(body)) <= imageFlightMaxBytes {
+					headers := make(http.Header, len(image2xxHeaders))
+					copyImageResponseHeaders(headers, resp.Header, image2xxHeaders)
+					call.result = &imageFlightResult{
+						statusCode: resp.StatusCode,
+						headers:    headers,
+						body:       body,
+					}
+				} else if readErr != nil {
+					call.err = readErr
+				} else {
+					call.passthrough = true
+					close(call.leaderRespCh)
+				}
+				a.imageFlight.release(flightKey, call)
+				close(call.done)
+				return
+			}
+			// Non-200, unknown Content-Length, or oversized image: stream directly without fan-out.
+			call.passthrough = true
+			a.imageFlight.release(flightKey, call)
+			close(call.done)
+			select {
+			case call.leaderRespCh <- imagePassthroughResp{resp: resp, cancel: fetchCancel}:
+			case <-call.leaderDone:
+				_ = resp.Body.Close()
+				fetchCancel()
+			}
+		}()
+	}
+
+	select {
+	case <-call.done:
+	case <-r.Context().Done():
+		return
+	}
+
+	if call.passthrough {
+		if leader {
+			select {
+			case handed, ok := <-call.leaderRespCh:
+				if ok {
+					defer handed.cancel()
+					defer handed.resp.Body.Close()
+					writeImageStreamResponse(w, r, handed.resp, imageQuery)
+					return
+				}
+			case <-r.Context().Done():
+				return
+			}
+		}
+		a.streamItemImageDirect(w, r, resolved, imagePath, imageQuery, nil)
+		return
+	}
+	if call.err != nil || call.result == nil {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		w.Header().Set("Cache-Control", "public, max-age=86400")
-	} else {
-		// An upstream outage or missing image must not be cached for a day.
-		w.Header().Set("Cache-Control", "no-store")
-	}
-	for _, header := range []string{"Content-Type", "Content-Length", "ETag", "Last-Modified", "Content-Range"} {
-		if value := resp.Header.Get(header); value != "" {
-			w.Header().Set(header, value)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	w.Header().Set("Cache-Control", imageCacheControl(imageQuery))
+	copyImageResponseHeaders(w.Header(), call.result.headers, image2xxHeaders)
+	w.WriteHeader(call.result.statusCode)
+	_, _ = w.Write(call.result.body)
 }
 
 func (a *App) handleUserImageNotFound(w http.ResponseWriter, r *http.Request) {

@@ -144,17 +144,11 @@ func (a *App) upstreamUserIDsByServer() map[string]string {
 	if a.Upstream == nil {
 		return nil
 	}
-	clients := a.Upstream.Clients()
-	if len(clients) == 0 {
+	// Immutable snapshot maintained by UpstreamPool; zero allocation per request.
+	// Callers must treat the returned map as read-only.
+	out := a.Upstream.upstreamUserIDsSnapshot()
+	if len(out) == 0 {
 		return nil
-	}
-	out := make(map[string]string, len(clients))
-	for i := range clients {
-		serverID := clients[i].ID
-		userID := clients[i].clientUserID()
-		if userID != "" && serverID != "" {
-			out[serverID] = userID
-		}
 	}
 	return out
 }

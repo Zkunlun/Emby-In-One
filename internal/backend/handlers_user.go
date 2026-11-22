@@ -172,7 +172,8 @@ func (a *App) handleUserViews(w http.ResponseWriter, r *http.Request) {
 			if isHiddenLibraryItem(hidden, client.ID, item) {
 				continue
 			}
-			rewritten := deepCloneMap(item)
+			// groups[i] is decoded fresh for this request and exclusively owned.
+			rewritten := item
 			rewriteResponseIDs(rewritten, client.ID, a.IDStore, cfg.Server.ID, a.clientFacingUserIDFor(r))
 			if multiSource {
 				if name, _ := rewritten["Name"].(string); name != "" {

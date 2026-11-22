@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -222,7 +223,7 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, client *Upst
 			}
 			baseURL = prepared
 		}
-		manifest := RewriteM3U8ForItem(string(body), baseURL, virtualItemID, proxyToken)
+		qualifiedSource := ""
 		if source := query.Get("MediaSourceId"); source != "" {
 			business, ok := streamBusinessPath(upstreamPath)
 			parts := strings.Split(strings.TrimPrefix(business, "/"), "/")
@@ -235,8 +236,10 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, client *Upst
 				writeMediaSelectionError(w, err)
 				return
 			}
-			manifest = qualifyMergeManifestSources(manifest, virtualItemID, qualified)
+			qualifiedSource = qualified
 		}
+		// One pass: rewrite to proxy paths and pin the merge-qualified source.
+		manifest := RewriteM3U8ForItemWithSource(string(body), baseURL, virtualItemID, proxyToken, qualifiedSource)
 		w.Header().Set("Content-Type", "application/x-mpegURL")
 		_, _ = io.WriteString(w, manifest)
 		return
@@ -249,7 +252,46 @@ func (a *App) forwardStream(w http.ResponseWriter, r *http.Request, client *Upst
 	}
 	copyStreamResponseHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	copyStreamBody(w, resp.Body)
+}
+
+// streamCopyBufferSize is the pooled copy buffer for proxied media bodies. Large
+// buffers cut syscalls and goroutine wake-ups on high-bitrate direct streams.
+const streamCopyBufferSize = 128 * 1024
+
+var streamCopyBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, streamCopyBufferSize)
+		return &buf
+	},
+}
+
+// copyStreamBody copies src to w with a pooled buffer. The first chunk is flushed
+// immediately so the player sees headers and its first bytes without waiting for
+// the HTTP server's internal buffer to fill.
+func copyStreamBody(w http.ResponseWriter, src io.Reader) {
+	bufPtr := streamCopyBufferPool.Get().(*[]byte)
+	defer streamCopyBufferPool.Put(bufPtr)
+	buf := *bufPtr
+	flusher, _ := w.(http.Flusher)
+	first := true
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				return
+			}
+			if first {
+				first = false
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+		}
+		if readErr != nil {
+			return
+		}
+	}
 }
 
 // resolveStreamTarget binds an explicit version to its authorized source/item.

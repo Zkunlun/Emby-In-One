@@ -1,13 +1,37 @@
 package backend
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
-	"sync"
+	"time"
 )
+
+const (
+	// playbackInfoMaxWorkers bounds concurrent upstream PlaybackInfo calls. It is
+	// above any realistic upstream count so that no source queues behind another.
+	playbackInfoMaxWorkers = 16
+	// playbackInfoGraceWindow is how long the other upstreams get to answer once
+	// the first usable PlaybackInfo has arrived.
+	playbackInfoGraceWindow = 500 * time.Millisecond
+)
+
+// playbackInfoPayloadUsable reports whether an upstream answer already carries at
+// least one MediaSource, i.e. is enough to start playback.
+func playbackInfoPayloadUsable(payload any, err error) bool {
+	if err != nil {
+		return false
+	}
+	data, ok := payload.(map[string]any)
+	if !ok {
+		return false
+	}
+	sources, _ := data["MediaSources"].([]any)
+	return len(sources) > 0
+}
 
 func directStreamTargetPath(rawDirectURL, streamBaseURL string) string {
 	parsed, err := url.Parse(rawDirectURL)
@@ -198,11 +222,14 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			instQuery.Set("UserId", inst.Client.clientUserID())
 		} else {
-			instBody := deepCloneMap(body)
-			for key := range instBody {
+			// Only the top-level map is copied: UserId/MediaSourceId are top-level
+			// overrides, so a large DeviceProfile is shared rather than deep-cloned.
+			instBody := make(map[string]any, len(body)+2)
+			for key, value := range body {
 				if strings.EqualFold(key, "UserId") || strings.EqualFold(key, "MediaSourceId") {
-					delete(instBody, key)
+					continue
 				}
+				instBody[key] = value
 			}
 			instBody["UserId"] = inst.Client.clientUserID()
 			if source != "" {
@@ -215,39 +242,71 @@ func (a *App) handlePlaybackInfo(w http.ResponseWriter, r *http.Request) {
 	type playbackUpstreamResult struct {
 		payload any
 		err     error
+		done    bool
 	}
 	results := make([]playbackUpstreamResult, len(instances))
-	workerCount := len(instances)
-	if workerCount > 4 {
-		workerCount = 4
+	fetchCtx, cancelFetch := context.WithCancel(r.Context())
+	defer cancelFetch()
+	type playbackFetchDone struct {
+		idx    int
+		result playbackUpstreamResult
 	}
-	jobs := make(chan int)
-	var fetchers sync.WaitGroup
-	for i := 0; i < workerCount; i++ {
-		fetchers.Add(1)
-		go func() {
-			defer fetchers.Done()
-			for idx := range jobs {
-				if !requests[idx].allowed {
-					continue
-				}
-				if err := r.Context().Err(); err != nil {
-					results[idx].err = err
-					continue
-				}
-				inst := instances[idx]
-				request := requests[idx]
-				results[idx].payload, results[idx].err = inst.Client.RequestJSON(
-					r.Context(), reqCtx, a.Identity, r.Method,
-					"/Items/"+inst.OriginalID+"/PlaybackInfo", request.params, request.body)
+	doneCh := make(chan playbackFetchDone, len(instances))
+	workerLimit := len(instances)
+	if workerLimit > playbackInfoMaxWorkers {
+		workerLimit = playbackInfoMaxWorkers
+	}
+	pending := 0
+	if workerLimit > 0 {
+		slots := make(chan struct{}, workerLimit)
+		for i := range instances {
+			if !requests[i].allowed {
+				continue
 			}
-		}()
+			pending++
+			go func(idx int) {
+				slots <- struct{}{}
+				defer func() { <-slots }()
+				res := playbackUpstreamResult{done: true}
+				if err := fetchCtx.Err(); err != nil {
+					res.err = err
+				} else {
+					inst := instances[idx]
+					request := requests[idx]
+					res.payload, res.err = inst.Client.RequestJSON(
+						fetchCtx, reqCtx, a.Identity, r.Method,
+						"/Items/"+inst.OriginalID+"/PlaybackInfo", request.params, request.body)
+				}
+				doneCh <- playbackFetchDone{idx: idx, result: res}
+			}(i)
+		}
 	}
-	for i := range instances {
-		jobs <- i
+	// Collect results. Once the first usable upstream answers, the remaining ones
+	// only get a short grace window; slower upstreams are abandoned (and cancelled)
+	// instead of holding the whole start-up. Until a usable result exists the wait
+	// continues for every upstream, bounded by each request's own timeout.
+	var graceTimer *time.Timer
+	var graceC <-chan time.Time
+	defer func() {
+		if graceTimer != nil {
+			graceTimer.Stop()
+		}
+	}()
+collectPlayback:
+	for received := 0; received < pending; {
+		select {
+		case item := <-doneCh:
+			received++
+			results[item.idx] = item.result
+			if graceTimer == nil && playbackInfoPayloadUsable(item.result.payload, item.result.err) {
+				graceTimer = time.NewTimer(playbackInfoGraceWindow)
+				graceC = graceTimer.C
+			}
+		case <-graceC:
+			break collectPlayback
+		}
 	}
-	close(jobs)
-	fetchers.Wait()
+	cancelFetch()
 
 	// Preserve deterministic source priority, MediaSource routing, session
 	// ownership and provisional lease handling regardless of network order.

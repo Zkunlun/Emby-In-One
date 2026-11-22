@@ -31,6 +31,7 @@ type App struct {
 	watchPlayback   playbackWatchCache
 	loginLimiter    loginRateLimiter
 	noticeThrottle  noticeThrottle
+	imageFlight     imageFlightGroup
 	// grantCapacityMu serializes full-config admin writes with authorization-grant
 	// mutations so a stale Config snapshot cannot restore an old maxConcurrent or
 	// recreate a grant for an upstream that was just deleted.

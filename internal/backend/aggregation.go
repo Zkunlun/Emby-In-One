@@ -46,6 +46,12 @@ func (a *App) aggregateUpstreams(parentCtx context.Context, cfg aggregationConfi
 
 	// Collect results with optional grace period
 	var graceTimer <-chan time.Time
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	collected := make([]upstreamItemsResult, 0, len(tasks))
 	received := 0
 
@@ -58,7 +64,8 @@ func (a *App) aggregateUpstreams(parentCtx context.Context, cfg aggregationConfi
 			}
 			if graceTimer == nil && cfg.gracePeriod > 0 &&
 				(!cfg.graceAfterItems && len(collected) > 0 || cfg.graceAfterItems && res.result.Err == nil && len(res.result.Items) > 0) {
-				graceTimer = time.After(cfg.gracePeriod)
+				timer = time.NewTimer(cfg.gracePeriod)
+				graceTimer = timer.C
 			}
 		case <-bgCtx.Done():
 			// A client timeout is not the only possible deadline. Even an

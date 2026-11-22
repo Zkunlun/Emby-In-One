@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,14 +22,26 @@ import (
 // timeouts are normally much shorter.
 const upstreamHeaderTimeout = 5 * time.Minute
 
+const (
+	upstreamMaxIdleConns        = 256
+	upstreamMaxIdleConnsPerHost = 64
+	upstreamIOBufferSize        = 64 * 1024
+	// streamHeaderTimeout bounds how long a streaming (video/audio/image) upstream
+	// may take to start answering. It only applies to the dedicated stream
+	// transport, so ordinary API requests keep upstreamHeaderTimeout.
+	streamHeaderTimeout = 15 * time.Second
+)
+
 var sharedTransport = &http.Transport{
 	Proxy:                 http.ProxyFromEnvironment,
-	MaxIdleConns:          64,
-	MaxIdleConnsPerHost:   16,
+	MaxIdleConns:          upstreamMaxIdleConns,
+	MaxIdleConnsPerHost:   upstreamMaxIdleConnsPerHost,
 	IdleConnTimeout:       90 * time.Second,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
 	ResponseHeaderTimeout: upstreamHeaderTimeout,
+	ReadBufferSize:        upstreamIOBufferSize,
+	WriteBufferSize:       upstreamIOBufferSize,
 	// Refuse link-local destinations (cloud instance metadata) while keeping
 	// loopback and RFC1918 upstreams reachable.
 	DialContext: upstreamTransportDialer(),
@@ -36,6 +49,67 @@ var sharedTransport = &http.Transport{
 	// with mismatching Content-Length headers back to the client.
 	DisableCompression: true,
 	ForceAttemptHTTP2:  true,
+}
+
+// sharedStreamTransport is the stream-side twin of sharedTransport: identical
+// dialing/SSRF rules, but with a short response-header timeout.
+var sharedStreamTransport = newStreamTransportFrom(sharedTransport)
+
+func newStreamTransportFrom(base *http.Transport) *http.Transport {
+	clone := base.Clone()
+	clone.ResponseHeaderTimeout = streamHeaderTimeout
+	return clone
+}
+
+// deriveStreamTransport returns the transport used for streaming requests that
+// matches the API transport (same proxy and SSRF dialer).
+func deriveStreamTransport(api http.RoundTripper) http.RoundTripper {
+	if api == http.RoundTripper(sharedTransport) {
+		return sharedStreamTransport
+	}
+	if t, ok := api.(*http.Transport); ok {
+		return newStreamTransportFrom(t)
+	}
+	return api
+}
+
+func newStreamHTTPClient(rt http.RoundTripper, followRedirects bool) *http.Client {
+	return &http.Client{Transport: rt, Timeout: 0, CheckRedirect: redirectPolicy(followRedirects)}
+}
+
+func (p *UpstreamPool) refreshUserIDSnapshot() {
+	p.mu.RLock()
+	clients := append([]*UpstreamClient(nil), p.clients...)
+	p.mu.RUnlock()
+	out := make(map[string]string, len(clients))
+	for _, client := range clients {
+		if client == nil {
+			continue
+		}
+		if userID := client.clientUserID(); userID != "" && client.ID != "" {
+			out[client.ID] = userID
+		}
+	}
+	p.userIDs.Store(&out)
+}
+
+// upstreamUserIDsSnapshot returns the shared immutable map; callers must not
+// modify it.
+func (p *UpstreamPool) upstreamUserIDsSnapshot() map[string]string {
+	if snapshot := p.userIDs.Load(); snapshot != nil {
+		return *snapshot
+	}
+	p.refreshUserIDSnapshot()
+	return *p.userIDs.Load()
+}
+
+func (c *UpstreamClient) notifyUserIDChanged() {
+	c.mu.RLock()
+	listener := c.onUserIDChanged
+	c.mu.RUnlock()
+	if listener != nil {
+		listener()
+	}
 }
 
 var embyClientHeaders = map[string]string{
@@ -143,6 +217,14 @@ type UpstreamClient struct {
 	// unknown; only a real successful media request can revive a dead base.
 	// lastFailure only throttles when a dead base may be probed again.
 	streamHealth map[string]streamBaseHealth
+	// streamTransport/streamHTTPClient are built once at construction. The stream
+	// client has no overall timeout; the transport bounds the response-header wait.
+	// streamFor records the API transport they were derived from, so a test or caller
+	// that swaps c.transport transparently falls back to a per-request client.
+	streamTransport  http.RoundTripper
+	streamHTTPClient *http.Client
+	streamFor        http.RoundTripper
+	onUserIDChanged  func() // Lock-free notification after UserID changes.
 }
 
 type UpstreamPool struct {
@@ -152,6 +234,10 @@ type UpstreamPool struct {
 	identity      *ClientIdentityService
 	health        *healthCheckRunner
 	onCountsState func()
+	// userIDs is an immutable server-ID -> real upstream user-ID snapshot. It is
+	// replaced (never mutated) whenever the client set or a client's UserID
+	// changes, so hot paths can read it without locking or copying the pool.
+	userIDs atomic.Pointer[map[string]string]
 }
 
 func NewUpstreamPool(cfg Config, logger *Logger) *UpstreamPool {
@@ -212,6 +298,7 @@ func (p *UpstreamPool) Reload(cfg Config) {
 	for i, upstream := range cfg.Upstream {
 		newClient := newUpstreamClient(cfg, upstream, i, p.logger)
 		newClient.onAuthError = p.handleUpstreamAuthError
+		newClient.onUserIDChanged = p.refreshUserIDSnapshot
 		newClient.onCountsState = countsListener
 		if old, ok := oldByKey[StableUpstreamKey(newClient.Config)+"|"+legacyUpstreamKey(newClient.Config)]; ok {
 			old.mu.RLock()
@@ -238,6 +325,7 @@ func (p *UpstreamPool) Reload(cfg Config) {
 	}
 	p.clients = clients
 	p.mu.Unlock()
+	p.refreshUserIDSnapshot()
 
 	for _, old := range oldClients {
 		if old == nil {
@@ -259,7 +347,15 @@ func (p *UpstreamPool) Reload(cfg Config) {
 		stillInUse[client.transport] = true
 	}
 	for _, old := range oldClients {
-		if old == nil || old.transport == nil || old.transport == sharedTransport || stillInUse[old.transport] {
+		if old == nil {
+			continue
+		}
+		if old.streamTransport != nil && old.streamTransport != http.RoundTripper(sharedStreamTransport) && old.streamTransport != old.transport {
+			if closer, ok := old.streamTransport.(interface{ CloseIdleConnections() }); ok {
+				closer.CloseIdleConnections()
+			}
+		}
+		if old.transport == nil || old.transport == sharedTransport || stillInUse[old.transport] {
 			continue
 		}
 		if closer, ok := old.transport.(interface{ CloseIdleConnections() }); ok {
@@ -333,12 +429,14 @@ func buildProxyTransport(proxyURL string, logger *Logger, serverName string) (ht
 	}
 	return &http.Transport{
 		Proxy:                 http.ProxyURL(parsed),
-		MaxIdleConns:          64,
-		MaxIdleConnsPerHost:   16,
+		MaxIdleConns:          upstreamMaxIdleConns,
+		MaxIdleConnsPerHost:   upstreamMaxIdleConnsPerHost,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		ResponseHeaderTimeout: upstreamHeaderTimeout,
+		ReadBufferSize:        upstreamIOBufferSize,
+		WriteBufferSize:       upstreamIOBufferSize,
 		DialContext:           upstreamTransportDialer(),
 		DisableCompression:    true,
 		ForceAttemptHTTP2:     true,
@@ -384,6 +482,7 @@ func newUpstreamClient(cfg Config, upstream UpstreamConfig, index int, logger *L
 		}
 	}
 
+	streamTransport := deriveStreamTransport(transport)
 	return &UpstreamClient{
 		ID:             upstream.ID,
 		ServerIndex:    index,
@@ -398,10 +497,13 @@ func newUpstreamClient(cfg Config, upstream UpstreamConfig, index int, logger *L
 			Timeout:       time.Duration(timeouts.API) * time.Millisecond,
 			CheckRedirect: redirectPolicy(upstream.FollowRedirects),
 		},
-		transport:    transport,
-		logger:       logger,
-		timeouts:     timeouts,
-		streamHealth: streamHealth,
+		transport:        transport,
+		streamTransport:  streamTransport,
+		streamHTTPClient: newStreamHTTPClient(streamTransport, upstream.FollowRedirects),
+		streamFor:        transport,
+		logger:           logger,
+		timeouts:         timeouts,
+		streamHealth:     streamHealth,
 	}
 }
 
@@ -719,22 +821,25 @@ func (c *UpstreamClient) snapshot() UpstreamClient {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return UpstreamClient{
-		ID:             c.ID,
-		ServerIndex:    c.ServerIndex,
-		Name:           c.Name,
-		BaseURL:        c.BaseURL,
-		StreamBaseURL:  c.StreamBaseURL,
-		StreamBaseURLs: append([]string(nil), c.StreamBaseURLs...),
-		Online:         c.Online,
-		UserID:         c.UserID,
-		AccessToken:    c.AccessToken,
-		LastError:      c.LastError,
-		Config:         c.Config,
-		serverKey:      c.serverKey,
-		httpClient:     c.httpClient,
-		transport:      c.transport,
-		logger:         c.logger,
-		timeouts:       c.timeouts,
+		ID:               c.ID,
+		ServerIndex:      c.ServerIndex,
+		Name:             c.Name,
+		BaseURL:          c.BaseURL,
+		StreamBaseURL:    c.StreamBaseURL,
+		StreamBaseURLs:   append([]string(nil), c.StreamBaseURLs...),
+		Online:           c.Online,
+		UserID:           c.UserID,
+		AccessToken:      c.AccessToken,
+		LastError:        c.LastError,
+		Config:           c.Config,
+		serverKey:        c.serverKey,
+		httpClient:       c.httpClient,
+		transport:        c.transport,
+		streamHTTPClient: c.streamHTTPClient,
+		streamTransport:  c.streamTransport,
+		streamFor:        c.streamFor,
+		logger:           c.logger,
+		timeouts:         c.timeouts,
 	}
 }
 
@@ -890,6 +995,7 @@ func (c *UpstreamClient) validateAPIKey(ctx context.Context, reqCtx *RequestCont
 
 func (c *UpstreamClient) setOnline(token, userID string) {
 	defer c.notifyCountsState()
+	defer c.notifyUserIDChanged()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.retired {
@@ -1228,10 +1334,14 @@ func (c *UpstreamClient) doRequestOnce(ctx context.Context, reqCtx *RequestConte
 	if stream {
 		// Timeout stays 0 on purpose: a stream is supposed to stay open for the length of a
 		// film, and the overall deadline would cut long playback short. What is bounded is
-		// the wait for response headers (transport-level, see upstreamHeaderTimeout)
+		// the wait for response headers (stream transport, see streamHeaderTimeout)
 		// and the request's own lifetime — the request carries the client's context, so a
 		// client that goes away takes the upstream call with it.
-		client = &http.Client{Transport: c.transport, Timeout: 0, CheckRedirect: redirectPolicy(c.Config.FollowRedirects)}
+		if c.streamHTTPClient != nil && c.streamFor == c.transport {
+			client = c.streamHTTPClient
+		} else {
+			client = newStreamHTTPClient(c.transport, c.Config.FollowRedirects)
+		}
 	}
 	// Lifecycle diagnostics retain only the fixed route, never the upstream
 	// host, URL, query, or raw transport cause. Handler-level redaction alone

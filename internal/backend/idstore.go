@@ -95,6 +95,8 @@ func NewIDStore(dataDir string, logger *Logger, upstreamIDs ...string) (*IDStore
 	}
 	if err := db.exec(`
         PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA temp_store = MEMORY;
         CREATE TABLE IF NOT EXISTS id_mappings (
             virtual_id TEXT PRIMARY KEY,
             original_id TEXT NOT NULL,
@@ -214,12 +216,24 @@ func (s *IDStore) GetOrCreateVirtualID(originalID, serverID string) string {
 	if originalID == "" {
 		return originalID
 	}
+	key := compositeKey(originalID, serverID)
+	// Fast path: the mapping already exists, so a shared read lock suffices.
+	s.mu.RLock()
+	if s.configuredSources != nil && !s.configuredSources[serverID] {
+		s.mu.RUnlock()
+		return ""
+	}
+	if existing, ok := s.originalToVirtual[key]; ok {
+		s.mu.RUnlock()
+		return existing
+	}
+	s.mu.RUnlock()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.configuredSources != nil && !s.configuredSources[serverID] {
 		return ""
 	}
-	key := compositeKey(originalID, serverID)
 	if existing, ok := s.originalToVirtual[key]; ok {
 		return existing
 	}

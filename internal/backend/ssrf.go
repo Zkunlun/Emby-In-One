@@ -78,17 +78,34 @@ func (p ssrfPolicy) resolveTarget(ctx context.Context, addr string) ([]net.IPAdd
 	return ips, nil
 }
 
-// validatingDialer checks the destination against the policy and then dials the
-// original address, so net.Dialer keeps trying every resolved address instead of
-// being pinned to the first one.
+// validatingDialer checks every resolved address against the policy and then
+// dials the validated addresses in order, so the destination that was checked
+// is exactly the destination that is connected to (no second DNS lookup) while
+// still falling back to later addresses when earlier ones are unreachable.
 func validatingDialer(policy ssrfPolicy) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	// Matches the connect/keep-alive timeouts of http.DefaultTransport.
 	base := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		if _, err := policy.resolveTarget(ctx, addr); err != nil {
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("ssrf check: invalid address %q", addr)
+		}
+		ips, err := policy.resolveTarget(ctx, addr)
+		if err != nil {
 			return nil, err
 		}
-		return base.DialContext(ctx, network, addr)
+		var lastErr error
+		for _, ip := range ips {
+			conn, dialErr := base.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+			if dialErr == nil {
+				return conn, nil
+			}
+			lastErr = dialErr
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		return nil, lastErr
 	}
 }
 

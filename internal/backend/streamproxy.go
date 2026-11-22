@@ -35,6 +35,14 @@ func streamBusinessPath(p string) (string, bool) {
 // by this proxy; it is passed through with upstream credentials stripped rather
 // than rewritten into a URL that could not work.
 func RewriteM3U8ForItem(content, upstreamBase, proxyItemID, proxyToken string) string {
+	return RewriteM3U8ForItemWithSource(content, upstreamBase, proxyItemID, proxyToken, "")
+}
+
+// RewriteM3U8ForItemWithSource is RewriteM3U8ForItem in a single pass over the
+// manifest. When qualifiedSource is non-empty every routed segment line is also
+// pinned to that (merge-qualified) MediaSourceId, which replaces the separate
+// second pass that used to re-split and re-parse every line.
+func RewriteM3U8ForItemWithSource(content, upstreamBase, proxyItemID, proxyToken, qualifiedSource string) string {
 	baseURL, baseErr := url.Parse(upstreamBase)
 	lines := strings.Split(content, "\n")
 	for i, line := range lines {
@@ -69,6 +77,10 @@ func RewriteM3U8ForItem(content, upstreamBase, proxyItemID, proxyToken string) s
 			params.Set("api_key", proxyToken)
 		}
 		rewritten := "/" + strings.Join(segments, "/")
+		if qualifiedSource != "" && (segments[0] == "Videos" || segments[0] == "Audio") {
+			lines[i] = qualifiedManifestLine(rewritten, params, qualifiedSource)
+			continue
+		}
 		if len(params) > 0 {
 			rewritten += "?" + params.Encode()
 		}
