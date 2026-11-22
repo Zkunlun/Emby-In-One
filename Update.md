@@ -1,5 +1,30 @@
 # Emby-In-One 更新日志
 
+## V1.4.19
+
+发布日期：以 GitHub Release 页面为准（V1.4.19）
+
+> 基于 V1.4.18，围绕首页海报墙图片加载、媒体库加载与 Proxy 模式起播速度实施 Go 源码层专项性能优化。严格保持零业务缓存、零外部依赖，不改变既有鉴权、隐藏库规则、Token 脱敏与 SSRF 安全边界。
+
+### 图片加载与客户端缓存优化
+
+- 透传客户端条件请求头 `If-None-Match` / `If-Modified-Since` 至上游，并单独处理 `304 Not Modified`（保留 `ETag`、`Last-Modified`、`Expires` 与正常 `Cache-Control`，不再误写 `no-store` 或响应体）。
+- 规范化图片 `Cache-Control`：带 `tag` 参数的内容寻址图片下发 `public, max-age=2592000, immutable`（30 天），无 `tag` 图片保持 `public, max-age=86400`，确保 SenPlayer、VividPlayer、Hills 等客户端本地海报缓存生效。
+- 新增纯标准库在途图片请求合并（Singleflight，请求结束即释放、零缓存留存），严格在鉴权通过后生效，带条件头与 `HEAD` 请求旁路，使用 `context.WithoutCancel` 隔离并发取消；修复 `HEAD` 请求不再强转 `GET` 拉取响应体，消除已认证请求重复查询 `IDStore`，并引入 32KB `sync.Pool` 缓冲池。
+
+### 底层连接池、媒体库加载与起播链路优化
+
+- 调大上游 `http.Transport` 连接池至 `MaxIdleConns: 256`、`MaxIdleConnsPerHost: 64`、`ReadBufferSize/WriteBufferSize: 64KB`；`validatingDialer` 校验后直接对已解析 IP 拨号，消除冷建连二次 DNS 查询；`UpstreamClient` 预建复用 `streamHTTPClient`；`UpstreamPool` 维护只读原子快照消除每请求 `Clients()` 深拷贝锁风暴。
+- `IDStore.GetOrCreateVirtualID` 改为 `RLock` 快路径 + `Lock` 双检，初始化增加 SQLite `PRAGMA synchronous = NORMAL` 与 `temp_store = MEMORY`；移除 `handleUserViews` 冗余 `deepCloneMap` 并修复 `aggregation.go` 定时器释放。
+- `PlaybackInfo` 放开 4 worker 并发上限并在首个有效源返回后启用 500ms 宽限期早退，POST 顶层浅拷贝替代对 `DeviceProfile` 的 JSON 深拷贝；流代理新增 `15s` `ResponseHeaderTimeout`、128KB `sync.Pool` 缓冲池与首包 `Flush()`，并合并 HLS `m3u8` 为单遍重写。
+
+### 回归测试与实机验收
+
+- 新增 7 项定向单元测试（覆盖图片 `tag`/无 `tag` 缓存头、`304` 透传、`HEAD`、Singleflight 合并与取消隔离、`IDStore` 并发读写、`PlaybackInfo` 早退、单遍 `m3u8` 重写）。
+- 本地 `go vet ./...` 与定向回归测试全绿；GitHub Actions CI（`Go build, vet and test`、`Admin panel assets`、`Shell scripts`）全绿通过；DMIT 生产环境实机部署并通过 SenPlayer、VividPlayer、Hills 三端验收。
+
+---
+
 ## V1.4.18
 
 发布日期：以 GitHub Release 页面为准（V1.4.18）
