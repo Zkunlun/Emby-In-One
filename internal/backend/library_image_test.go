@@ -586,3 +586,46 @@ func TestHandleItemImageFallbackSingleflightCoalescesRecovered200(t *testing.T) 
 		}
 	})
 }
+
+func TestHandleItemImageFallbackOnPrimary400And403(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden} {
+		status := status
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-a", "User": map[string]any{"Id": "user-a"}})
+					return
+				}
+				w.WriteHeader(status)
+			}))
+			defer primary.Close()
+
+			secondary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+					_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-b", "User": map[string]any{"Id": "user-b"}})
+				case r.Method == http.MethodGet && r.URL.Path == "/Items/item-b/Images/Primary":
+					w.Header().Set("Content-Type", "image/jpeg")
+					_, _ = w.Write([]byte("recovered-poster"))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer secondary.Close()
+
+			config := fmt.Sprintf("server:\n  port: 8096\n  name: \"Test Server\"\n  id: \"server-1\"\n\nadmin:\n  username: \"admin\"\n  password: \"secret\"\n\nplayback:\n  mode: \"proxy\"\n\ntimeouts:\n  api: 30000\n  global: 15000\n  login: 10000\n  healthCheck: 10000\n  healthInterval: 60000\n\nproxies: []\nupstream:\n  - name: \"A\"\n    url: %q\n    username: \"u1\"\n    password: \"p1\"\n  - name: \"B\"\n    url: %q\n    username: \"u2\"\n    password: \"p2\"\n", primary.URL, secondary.URL)
+
+			withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+				virtualItem := app.IDStore.GetOrCreateVirtualID("item-a", app.Upstream.Clients()[0].ID)
+				app.IDStore.AssociateAdditionalInstance(virtualItem, "item-b", app.Upstream.Clients()[1].ID)
+
+				req := httptest.NewRequest(http.MethodGet, "/emby/Items/"+virtualItem+"/Images/Primary", nil)
+				rr := httptest.NewRecorder()
+				handler.ServeHTTP(rr, req)
+				if rr.Code != http.StatusOK || rr.Body.String() != "recovered-poster" {
+					t.Fatalf("status=%d body=%q, want 200 recovered-poster", rr.Code, rr.Body.String())
+				}
+			})
+		})
+	}
+}

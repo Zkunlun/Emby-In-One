@@ -616,7 +616,7 @@ func (a *App) collectImageCandidates(reqCtx *RequestContext, resolved *routeReso
 }
 
 func shouldFallbackImageStatus(statusCode int) bool {
-	return statusCode == http.StatusNotFound || statusCode >= http.StatusInternalServerError
+	return statusCode >= http.StatusBadRequest
 }
 
 func (a *App) fetchItemImageWithFallback(ctx context.Context, reqCtx *RequestContext, method string, candidates []seriesInstance, imageType, imageIndex string, imageQuery url.Values, extraHeaders http.Header) (*http.Response, error) {
