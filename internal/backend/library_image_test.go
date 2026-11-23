@@ -203,7 +203,7 @@ func TestShowsEpisodesAcceptsSeasonIDQueryCaseVariants(t *testing.T) {
 				if got := forwarded.Get("UserId"); got != "user-a" {
 					t.Errorf("upstream UserId = %q, want user-a", got)
 				}
-				if got := forwarded.Get("Fields"); got != "Overview,PremiereDate,PrimaryImageAspectRatio,ProviderIds" {
+				if got := forwarded.Get("Fields"); got != "Overview,PremiereDate,PrimaryImageAspectRatio,ProviderIds,MediaSources" {
 					t.Errorf("upstream Fields = %q", got)
 				}
 				// Task 4 filters visibility before the client page limit.
@@ -628,4 +628,136 @@ func TestHandleItemImageFallbackOnPrimary400And403(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestShowsEpisodesPreservesMediaSourcesField(t *testing.T) {
+	var upstreamFields atomic.Value
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-a", "User": map[string]any{"Id": "user-a"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/Shows/series-a/Episodes":
+			upstreamFields.Store(r.URL.Query().Get("Fields"))
+			item := map[string]any{
+				"Id":                "ep-a1",
+				"Type":              "Episode",
+				"SeriesId":          "series-a",
+				"ParentId":          "season-a1",
+				"ParentIndexNumber": 1,
+				"IndexNumber":       1,
+				"Name":              "Episode 1",
+			}
+			if queryHasField(r.URL.Query(), "MediaSources") {
+				item["MediaSources"] = []any{map[string]any{"Id": "ep-a1-source", "RunTimeTicks": 1000}}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{item}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer primary.Close()
+
+	config := fmt.Sprintf("server:\n  port: 8096\n  name: \"Test Server\"\n  id: \"server-1\"\n\nadmin:\n  username: \"admin\"\n  password: \"secret\"\n\nplayback:\n  mode: \"proxy\"\n\ntimeouts:\n  api: 30000\n  global: 15000\n  login: 10000\n  healthCheck: 10000\n  healthInterval: 60000\n\nproxies: []\nupstream:\n  - name: \"A\"\n    url: %q\n    username: \"u1\"\n    password: \"p1\"\n", primary.URL)
+
+	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		token := loginToken(t, handler, "secret")
+		virtualSeries := app.IDStore.GetOrCreateVirtualID("series-a", app.Upstream.Clients()[0].ID)
+
+		rr := doJSONRequest(t, handler, http.MethodGet, "/Shows/"+virtualSeries+"/Episodes?UserId=admin&Fields=Overview,MediaSources,PremiereDate,PrimaryImageAspectRatio", nil, token)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("episodes status = %d, body=%s", rr.Code, rr.Body.String())
+		}
+		gotFields, _ := upstreamFields.Load().(string)
+		q := url.Values{"Fields": []string{gotFields}}
+		if !queryHasField(q, "MediaSources") || !queryHasField(q, "ProviderIds") {
+			t.Fatalf("upstream Fields = %q, want both MediaSources and ProviderIds", gotFields)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("unmarshal episodes: %v", err)
+		}
+		items, _ := payload["Items"].([]any)
+		if len(items) != 1 {
+			t.Fatalf("episode count = %d, want 1 payload=%#v", len(items), payload)
+		}
+		ep, _ := items[0].(map[string]any)
+		sources, _ := ep["MediaSources"].([]any)
+		if len(sources) == 0 {
+			t.Fatalf("expected MediaSources in episode response, got %#v", ep)
+		}
+		if loc, _ := ep["LocationType"].(string); strings.EqualFold(loc, "Virtual") {
+			t.Fatalf("unexpected LocationType=Virtual in episode response: %#v", ep)
+		}
+	})
+}
+
+func TestHydrateMergeResultsDoesNotOverwriteWithVirtualLocationType(t *testing.T) {
+	var hydratedCalls atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/Users/AuthenticateByName":
+			_ = json.NewEncoder(w).Encode(map[string]any{"AccessToken": "token-a", "User": map[string]any{"Id": "user-a"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/Shows/series-a/Episodes":
+			_ = json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{
+				{
+					"Id":                "ep-a1",
+					"Type":              "Episode",
+					"SeriesId":          "series-a",
+					"ParentId":          "season-a1",
+					"ParentIndexNumber": 1,
+					"IndexNumber":       1,
+					"Name":              "Episode 1",
+					"LocationType":      "FileSystem",
+				},
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/Items":
+			if strings.Contains(r.URL.Query().Get("Ids"), "ep-a1") {
+				hydratedCalls.Add(1)
+				_ = json.NewEncoder(w).Encode(map[string]any{"Items": []map[string]any{
+					{
+						"Id":           "ep-a1",
+						"Type":         "Episode",
+						"SeriesId":     "series-a",
+						"LocationType": "Virtual",
+						"MediaSources": []any{map[string]any{"Id": "ep-a1-hydrated", "RunTimeTicks": 1234}},
+					},
+				}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"Items": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer primary.Close()
+
+	config := fmt.Sprintf("server:\n  port: 8096\n  name: \"Test Server\"\n  id: \"server-1\"\n\nadmin:\n  username: \"admin\"\n  password: \"secret\"\n\nplayback:\n  mode: \"proxy\"\n\ntimeouts:\n  api: 30000\n  global: 15000\n  login: 10000\n  healthCheck: 10000\n  healthInterval: 60000\n\nproxies: []\nupstream:\n  - name: \"A\"\n    url: %q\n    username: \"u1\"\n    password: \"p1\"\n", primary.URL)
+
+	withTempAppConfig(t, config, func(app *App, handler http.Handler) {
+		token := loginToken(t, handler, "secret")
+		virtualSeries := app.IDStore.GetOrCreateVirtualID("series-a", app.Upstream.Clients()[0].ID)
+
+		rr := doJSONRequest(t, handler, http.MethodGet, "/Shows/"+virtualSeries+"/Episodes?UserId=admin&Fields=Overview", nil, token)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("episodes status = %d, body=%s", rr.Code, rr.Body.String())
+		}
+		if hydratedCalls.Load() == 0 {
+			t.Fatalf("expected hydrateMergeResults to call /Items?Ids=ep-a1")
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("unmarshal episodes: %v", err)
+		}
+		items, _ := payload["Items"].([]any)
+		if len(items) != 1 {
+			t.Fatalf("episode count = %d, want 1 payload=%#v", len(items), payload)
+		}
+		ep, _ := items[0].(map[string]any)
+		if loc, _ := ep["LocationType"].(string); strings.EqualFold(loc, "Virtual") {
+			t.Fatalf("hydrateMergeResults overwrote LocationType with Virtual: %#v", ep)
+		}
+		if loc, _ := ep["LocationType"].(string); loc != "FileSystem" {
+			t.Fatalf("LocationType = %q, want FileSystem", loc)
+		}
+	})
 }

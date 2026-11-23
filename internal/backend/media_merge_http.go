@@ -175,6 +175,13 @@ func (a *App) hydrateMergeResults(r *http.Request, results []upstreamItemsResult
 					continue
 				}
 				for key, value := range data {
+					if strings.EqualFold(key, "LocationType") {
+						incomingLoc, _ := value.(string)
+						existingLoc, _ := item["LocationType"].(string)
+						if strings.EqualFold(incomingLoc, "Virtual") && !strings.EqualFold(existingLoc, "Virtual") {
+							continue
+						}
+					}
 					item[key] = value
 				}
 				result.CompleteItems[id] = true

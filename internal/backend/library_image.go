@@ -133,6 +133,22 @@ func (a *App) handleShowsEpisodes(w http.ResponseWriter, r *http.Request) {
 	a.handleMergeShows(w, r, "Episode", "Episodes")
 }
 
+func queryHasField(query url.Values, target string) bool {
+	for key, values := range query {
+		if !strings.EqualFold(key, "Fields") {
+			continue
+		}
+		for _, value := range values {
+			for _, raw := range strings.Split(value, ",") {
+				if strings.EqualFold(strings.TrimSpace(raw), target) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, endpoint string) {
 	resolved, ok := a.resolveRequestRouteID(w, r, r.PathValue("seriesId"))
 	if !ok {
@@ -153,6 +169,13 @@ func (a *App) handleMergeShows(w http.ResponseWriter, r *http.Request, kind, end
 		requestMergedCandidateSet(queryTemplate)
 	}
 	full := requestMergeFields(queryTemplate)
+	if strings.EqualFold(endpoint, "Episodes") && queryHasField(r.URL.Query(), "MediaSources") && !queryHasField(queryTemplate, "MediaSources") {
+		if current := strings.TrimSpace(queryTemplate.Get("Fields")); current != "" {
+			queryTemplate.Set("Fields", current+",MediaSources")
+		} else {
+			queryTemplate.Set("Fields", "MediaSources")
+		}
+	}
 	seasonID := firstQueryValue(queryTemplate, "SeasonId", "seasonId", "seasonid")
 	if seasonID != "" {
 		season, valid := a.resolveRequestRouteID(w, r, seasonID)
